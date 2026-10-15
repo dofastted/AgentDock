@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/magpie-extension-points.md", "reason": "Exact engine extension points for G1-G5, plugin registration rules, data dir, importers, branding"}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/magpie-engine.md", "reason": "Magpie architecture: gateway, routing, WSL twins, storage, sidecar build"}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/magpie-api-and-ui.md", "reason": "/api auth/same-origin constraints and WSL twin representation"}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/cc-switch-shell-extraction.md", "reason": "Line ranges of cc-switch Tauri shell pieces to extract"}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/cc-switch-architecture.md", "reason": "cc-switch rebrand surface, WSL atomic-write notes, plugin/Cargo setup"}

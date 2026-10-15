@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/magpie-extension-points.md", "reason": "Verify upstream test rules (TestPluginsImportOnlyCore, TestBuiltinClientsLoaded) and minimal-diff edits"}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/magpie-api-and-ui.md", "reason": "Check same-origin/cookie guards remain intact and WSL behavior matches"}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/research/cc-switch-shell-extraction.md", "reason": "Check shell keeps only intended plugins and no cc-switch branding"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Shell↔engine↔WSL boundary review"}
