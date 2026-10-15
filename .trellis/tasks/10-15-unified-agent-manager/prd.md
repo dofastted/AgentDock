@@ -48,7 +48,7 @@
 - [x] AC7（R7）……*已验证：`wslconfig_test.go`（6 种布局/编码、无需改动、回滚、旧 Windows）；UI 中关机前列出 `Debian, docker-desktop`，并需要二次确认（已在浏览器中点到确认框后取消，本机未执行关机）。*
 - [x] AC8（R8）……*已验证：WSL magpie 导入已在真实引擎上导入 3 个 provider；`import_test.go` 覆盖 id 冲突时改名为 `-wsl`、重复导入不新增、本地文件不可读时不覆盖。cc-switch：`/api/importapps` 在真实数据上发现 `C:\Users\Administrator\.cc-switch\cc-switch.db`，含 26 个 provider；是否实际导入由用户在 UI 中决定。*
 - [x] AC9（R9）……*已验证：本机 Docker 中的 magpie 容器占用 :3425 并对未带 key 的请求返回 401；已安装的 AgentDock 返回 `heldElsewhere=true`，页面给出提示，且没有结束该容器；有回归测试 `TestEnvironmentGatewayHeldElsewhere`。*
-- [x] AC10 ……*已验证：Windows 全量 `go test -tags nogui ./...` 与上游原版对比，没有新增失败包或测试；唯一差异 `TestFXStateDoesNotWait` 在第一次基线中就失败过，单独运行 5/5 通过（计时受负载影响）；上游原本失败的包（cli、gateway）保持不变。`cargo clippy -D warnings`、`cargo fmt --check` 通过；`cargo test` 在 lib 测试 harness 上因缺少 Common Controls manifest 失败（STATUS_ENTRYPOINT_NOT_FOUND），属已知 Tauri Windows 测试限制。*
+- [x] AC10 ……*已验证：Windows 全量 `go test -tags nogui ./...` 与上游原版对比，没有新增失败包或测试；唯一差异 `TestFXStateDoesNotWait` 在第一次基线中就失败过，单独运行 5/5 通过（计时受负载影响）；上游原本失败的包（cli、gateway）保持不变。外壳：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、`cargo test`（3 passed）均通过。`cargo test` 原先失败有两个原因：一是 GNU 链接 cdylib 时导出序号溢出，现在只保留 `crate-type = ["rlib"]`；二是测试程序没有 Common Controls v6 manifest（STATUS_ENTRYPOINT_NOT_FOUND），现在关闭 tauri-build 自带的 manifest，由 `build.rs` 把同一份 manifest 链接进所有目标，每个二进制恰好 1 份。去掉这份 manifest 后测试会重新报 STATUS_ENTRYPOINT_NOT_FOUND，说明修复确实生效。*
 
 ## Out of Scope
 
