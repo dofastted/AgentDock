@@ -1,0 +1,121 @@
+name: Release
+
+# Pushing a v* tag hands off to yetone/magpie-releases, which builds, signs,
+# notarises and publishes magpie there; that repo is where people download
+# from, and the signing secrets live only there. Once its release has every
+# asset, the same release is copied here, so this repo's Releases page has
+# the installers too (PapainTea on X). Self-update, install.sh and the site
+# still read magpie-releases only.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0 — no v prefix; the v tag must exist)'
+        required: true
+        type: string
+
+jobs:
+  trigger-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      ref: ${{ steps.version.outputs.ref }}
+
+    steps:
+      - name: Get version
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            REF="$GITHUB_REF_NAME"
+            VERSION="${REF#v}"
+          else
+            VERSION="$INPUT_VERSION"
+            REF="v$INPUT_VERSION"
+          fi
+          # a newline or quote would add outputs or break the JSON below
+          [[ "$VERSION" =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || { echo "bad version: $VERSION" >&2; exit 1; }
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "Triggering release for version: $VERSION (ref: $REF)"
+
+      - name: Trigger release workflow in magpie-releases
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          # PAT with contents write on yetone/magpie-releases.
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
+          repository: yetone/magpie-releases
+          event-type: release
+          client-payload: '{"ref": "${{ steps.version.outputs.ref }}", "version": "${{ steps.version.outputs.version }}"}'
+
+      - name: Output status
+        run: echo "Watch the build at https://github.com/yetone/magpie-releases/actions"
+
+  mirror-release:
+    needs: trigger-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: write
+      issues: write # to say a release went out without Chinese notes
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REF: ${{ needs.trigger-release.outputs.ref }}
+      ASSETS: 16 # what every release carries; a smaller count is still uploading
+    steps:
+      - name: Wait for magpie-releases to publish every asset
+        run: |
+          for i in $(seq 1 120); do
+            n=$(gh release view "$REF" -R yetone/magpie-releases --json assets -q '.assets | length' 2>/dev/null || echo 0)
+            echo "attempt $i: $n of $ASSETS assets"
+            [ "$n" -ge "$ASSETS" ] && exit 0
+            sleep 30
+          done
+          echo "magpie-releases never published $REF with $ASSETS assets" >&2
+          exit 1
+
+      - name: Copy the release here
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$REF" -R yetone/magpie-releases -D dist
+          gh release view "$REF" -R yetone/magpie-releases --json body -q .body > notes.md
+          printf '\n\n---\nThe same release, and the feed magpie updates from: https://github.com/yetone/magpie-releases/releases/tag/%s\n' "$REF" >> notes.md
+          if gh release view "$REF" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$REF" -R "$GITHUB_REPOSITORY" --notes-file notes.md
+            gh release upload "$REF" dist/* -R "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$REF" dist/* -R "$GITHUB_REPOSITORY" --verify-tag --title "magpie $REF" --notes-file notes.md
+          fi
+          n=$(gh release view "$REF" -R "$GITHUB_REPOSITORY" --json assets -q '.assets | length')
+          echo "$REF has $n assets here"
+          [ "$n" -ge "$ASSETS" ]
+
+      # The Chinese notes are written by magpie-releases' DeepSeek call, and
+      # when that call fails the release goes out in English alone: a spent
+      # balance did so for v0.1.1233 to v0.1.1242, and Chinese apps showed
+      # English for a day until a user said so (#2122). Its warning is in a
+      # log nobody reads, so a release without them is said here, on one
+      # open issue, where the notes get added by hand.
+      - name: Say when the notes have no Chinese
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if grep -qF '<!-- lang:zh -->' notes.md; then
+            echo "$REF has Chinese notes"
+            exit 0
+          fi
+          title="Release notes without Chinese"
+          msg="$REF went out with English notes alone: magpie-releases' release run got no Chinese from DeepSeek. Its reason is the \`DeepSeek wrote no Chinese notes\` warning in that run's Generate changelog step (https://github.com/yetone/magpie-releases/actions). Until the Chinese is added below a \`<!-- lang:zh -->\` marker, in the release on yetone/magpie-releases and here, apps set to Chinese show its notes in English (#2122)."
+          n=$(gh issue list --state open --search "\"$title\" in:title" --json number,title -q ".[] | select(.title == \"$title\") | .number" | head -1) || n=""
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "$msg" || echo "::warning::could not comment on #$n: $msg"
+          else
+            gh issue create --title "$title" --body "$msg" || echo "::warning::could not file an issue: $msg"
+          fi
