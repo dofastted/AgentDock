@@ -44,14 +44,14 @@ func TestBuiltinSwitch(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)
 		}
-		if len(out) != 14 {
+		if len(out) != 15 {
 			t.Fatalf("the built-ins: %+v", out)
 		}
 		for _, b := range out {
-			// the Gateway, Routing and Usage pages, the routing strategies,
-			// the gateway middleware, privacy masking, web search, key
-			// limits and plugin tools are essential: on in every preset
-			if b.On != (b.ID == "budget" || b.ID == "library" || b.ID == "gateway" || b.ID == "middleware" || b.ID == "redact" || b.ID == "rotation" || b.ID == "routing" || b.ID == "search" || b.ID == "tools" || b.ID == "usage") || b.On != (b.State == pluginrt.Active) {
+			// the Gateway, Routing, Usage and Environments pages, the routing
+			// strategies, the gateway middleware, privacy masking, web search,
+			// key limits and plugin tools are essential: on in every preset
+			if b.On != (b.ID == "budget" || b.ID == "environments" || b.ID == "library" || b.ID == "gateway" || b.ID == "middleware" || b.ID == "redact" || b.ID == "rotation" || b.ID == "routing" || b.ID == "search" || b.ID == "tools" || b.ID == "usage") || b.On != (b.State == pluginrt.Active) {
 				t.Fatalf("after library on: %+v", out)
 			}
 		}

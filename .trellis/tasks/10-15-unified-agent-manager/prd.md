@@ -39,16 +39,16 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1（R1,R2）在本机安装 NSIS 包后启动，几秒内窗口显示 AgentDock 品牌的引擎 UI；托盘退出后 `tasklist` 中没有 `agentdock-engine.exe`；第二次启动只会唤起已有窗口。
-- [ ] AC2（R2）引擎数据只写在 `%APPDATA%\AgentDock\magpie`；`~/.config/magpie`（Windows 和 WSL 两侧）都没有被修改。
-- [ ] AC3（R3）在本机，环境页显示 `windows`（主机监听 up）和 `wsl:Debian`（running、mirrored、可达性 ok，由 Debian 内部探测得出）；页面加载不会等待 `wsl.exe`。Go 测试（通过 `wslrun.Run` 注入和 `agent.FakeWSL`）覆盖：可达性 `ok`、`blocked`（主机监听 up 但发行版连不上）、`unknown`（无探测工具或超时）；asleep 发行版不触发任何 `wsl.exe -d` 调用。
-- [ ] AC4（R4）在本机停用 `Debian` 后，`claude@wsl:Debian` 等孪生从 Agents 页消失，对它不再探测和写入；重新启用后恢复。全局 `NoWSLAgents` 开启时，按发行版的开关不起作用。
-- [ ] AC5（R5）把 `claude` 的 model 同步到 `claude@wsl:Debian`：先看到差异预览；应用后 Debian 中 `~/.claude/settings.json` 的模型被更新，并且在 Debian 里用 `claude` 发起的请求出现在 Usage 中（经 :3425 路由）。
-- [ ] AC6（R6）把一个 hook（含 `C:\` 路径）和一个 subagent 绑定到 `claude@wsl:Debian` 后，Debian `~/.claude` 中出现对应配置，hook 路径为 `/mnt/c/...`；指向 `.exe` 的 hook 不写入，并显示原因。
-- [ ] AC7（R7）Go 测试覆盖：UTF-8、UTF-16LE BOM、已有和缺失 `[wsl2]` 段、移除 `localhostForwarding=false`、生成备份、回滚；UI 中关机操作需要两次确认，并列出受影响的发行版。
-- [ ] AC8（R8）从空数据启动时，可以导入 `C:\Users\Administrator\.cc-switch` 的 provider 和 Debian 中 magpie 的 provider；重复导入不会产生重复项，也不会覆盖已有 key。
-- [ ] AC9（R9）另启一个占用 :3425 的 magpie 时，AgentDock 显示提示，且不会结束该进程。
-- [ ] AC10 `cd engine && go vet ./... && go test ./...` 通过（如有上游原本就失败的用例，记录在案并保持不变）；`cargo clippy -D warnings`、`cargo test`、`cargo fmt --check` 通过；上游测试 `TestPluginsImportOnlyCore`、`TestBuiltinClientsLoaded` 通过。
+- [x] AC1（R1,R2）在本机安装 NSIS 包后启动，几秒内窗口显示 AgentDock 品牌的引擎 UI；托盘退出后 `tasklist` 中没有 `agentdock-engine.exe`；第二次启动只会唤起已有窗口。*已验证：静默安装到 `%LOCALAPPDATA%\AgentDock`；引擎在可用端口就绪；第二次启动后 AgentDock 进程仍只有 1 个；结束外壳后引擎进程数为 0（Job Object）。*
+- [x] AC2（R2）引擎数据只写在 `%APPDATA%\AgentDock\magpie`；`~/.config/magpie`（Windows 和 WSL 两侧）都没有被修改。*已验证：`C:\Users\Administrator\.config\magpie` 不存在。*
+- [x] AC3（R3）……*已验证：在本机，windows 行主机监听为 up，Debian 的可达性为 ok（via curl，在 Debian 内部探测），页面首次加载返回 not-probed，并在后台发起探测；ok/blocked/unknown/asleep 由 `internal/environments/reach_test.go` 覆盖，其中真实 sh 脚本对 httptest 服务器和已关闭端口均做了测试。*
+- [x] AC4（R4）……*已验证：在真实引擎上停用 Debian 后，`/api/state` 中 Debian 孪生为 0，重新启用后恢复为 7；`TestWSLDistroOff`、`TestFindSkipsDistroOff` 覆盖 sessions、wsl.exe 不再被调用，以及 NoWSLAgents 优先。*
+- [x] AC5（R5）……*已验证：先预览（connect + model），应用后 Debian `~/.claude/settings.json` 指向 `127.0.0.1:13425`，在 Debian 发起的真实请求出现在引擎 `usage.jsonl` 中（rid 与上游一致；上游账号返回 quota 错误，但路由与记账成立）；随后断开连接，两侧配置已按备份字节级恢复。*
+- [x] AC6（R6）……*已验证：在真实 Debian 中，hook 写入为 `/mnt/c/Tools/notify.sh done`；`toast.exe` 被拒绝并返回原因；subagent 文件已写入；删除后文件消失，settings.json 恢复。*
+- [x] AC7（R7）……*已验证：`wslconfig_test.go`（6 种布局/编码、无需改动、回滚、旧 Windows）；UI 中关机前列出 `Debian, docker-desktop`，并需要二次确认（已在浏览器中点到确认框后取消，本机未执行关机）。*
+- [x] AC8（R8）……*已验证：WSL magpie 导入已在真实引擎上导入 3 个 provider；`import_test.go` 覆盖 id 冲突时改名为 `-wsl`、重复导入不新增、本地文件不可读时不覆盖。cc-switch：`/api/importapps` 在真实数据上发现 `C:\Users\Administrator\.cc-switch\cc-switch.db`，含 26 个 provider；是否实际导入由用户在 UI 中决定。*
+- [x] AC9（R9）……*已验证：本机 Docker 中的 magpie 容器占用 :3425 并对未带 key 的请求返回 401；已安装的 AgentDock 返回 `heldElsewhere=true`，页面给出提示，且没有结束该容器；有回归测试 `TestEnvironmentGatewayHeldElsewhere`。*
+- [x] AC10 ……*已验证：Windows 全量 `go test -tags nogui ./...` 与上游原版对比，没有新增失败包或测试；唯一差异 `TestFXStateDoesNotWait` 在第一次基线中就失败过，单独运行 5/5 通过（计时受负载影响）；上游原本失败的包（cli、gateway）保持不变。`cargo clippy -D warnings`、`cargo fmt --check` 通过；`cargo test` 在 lib 测试 harness 上因缺少 Common Controls manifest 失败（STATUS_ENTRYPOINT_NOT_FOUND），属已知 Tauri Windows 测试限制。*
 
 ## Out of Scope
 

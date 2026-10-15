@@ -936,6 +936,7 @@ var wslRoot = func(name string) string {
 func wslStatePath() string { return filepath.Join(filepath.Dir(provider.Path()), "wsl.json") }
 
 func wslDistros() []distro {
+	set := settings.Load()
 	wsl.Lock()
 	defer wsl.Unlock()
 	if wsl.seen == nil {
@@ -955,6 +956,11 @@ func wslDistros() []distro {
 	var out []distro
 	for _, n := range wsl.names {
 		installed[n] = true
+		// a distro turned off is neither probed nor listed; what was seen
+		// of it is kept for when it is turned on again
+		if set.WSLDistroOff(n) {
+			continue
+		}
 		// a distro that stopped is probed again once it runs: WSL may have
 		// been restarted meanwhile in another networking mode
 		if !wsl.running[n] {
@@ -1072,9 +1078,12 @@ func wslUp(distro string) bool {
 }
 
 // WSLRunning is whether the WSL distro runs now (wslUp); false off
-// Windows. What another package does in a distro on its own, rather than
-// at the user's asking, asks it first.
-func WSLRunning(distro string) bool { return wslLooks() && wslUp(distro) }
+// Windows, and for a distro turned off (WSLDistrosOff). What another
+// package does in a distro on its own, rather than at the user's asking,
+// asks it first.
+func WSLRunning(distro string) bool {
+	return wslLooks() && !settings.Load().WSLDistroOff(distro) && wslUp(distro)
+}
 
 // wslSave writes wsl.json if anything in it changed.
 func wslSave() {
@@ -1130,11 +1139,12 @@ func wslLastSeen(name, key string) string {
 // (wslRunningLocked) are asked — nothing is probed, and a stopped distro
 // is never opened.
 func wslClaudeStandIn(model string) string {
+	set := settings.Load()
 	wsl.Lock()
 	wslRunningLocked()
 	var ds []distro
 	for _, n := range wsl.names {
-		if d := wsl.seen[n]; d != nil && wsl.running[n] && wslKindOf("claude").found(*d) {
+		if d := wsl.seen[n]; d != nil && wsl.running[n] && !set.WSLDistroOff(n) && wslKindOf("claude").found(*d) {
 			ds = append(ds, *d)
 		}
 	}

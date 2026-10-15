@@ -1,0 +1,21 @@
+/* The Environments page (plugins/environments/client.js). State is a dot
+   and a word, never a colored stripe. */
+#view-environments .row-head { gap: 8px; }
+#view-environments .env-row { align-items: center; gap: 12px; }
+#view-environments .env-why { margin-top: 4px; color: var(--amber); }
+.env-pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--pill); color: var(--fg-2); font-size: 12px; white-space: nowrap; }
+.env-pill i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.env-pill.ok i { background: var(--green); }
+.env-pill.blocked i { background: var(--red); }
+.env-pill.unknown i { background: var(--amber); }
+.env-notice { margin: 0 0 10px; padding: 9px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; }
+.env-notice.warn { background: var(--amber-soft); color: var(--fg); }
+.env-notice.info { background: var(--accent-soft); color: var(--fg); }
+.env-chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.env-chips .chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--fg-2); }
+.env-chips .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--fg); }
+.env-acts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; padding: 8px 14px; }
+.env-plan { display: grid; gap: 8px; padding: 0 14px 12px; }
+.env-plan-target { padding: 8px 12px; border: 1px solid var(--line-2); border-radius: 10px; }
+.env-plan-target ul { margin: 6px 0 0; padding-left: 18px; color: var(--fg-2); font-size: 13px; }
+.env-plan .warn { color: var(--amber); }

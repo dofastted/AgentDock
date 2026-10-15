@@ -1128,6 +1128,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	gatewayFixRoutes(mux)
 	gatewayModeRoutes(mux)
 	builtinRoutes(mux)
+	environmentRoutes(mux)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		access.MigrateLegacyLANKeyBestEffort()
 		writeJSON(rw, settingsState())
@@ -1201,6 +1202,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
 		in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
 		in.DisabledModels = cur.DisabledModels             // set on their own (disabled-models below, #1867)
+		in.WSLDistrosOff = cur.WSLDistrosOff               // set on its own (/api/environments/{distro}/enabled)
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
 		in.QuotaReads = cur.QuotaReads // set on its own (quota-reads below)

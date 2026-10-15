@@ -331,3 +331,37 @@ func TestFindWithDetectionOff(t *testing.T) {
 		t.Fatalf("Find with detection on = %+v %v", tool, ok)
 	}
 }
+
+// A distro turned off (WSLDistrosOff) is passed over by Find: the command
+// is looked for in the running distros left, and one found in the distro
+// before it was turned off isn't given again.
+func TestFindSkipsDistroOff(t *testing.T) {
+	oldOn, oldRun := On, Run
+	t.Cleanup(func() { On, Run = oldOn, oldRun; Forget(); settings.Save(settings.Settings{}) })
+	On = true
+	Forget()
+	var asked []string
+	Run = func(_ time.Duration, args ...string) ([]byte, error) {
+		asked = append(asked, strings.Join(args, " "))
+		if strings.Join(args, " ") == "-l --running -q" || strings.Join(args, " ") == "-l -q" {
+			return utf16le("Debian\r\nUbuntu\r\n"), nil
+		}
+		return []byte("bin:/usr/bin/claude\nlpath:/usr/bin\n"), nil
+	}
+	if tool, ok := Find("claude"); !ok || tool.Distro != "Debian" {
+		t.Fatalf("Find with every distro on = %+v %v", tool, ok)
+	}
+	if err := settings.Save(settings.Settings{WSLDistrosOff: []string{"debian"}}); err != nil {
+		t.Fatal(err)
+	}
+	asked = nil
+	tool, ok := Find("claude")
+	if !ok || tool.Distro != "Ubuntu" {
+		t.Fatalf("Find with Debian off = %+v %v", tool, ok)
+	}
+	for _, a := range asked {
+		if strings.HasPrefix(a, "-d Debian ") {
+			t.Fatalf("a distro turned off was asked: %q", asked)
+		}
+	}
+}

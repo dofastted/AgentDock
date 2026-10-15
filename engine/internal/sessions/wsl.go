@@ -53,6 +53,13 @@ var WSLRunning func(distro string) bool
 // listed before.
 var WSLOff func() bool
 
+// WSLDistroOff is whether one distro is turned off (Settings'
+// WSLDistrosOff); set by internal/agent. Its sessions aren't listed, not
+// even those listed before it was turned off.
+var WSLDistroOff func(distro string) bool
+
+func wslDistroOff(distro string) bool { return WSLDistroOff != nil && WSLDistroOff(distro) }
+
 // wslLooking is whether the distros' sessions are listed.
 func wslLooking() bool { return WSLHomes != nil && (WSLOff == nil || !WSLOff()) }
 
@@ -188,6 +195,9 @@ func wslFiles(agents ...string) []file {
 	sort.Strings(names)
 	var out []file
 	for _, n := range names {
+		if wslDistroOff(n) {
+			continue
+		}
 		l := wslSess.lists[n]
 		cold := !l.Running || !up[n]
 		for _, e := range l.Files {

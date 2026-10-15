@@ -5,6 +5,8 @@
 const I18N = {
   zh: {
     "None": "无",
+    "Environments": "环境",
+    "This computer and each WSL distro: whether each reaches the gateway, which are on, and one agent's setup copied onto its twins": "本机和每个 WSL 发行版：各自能否连到网关、哪些已启用，以及把一个 Agent 的配置复制到它在其他环境的孪生上",
     "Prompt": "提示词",
     "Check again": "重新检测",
     "Manage": "管理",
@@ -3640,6 +3642,8 @@ const I18N = {
   },
   "zh-TW": {
     "None": "無",
+    "Environments": "環境",
+    "This computer and each WSL distro: whether each reaches the gateway, which are on, and one agent's setup copied onto its twins": "本機和每個 WSL 發行版：各自能否連到閘道、哪些已啟用，以及把一個 Agent 的設定複製到它在其他環境的分身上",
     "Prompt": "提示詞",
     "Check again": "重新檢測",
     "Codex thread descriptions": "Codex 對話描述",
@@ -7260,6 +7264,8 @@ const I18N = {
   },
   ja: {
     "None": "なし",
+    "Environments": "環境",
+    "This computer and each WSL distro: whether each reaches the gateway, which are on, and one agent's setup copied onto its twins": "このコンピューターと各 WSL ディストリビューション：それぞれゲートウェイに届くか、どれが有効か、そしてエージェントの設定を他の環境の同じエージェントへコピー",
     "Prompt": "プロンプト",
     "Check again": "再確認",
     "Manage": "管理",
@@ -10882,6 +10888,8 @@ const I18N = {
   },
   de: {
     "None": "Keine",
+    "Environments": "Umgebungen",
+    "This computer and each WSL distro: whether each reaches the gateway, which are on, and one agent's setup copied onto its twins": "Dieser Computer und jede WSL-Distribution: ob jede das Gateway erreicht, welche an sind, und die Einrichtung eines Agenten auf seine Zwillinge kopiert",
     "Prompt": "Prompt",
     "Check again": "Erneut prüfen",
     "Manage": "Verwalten",

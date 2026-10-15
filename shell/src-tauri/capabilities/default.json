@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Local splash window only; the engine UI is remote and has no IPC.",
+  "windows": ["main"],
+  "permissions": ["core:default", "log:default"]
+}

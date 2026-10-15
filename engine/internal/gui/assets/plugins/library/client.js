@@ -2256,9 +2256,9 @@ magpie.plugin("library", (ctx) => {
   // why a can't be given h, or ""
   const hookBlocked = (h) => (a) => {
     const ha = hookAgentOf(a.id);
-    if (!ha || ha.no) return ha?.wsl ? t("magpie gives hooks only to agents on this computer, not yet to {agent} in WSL", { agent: a.name }) : t("{agent} has no hooks magpie can write", { agent: a.name });
+    if (!ha || ha.no) return ha?.wsl ? ha.no : t("{agent} has no hooks magpie can write", { agent: a.name });
     const own = h.event?.includes(":") && h.event.split(":")[0];
-    if (own && own !== a.id) return t("{event} is {agent}'s own event: only it can run this hook", { event: h.event.slice(own.length + 1), agent: nameOf(own) });
+    if (own && own !== a.id.split("@")[0]) return t("{event} is {agent}'s own event: only it can run this hook", { event: h.event.slice(own.length + 1), agent: nameOf(own) });
     return "";
   };
   function hookEventLabel(h) {
@@ -2462,7 +2462,7 @@ magpie.plugin("library", (ctx) => {
   // why a can't be given a subagent, or ""
   const subagentBlocked = (a) => {
     const sa = subagentAgentOf(a.id);
-    if (!sa || sa.no) return sa?.wsl ? t("magpie gives subagents only to agents on this computer, not yet to {agent} in WSL", { agent: a.name }) : t("{agent} reads no subagents magpie can write", { agent: a.name });
+    if (!sa || sa.no) return sa?.wsl ? sa.no : t("{agent} reads no subagents magpie can write", { agent: a.name });
     return "";
   };
   // the agents of all that take what s binds, by kind: who can't bind them

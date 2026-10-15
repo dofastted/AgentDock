@@ -78,6 +78,10 @@ type hookSpec struct {
 	flat   bool              // Cursor: an entry is the command itself, not a group of them
 	ms     bool              // Gemini: timeouts in milliseconds
 	toml   bool              // Grok: hooks are [[hooks.<Event>]] tables in config.toml, not JSON
+	wsl    bool              // an agent in a WSL distro: commands are given as the distro names them (wslHookCommand)
+	// named is path as the agent names it, where that differs: in a WSL
+	// distro its Linux path, which Codex keys its trust of a hook by
+	named string
 }
 
 // hookAgents are the agents magpie can give hooks to.
@@ -132,7 +136,7 @@ var claudeHookEvents = []string{"PreToolUse", "PostToolUse", "PostToolUseFailure
 
 func hookSpecOf(t *Target) (*hookSpec, string) {
 	if t.Agent.WSL != "" {
-		return nil, fmt.Sprintf("magpie gives hooks only to agents on this computer, not yet to %s in WSL", t.Agent.Name)
+		return wslHookSpecOf(t)
 	}
 	switch t.Agent.ID {
 	case "claude":
@@ -219,7 +223,7 @@ func (sp *hookSpec) entry(h *Hook, ev string) json.RawMessage {
 		// child. The block text is what goes in the file and what is
 		// recorded (as a JSON string) so an entry the user changed is
 		// theirs, exactly as with a JSON agent's.
-		return json.RawMessage(grokHookBlock(ev, m, h.Command, timeout))
+		return json.RawMessage(grokHookBlock(ev, m, sp.command(h), timeout))
 	}
 	var v any
 	if sp.flat {
@@ -227,7 +231,7 @@ func (sp *hookSpec) entry(h *Hook, ev string) json.RawMessage {
 			Command string `json:"command"`
 			Timeout int    `json:"timeout,omitempty"`
 			Matcher string `json:"matcher,omitempty"`
-		}{h.Command, timeout, m}
+		}{sp.command(h), timeout, m}
 	} else {
 		type cmd struct {
 			Type    string `json:"type"`
@@ -237,7 +241,7 @@ func (sp *hookSpec) entry(h *Hook, ev string) json.RawMessage {
 		v = struct {
 			Matcher string `json:"matcher,omitempty"`
 			Hooks   []cmd  `json:"hooks"`
-		}{m, []cmd{{"command", h.Command, timeout}}}
+		}{m, []cmd{{"command", sp.command(h), timeout}}}
 	}
 	b, _ := json.Marshal(v)
 	return b
@@ -279,8 +283,11 @@ func grokHookBlock(ev, matcher, command string, timeout int) string {
 
 // sameHookFamily is whether two agent ids are the same agent for an own
 // event: Grok Build and Grok App run the one Grok CLI, so an agent's own
-// ("grok:Notification") event goes to both, as a portable one does.
+// ("grok:Notification") event goes to both, as a portable one does; and an
+// agent in a WSL distro (claude@wsl:Debian) is the agent of its kind.
 func sameHookFamily(a, b string) bool {
+	a, _, _ = strings.Cut(a, "@")
+	b, _, _ = strings.Cut(b, "@")
 	if a == b {
 		return true
 	}
@@ -587,6 +594,10 @@ func (l *Library) syncHooks(t *Target, b *backups, res *Result) {
 			res.fail(id, "hook:"+h.Name, err)
 			continue
 		}
+		if err := sp.runnable(h); err != nil {
+			res.fail(id, "hook:"+h.Name, err)
+			continue
+		}
 		if _, err := listOf(ev); err != nil {
 			res.fail(id, "hook:"+h.Name, err)
 			continue
@@ -732,9 +743,13 @@ func (l *Library) syncHooks(t *Target, b *backups, res *Result) {
 	// entry taken out from before the user's own would leave their trust
 	// on the wrong ones, so it is moved with them
 	var rekey func() error
-	if id == "codex" && len(drop) > 0 {
-		cfg := filepath.Join(codexDir(), "config.toml")
-		f, err := codexRekey(cfg, sp.path, moved)
+	if (id == "codex" || sp.wsl && strings.HasPrefix(id, "codex@")) && len(drop) > 0 {
+		cfg := filepath.Join(filepath.Dir(sp.path), "config.toml")
+		keyed := sp.path
+		if sp.named != "" {
+			keyed = sp.named
+		}
+		f, err := codexRekey(cfg, keyed, moved)
 		if err != nil {
 			failAll(err)
 			return
@@ -957,7 +972,8 @@ func codexRekey(cfg, hooksPath string, moved map[string]map[int]int) (func() err
 // hooksOff is whether the agent has every hook turned off in its settings,
 // for the page to say why one given it doesn't run.
 func hooksOff(t *Target, sp *hookSpec) bool {
-	switch t.Agent.ID {
+	kind, _, _ := strings.Cut(t.Agent.ID, "@")
+	switch kind {
 	case "claude":
 		v, _ := edit.GetJSON(sp.path, "disableAllHooks")
 		return v == "true"
@@ -965,7 +981,8 @@ func hooksOff(t *Target, sp *hookSpec) bool {
 		v, _ := edit.GetJSON(sp.path, "hooksConfig.enabled")
 		return v == "false"
 	case "codex":
-		f, _ := edit.GetTOMLTable(filepath.Join(codexDir(), "config.toml"), "features")
+		// config.toml sits beside hooks.json, in the distro's ~/.codex too
+		f, _ := edit.GetTOMLTable(filepath.Join(filepath.Dir(sp.path), "config.toml"), "features")
 		return f["hooks"] == "false"
 	}
 	return false
@@ -1052,7 +1069,8 @@ func hookTakes(h *Hook, a string) bool {
 	if x, _, ok := strings.Cut(h.Event, ":"); ok {
 		return sameHookFamily(x, a)
 	}
-	return slices.Contains(hookAgents, a)
+	kind, _, _ := strings.Cut(a, "@")
+	return slices.Contains(hookAgents, kind)
 }
 
 // RemoveHooks takes the hooks named out of the library, and what magpie

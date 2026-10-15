@@ -38,6 +38,7 @@ func init() {
 	sessions.WSLHomes = wslHomes
 	sessions.WSLRunning = WSLRunning
 	sessions.WSLOff = func() bool { return !wslLooks() }
+	sessions.WSLDistroOff = func(d string) bool { return settings.Load().WSLDistroOff(d) }
 	// a Copilot CLI signed in inside a running distro (#723)
 	provider.CopilotWSLHomes = copilotWSLHomes
 }

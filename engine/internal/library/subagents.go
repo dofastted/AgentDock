@@ -92,7 +92,7 @@ func (sp *subagentSpec) path(name string) string { return filepath.Join(sp.dir, 
 func subagentSpecOf(t *Target) (*subagentSpec, string) {
 	a := t.Agent
 	if a.WSL != "" {
-		return nil, "magpie gives no subagents to an agent in WSL yet"
+		return wslSubagentSpecOf(t)
 	}
 	md := func(dir string, keys func(s *Subagent, skills, mcp []string) [][2]string) *subagentSpec {
 		return &subagentSpec{dir: dir, ext: ".md", render: func(s *Subagent, skills, mcp []string) []byte {

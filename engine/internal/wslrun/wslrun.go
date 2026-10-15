@@ -63,8 +63,9 @@ const findAge = time.Minute
 // distro first. ok is false off Windows, without WSL, with Settings'
 // Detect agents in WSL off, or when no running distro has it.
 func Find(name string) (Tool, bool) {
+	set := settings.Load()
 	// Settings' Detect agents in WSL, off, looks in no distro (#1264)
-	if !On || settings.Load().NoWSLAgents {
+	if !On || set.NoWSLAgents {
 		return Tool{}, false
 	}
 	found.Lock()
@@ -75,8 +76,9 @@ func Find(name string) (Tool, bool) {
 			return Tool{}, false
 		}
 		// a distro stopped since (wsl --shutdown, to repair WSL) isn't
-		// run again, which would start it: it is looked for anew
-		if Up(p.Distro) {
+		// run again, which would start it: it is looked for anew; nor is
+		// one turned off since
+		if Up(p.Distro) && !set.WSLDistroOff(p.Distro) {
 			return *p, true
 		}
 	}
@@ -100,6 +102,9 @@ func Find(name string) (Tool, bool) {
 		}
 	}
 	for _, d := range names {
+		if set.WSLDistroOff(d) {
+			continue
+		}
 		out, err := Run(30*time.Second, "-d", d, "-e", "sh", "-lc", probeScript(name))
 		if err != nil {
 			continue

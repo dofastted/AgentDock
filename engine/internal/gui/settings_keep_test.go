@@ -175,6 +175,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		GatewayMode:          "off",
 		QuotaReads:           "asked",
 		NoAccountDiscovery:   true,
+		WSLDistrosOff:        []string{"Debian"},
 	}
 	was.DesktopSubagentEffort = "high"
 	if err := settings.Save(was); err != nil {

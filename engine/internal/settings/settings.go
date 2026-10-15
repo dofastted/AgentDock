@@ -345,6 +345,11 @@ type Settings struct {
 	// (#1264): no distro is listed or probed for agents, their sessions or
 	// Claude Code, and the agents found there before aren't shown.
 	NoWSLAgents bool `json:"noWSLAgents,omitempty"`
+	// WSLDistrosOff are the WSL distros magpie leaves alone though it looks
+	// in WSL (AgentDock): none of their agents, sessions or tools is
+	// listed, probed or written, as if NoWSLAgents held for them alone.
+	// Matched as wsl.exe names them, case aside. This computer's own (KeepOwn).
+	WSLDistrosOff []string `json:"wslDistrosOff,omitempty"`
 	// KeepAwakeDisplay keeps the display on too while KeepAwake holds the
 	// computer awake (#975, Hu9956: an agent recording the screen to check
 	// its work found it locked). This computer's own (KeepOwn).
@@ -935,7 +940,7 @@ func (s *Settings) KeepOwn(cur Settings) {
 	s.WindowMaximised, s.KeepAwake, s.KeepAwakeDisplay = cur.WindowMaximised, cur.KeepAwake, cur.KeepAwakeDisplay
 	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird, s.TrayPace, s.TrayNoCost = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird, cur.TrayPace, cur.TrayNoCost
 	s.GatewayMode = cur.GatewayMode
-	s.NoWSLAgents = cur.NoWSLAgents
+	s.NoWSLAgents, s.WSLDistrosOff = cur.NoWSLAgents, cur.WSLDistrosOff
 	s.QuotaReads = cur.QuotaReads
 	s.NoAccountDiscovery = cur.NoAccountDiscovery
 	s.LAN, s.AllowIPs = cur.LAN, cur.AllowIPs
