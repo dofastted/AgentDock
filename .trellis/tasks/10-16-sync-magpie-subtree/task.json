@@ -21,6 +21,6 @@
   "children": [],
   "parent": "10-15-unified-agent-manager",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "Pull c00eb7543. main moved from planned 674b6ca to 7597c1323 (one extra commit, provider curl-paste, also touches i18n.js) before the pull; that tip was taken. agents.go and i18n.js auto-merged. targets.go conflict at hostTargetOf: kept upstream SharedName and AgentDock switch targetKind(a.ID); nothing dropped. Checklist 9160fb866. git diff --name-status 7597c1323 HEAD:engine is still M 42 / A 38. Park commit e3a4ec713 was rewritten out via replace+filter-branch; refs/original and refs/replace remain. Windows vet/test not run from this Debian session.",
   "meta": {}
 }
