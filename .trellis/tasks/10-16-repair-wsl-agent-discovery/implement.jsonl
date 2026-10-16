@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/10-16-repair-wsl-agent-discovery/research/runtime-evidence.md","reason":"Observed Windows release runtime, native Gemini masking, wrong external config roots and permission failures"}
+{"file":".trellis/tasks/10-16-repair-wsl-agent-discovery/research/discovery-review.md","reason":"Discovery/rescan/cache boundaries and native versus Windows executable provenance"}
+{"file":".trellis/tasks/10-16-repair-wsl-agent-discovery/research/library-review.md","reason":"Shared-root identities, native import ownership risks and MCP compatibility"}
+{"file":".trellis/spec/backend/index.md","reason":"Existing backend spec entry point; currently template, must not claim unfilled guidance as compliance"}
+{"file":".trellis/spec/frontend/index.md","reason":"Existing frontend spec entry point and required English documentation convention"}

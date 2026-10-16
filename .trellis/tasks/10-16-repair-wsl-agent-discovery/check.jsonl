@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/10-16-repair-wsl-agent-discovery/research/runtime-evidence.md","reason":"Acceptance must address observed paths and native CLI masking rather than rely on historical checkmarks"}
+{"file":".trellis/tasks/10-16-repair-wsl-agent-discovery/research/discovery-review.md","reason":"Review native/interop/config-only state, discovery rescan and stalled probes"}
+{"file":".trellis/tasks/10-16-repair-wsl-agent-discovery/research/library-review.md","reason":"Review in-place resource ownership, environment-specific identity, capabilities and MCP errors"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Current backend quality pointer; template state must be reported and prevention guidance updated after proof"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Current frontend quality pointer; actual UI smoke and existing project conventions remain required"}
