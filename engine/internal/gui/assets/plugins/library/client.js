@@ -21,6 +21,10 @@ magpie.plugin("library", (ctx) => {
   const texts = {};      // set → its shared instructions as typed, while not saved
   let openSet = null;    // the set of instructions opened to edit
   let addingSet = false; // a new set being named
+  let native = null;     // /api/native: { roots, items, problems } or { error }
+  let nativeLoading = null;
+  let nativeEnv = "";    // environment filter: "" all, "windows", "wsl:DISTRO"
+  let nativeKind = "";   // kind filter: "" all, skill|prompt|agent|instructions|mcp
   let removingSet = null; // a set whose Remove was clicked once
   const extras = {};     // agent → its own additions as typed, while not saved
   const open = new Set(); // agents whose instructions row is open
@@ -50,6 +54,7 @@ magpie.plugin("library", (ctx) => {
     subagent: "M6 3a2.2 2.2 0 1 0 0 4.4A2.2 2.2 0 0 0 6 3z M2 13c.5-2.2 2-3.4 4-3.4s3.5 1.2 4 3.4 M11.5 7.5a1.5 1.5 0 1 0 0 .01 M10.2 12.5c.3-1.3 1.1-2 2.3-2s1.6.5 1.9 1.4",
     // a clock with an arrow going back round it, as macOS draws backups
     backup: "M3.2 8a4.8 4.8 0 1 0 1.4-3.4 M2.8 2.6v2.4h2.4 M8 5.3V8l1.9 1.2",
+    refresh: "M13.5 8A5.5 5.5 0 1 1 11.9 4.1 M13.5 2v3h-3",
   };
 
   const tilde = (p) => (lib?.home && p?.startsWith(lib.home) ? "~" + p.slice(lib.home.length) : p || "");
@@ -617,7 +622,7 @@ magpie.plugin("library", (ctx) => {
       ul.append(li);
     }
     if (ul.childElementCount) card.append(ul);
-    const tabNames = { instructions: t("Instructions"), mcp: t("MCP servers"), skills: t("Skills"), hooks: t("Hooks"), subagents: t("Subagents") };
+    const tabNames = { instructions: t("Instructions"), mcp: t("MCP servers"), skills: t("Skills"), hooks: t("Hooks"), subagents: t("Subagents"), native: t("Native files") };
     const others = Object.keys(away).filter((k) => k in tabNames);
     if (others.length) {
       const more = el("div", "lib-problems-away");
@@ -632,7 +637,7 @@ magpie.plugin("library", (ctx) => {
   }
   // the tab a problem is about; "" is one shown on every tab
   function problemTab(what) {
-    return { instructions: "instructions", mcp: "mcp", skill: "skills", skills: "skills", project: "skills", hook: "hooks", hooks: "hooks", subagent: "subagents" }[what.split(":")[0]] || "";
+    return { instructions: "instructions", mcp: "mcp", skill: "skills", skills: "skills", project: "skills", hook: "hooks", hooks: "hooks", subagent: "subagents", native: "native", prompt: "native", agent: "native" }[what.split(":")[0]] || "";
   }
   function problemWhat(what) {
     const [kind, ...rest] = what.split(":");
@@ -643,6 +648,7 @@ magpie.plugin("library", (ctx) => {
     if (kind === "hook") return t("Hook {name}", { name });
     if (kind === "subagent") return t("Subagent {name}", { name });
     if (kind === "project") return name ? t("Skill {name}", { name }) : t("The project");
+    if (kind === "native" || kind === "prompt" || kind === "agent") return name ? t("{kind} {name}", { kind: nativeKindOne(kind === "native" ? rest[0] || "native" : kind), name: kind === "native" ? rest.slice(1).join(":") : name }) : t("Native files");
     return what;
   }
   // a chip's write changes the list without drawing the page again: the
@@ -719,6 +725,7 @@ magpie.plugin("library", (ctx) => {
     // RTK's count read afresh each time its tab is opened: an agent run
     // since adds to it (#741); the page keeps the last one until then
     if (id === "rtk" && rtk) loadRTK();
+    if (id === "native") loadNative();
     if (!lib) return page.querySelector(":scope > .lib-skel")?.replaceWith(skeleton(id));
     render(); syncLists();
   }
@@ -734,9 +741,11 @@ magpie.plugin("library", (ctx) => {
       ["skills", t("Skills") + n("skills")],
       ["hooks", t("Hooks") + n("hooks")],
       ["subagents", t("Subagents") + n("subagents")],
+      ["native", t("Native files") + n("native")],
       ["rtk", "RTK"],
     ], tab, openTab);
     tabs.classList.add("lib-tabs");
+    tabs.setAttribute("aria-label", t("Library"));
     head.append(tabs);
     // the buttons keep together at the end, on a line of their own when the
     // window is too narrow for the tabs and them
@@ -754,6 +763,13 @@ magpie.plugin("library", (ctx) => {
       });
       go.append(glyph(GLYPH.search, "lib-mini"), el("span", "", t("Discover")));
       go.title = tab === "mcp" ? t("Go to the MCP servers you can add, under the list") : t("Go to the skills you can add, under the list");
+      acts.append(go);
+    }
+    if (lib && tab === "native") {
+      const go = button("", "lib-discover lib-native-refresh", () => loadNative(true));
+      go.append(glyph(GLYPH.refresh, "lib-mini"), el("span", "", t("Refresh")));
+      go.title = t("Read native files again, including changes made in WSL");
+      if (nativeLoading) go.disabled = true;
       acts.append(go);
     }
     const more = button("", "lib-more", () => lib && reveal(lib.dir));
@@ -780,10 +796,10 @@ magpie.plugin("library", (ctx) => {
     const caret = focus ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
     page.replaceChildren();
     fits = [];
-    const head = libHead({ mcp: lib.servers.length, skills: lib.skills.length, hooks: (lib.hooks || []).length, subagents: (lib.subagents || []).length });
+    const head = libHead({ mcp: lib.servers.length, skills: lib.skills.length, hooks: (lib.hooks || []).length, subagents: (lib.subagents || []).length, native: (native?.items || []).length });
     page.append(head);
     head.classList.toggle("stuck", top > 0);
-    if (!lib.agents.length) {
+    if (!lib.agents.length && tab !== "native") {
       page.append(empty(t("No agents to write to"), t("Install Claude Code, Codex, Gemini CLI, OpenCode… and the library can give them the same instructions, MCP servers and skills.")));
       return;
     }
@@ -791,13 +807,14 @@ magpie.plugin("library", (ctx) => {
     // first one after the skeleton) fades in
     const problems = problemsCard();
     if (problems) page.append(problems);
-    const body = el("div", "lib-body" + (shown !== tab ? " enter" : ""));
+    const body = el("div", "lib-body" + (shown !== tab ? " enter" : "") + (tab === "native" ? " lib-native" : ""));
     shown = tab;
     if (tab === "instructions") renderInstructions(body);
     else if (tab === "mcp") renderServers(body);
     else if (tab === "rtk") renderRTK(body);
     else if (tab === "hooks") renderHooks(body);
     else if (tab === "subagents") renderSubagents(body);
+    else if (tab === "native") renderNative(body);
     else renderSkills(body);
     page.append(body);
     for (const n of body.querySelectorAll(".row-head .note")) n.title = n.textContent;
@@ -1399,16 +1416,26 @@ magpie.plugin("library", (ctx) => {
       if (s.transport === "sse" && a.noSSE) return t("{agent} can't reach a server over SSE — only a command or streamable HTTP", { agent: a.name });
       // #1250: written there as it is, the agent would send the text
       // itself; written with the value, the token would be in its file
-      return envRefs(s) && a.noEnvRefs ? t("{agent} can't read {ref} from its settings — given this server, the token would be written there as plain text", { agent: a.name, ref: "${NAME}" }) : "";
+      if (envRefs(s) && a.noEnvRefs) return t("{agent} can't read {ref} from its settings — given this server, the token would be written there as plain text", { agent: a.name, ref: "${NAME}" });
+      return windowsBlocked(s)(a);
     };
   }
   // envRefs says whether the server's headers (remote) or environment
   // (command) reference a variable: ${NAME}, as the library writes one
   const envRef = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/;
   const envRefs = (s) => Object.values((remote(s) ? s.headers : s.env) || {}).some((v) => envRef.test(v));
-  // reaches(s) says whether an agent can be given the server
   const remote = (s) => s.transport === "http" || s.transport === "sse";
-  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE) && !(envRefs(s) && a.noEnvRefs));
+  const isWSLAgent = (a) => /@wsl:/.test(a?.id || "");
+  // windowsPath in mcp.go: a Windows drive, a backslash, or .exe/.cmd/.bat/.ps1
+  const windowsPath = /^[A-Za-z]:[\\/]|\\|\.(?:exe|cmd|bat|ps1)$/i;
+  const magpieImageMCP = (s) => (s?.args || [])[0] === "mcp" && (s?.args || [])[1] === "image";
+  const windowsMCPCmd = (s) => s && s.transport === "stdio" && !!s.command && windowsPath.test(s.command) && !magpieImageMCP(s);
+  const windowsBlocked = (s) => (a) => windowsMCPCmd(s) && isWSLAgent(a)
+    ? t("{agent} can't start a Windows program ({cmd}): give it a command WSL has", { agent: a.name, cmd: s.command })
+    : "";
+  // reaches(s) says whether an agent can be given the server
+  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE) && !(envRefs(s) && a.noEnvRefs) && !windowsBlocked(s)(a));
+
 
   function renderServers(body) {
     body.append(intro(t("Add a server once and switch it on for the agents that should have it — magpie writes it into each one's config in the shape that agent reads.")));
@@ -2009,7 +2036,8 @@ magpie.plugin("library", (ctx) => {
 
   function editServer(s, prefill) {
     const all = mcpAgents();
-    const d = prefill || (s ? structuredClone(s) : { name: "", transport: "stdio", command: "", args: [], env: {}, url: "", headers: {}, agents: all.map((a) => a.id) });
+    const d = prefill || (s ? structuredClone(s) : { name: "", transport: "stdio", command: "", args: [], env: {}, url: "", headers: {}, agents: [] });
+    if (!s) d.agents = all.filter(reaches(d)).map((a) => a.id);
     if (!d.env) d.env = {};
     if (!d.headers) d.headers = {};
     const ed = el("div", "editor lib-editor");
@@ -2081,7 +2109,13 @@ magpie.plugin("library", (ctx) => {
       slot.replaceChildren();
       const g = el("div", "lib-grid");
       if (d.transport === "stdio") {
-        const line = field2([d.command, ...(d.args || [])].filter((x, i) => i > 0 || x).map(quote).join(" "), "npx -y @modelcontextprotocol/server-github", (v) => { const w = words(v); d.command = w[0] || ""; d.args = w.slice(1); });
+        const line = field2([d.command, ...(d.args || [])].filter((x, i) => i > 0 || x).map(quote).join(" "), "npx -y @modelcontextprotocol/server-github", (v) => {
+          const w = words(v);
+          d.command = w[0] || "";
+          d.args = w.slice(1);
+          if (!s) d.agents = d.agents.filter((id) => reaches(d)(agentOf(id)));
+          drawAgents();
+        });
         line.classList.add("mono");
         g.append(...field(t("Command"), line, t("The command and its arguments, as you'd type them")));
         g.append(...field(t("Environment"), pairs(d.env, "GITHUB_TOKEN", t("value"), (v) => { d.env = v; drawAgents(); }), refHint()));
@@ -2120,7 +2154,7 @@ magpie.plugin("library", (ctx) => {
     // send saves the form; s is then the server as saved, for a save after
     // a sign-in's to be of it
     const send = async () => {
-      const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents } };
+      const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents.filter((id) => reaches(d)(agentOf(id))) } };
       if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env });
       else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && d.oauth?.clientId ? d.oauth : null });
       take(await api("library/servers/save", body));
@@ -2168,7 +2202,7 @@ magpie.plugin("library", (ctx) => {
         const f = found[0];
         Object.assign(d, { transport: f.transport, command: f.command || "", args: f.args || [], env: f.env || {}, url: f.url || "", headers: f.headers || {} });
         if (f.name && (!d.name || !s)) d.name = f.name;
-        name.value = d.name;
+        if (!s) d.agents = d.agents.filter((id) => reaches(d)(agentOf(id)));
         kindBox.replaceChildren(kindOf());
         draw();
         status(t("Filled in from what you pasted"), "ok");
@@ -2180,12 +2214,11 @@ magpie.plugin("library", (ctx) => {
     if (!s) requestAnimationFrame(() => name.focus());
   }
 
-  // Several servers pasted at once: pick those to add.
   function pasteMany(found, agents) {
     const all = mcpAgents();
     const have = new Set(lib.servers.map((s) => s.name));
     const pick = new Set(found.filter((f) => f.name && !have.has(f.name)).map((f) => f.name));
-    let who = [...agents];
+    let who = (agents || all.map((a) => a.id)).filter((id) => found.some((f) => reaches(f)(agentOf(id))));
     const ed = el("div", "editor lib-editor");
     const head = el("div", "ehead");
     head.append(glyph(GLYPH.cmd), el("b", "", t("{n} servers in what you pasted", { n: found.length })));
@@ -4933,7 +4966,7 @@ magpie.plugin("library", (ctx) => {
     box.append(el("span", "", found ? t("None of these is at {q} — they're found by its name.", { q }) : t("Nothing listed is at {q}.", { q })));
     box.append(button(t("＋ Add it yourself…"), "action", () => editServer(null, {
       name: c.name || "", transport: c.transport || "stdio", command: c.command || "", args: c.args || [], env: {},
-      url: c.url || "", headers: {}, agents: mcpAgents().map((a) => a.id),
+      url: c.url || "", headers: {},
     })));
     return box;
   }
@@ -5010,7 +5043,7 @@ magpie.plugin("library", (ctx) => {
     const d = el("p", "mk-desc", about(x));
     d.title = about(x);
     const foot = el("div", "mk-foot");
-    foot.append(el("span", "mk-id mono", x.name), el("span", "grow"), (needsKey(x) || x.optIn) && !x.have ? button(t("Add…"), "action mk-add", () => serverSheet(x)) : addButton(x, () => addServer(x, {}, null)));
+    foot.append(el("span", "mk-id mono", x.name), el("span", "grow"), (needsKey(x) || x.optIn) && !x.have ? button(t("Add…"), "action mk-add", () => serverSheet(x)) : addButton(x, () => addServer(x, {}, mcpAgents().filter(reaches(x)).map((a) => a.id))));
     c.append(top, d, foot);
     c.onclick = () => serverSheet(x);
     c.title = t("About {name}", { name: x.title || x.name });
@@ -5173,6 +5206,558 @@ magpie.plugin("library", (ctx) => {
     openLib(ed);
   }
 
+  // ---------- native files ----------
+  // In-place inventory of each environment's skills, prompts, agent
+  // definitions, instructions and MCP configs. Mutations post opaque IDs
+  // (or root+relative name to create), never a browser-supplied path.
+
+  const NATIVE_KINDS = ["skill", "prompt", "agent", "instructions", "mcp"];
+  const NATIVE_DIR_KINDS = new Set(["skill", "prompt", "agent"]);
+  const nativeKindOne = (k) => ({ skill: t("Skill"), prompt: t("Prompt"), agent: t("Agent definition"), instructions: t("Instructions"), mcp: t("MCP") }[k] || k);
+  const nativeKindLabel = (k) => ({ skill: t("Skills"), prompt: t("Prompts"), agent: t("Agent definitions"), instructions: t("Instructions"), mcp: t("MCP") }[k] || k);
+  const nativeEnvLabel = (e) => (!e || e === "windows") ? t("This computer") : String(e).startsWith("wsl:") ? "WSL · " + e.slice(4) : e;
+  const nativeGlyphOf = (k) => ({ skill: GLYPH.skill, prompt: GLYPH.doc, agent: GLYPH.subagent, instructions: GLYPH.doc, mcp: GLYPH.cmd }[k] || GLYPH.doc);
+  const nativeRootOf = (id) => (native?.roots || []).find((r) => r.id === id);
+  const nativeItemOf = (id) => (native?.items || []).find((it) => it.id === id);
+  const nativeWritable = (r) => r && !r.error;
+  const nativeWho = (it) => [nativeEnvLabel(it.environment), it.cli || it.agent, nativeKindOne(it.kind)].filter(Boolean).join(" · ");
+
+  function nativeNameErr(name) {
+    const n = (name || "").trim();
+    if (!n) return t("A name is needed");
+    if (/^[A-Za-z]:[\\/]/.test(n) || n.startsWith("/") || n.startsWith("\\") || n.split(/[\\/]/).includes("..")) {
+      return t("Give a name relative to the selected root, not a full path");
+    }
+    return "";
+  }
+
+  async function nativeReq(path, body) {
+    path = path.replace(/#/g, "%23");
+    const res = await fetch("/api/" + path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : null; } catch { throw new Error(text || res.statusText); }
+    if (res.status === 409) {
+      const err = new Error(data?.error || t("This file changed outside the editor"));
+      err.conflict = true;
+      throw err;
+    }
+    if (!res.ok) throw new Error(data?.error || `${res.status} ${res.statusText}`);
+    return data;
+  }
+
+  function takeNative(v) {
+    if (!v) return;
+    const inv = v.roots ? v : v.inventory;
+    native = { roots: inv?.roots || [], items: inv?.items || [], problems: inv?.problems || [] };
+  }
+
+  async function loadNative(force) {
+    if (nativeLoading) return nativeLoading;
+    if (native && !force && !native.error) return native;
+    nativeLoading = (async () => {
+      try {
+        takeNative(await nativeReq("native"));
+      } catch (e) {
+        native = { error: e.message, roots: [], items: [], problems: [] };
+        status(e.message, "err");
+      } finally {
+        nativeLoading = null;
+        if (tab === "native" && page && lib) render();
+      }
+      return native;
+    })();
+    if (tab === "native" && page && lib) render();
+    return nativeLoading;
+  }
+
+  function renderNative(body) {
+    if (!native && !nativeLoading) loadNative();
+    body.append(intro(t("Files each environment already has — skills, prompts, agent definitions, instructions and MCP configs. Edit them in place; a copy to another environment is explicit.")));
+    if (nativeLoading && !native) {
+      body.append(skeleton("native"));
+      return;
+    }
+    if (native?.error && !native.items?.length && !native.roots?.length) {
+      const again = button(t("Try again"), "action lib-native-retry", () => loadNative(true));
+      body.append(empty(t("Native files could not be read"), native.error, again));
+      return;
+    }
+    const card = nativeProblems();
+    if (card) body.append(card);
+    body.append(nativeFilters());
+    nativeRoots(body);
+    nativeItems(body);
+    const after = el("div", "after-list lib-native-acts");
+    const make = button(t("Create…"), "action lib-native-create", () => nativeCreate());
+    make.disabled = !nativeCreateRoots().length;
+    make.title = make.disabled ? t("No writable root for this kind") : t("Create a native file on a selected root");
+    after.append(make);
+    body.append(after);
+  }
+
+  function nativeProblems() {
+    const list = native?.problems || [];
+    if (!list.length && !native?.error) return null;
+    const card = el("div", "lib-problems");
+    card.setAttribute("role", "status");
+    const ttl = el("div", "lib-problems-head");
+    ttl.append(el("span", "lib-problems-dot"), el("b", "", native?.error ? t("Native files could not be read") : t("Some native files could not be read")));
+    card.append(ttl);
+    const ul = el("ul");
+    if (native?.error) {
+      const li = el("li");
+      li.append(el("span", "lib-problems-err", native.error));
+      ul.append(li);
+    }
+    for (const p of list) {
+      const li = el("li");
+      const who = p.agent ? (nameOf(p.agent) !== p.agent ? nameOf(p.agent) : p.agent) : "";
+      if (who) li.append(el("b", "", who), el("span", "lib-problems-sep", " · "));
+      li.append(el("span", "", problemWhat(p.what || "")), el("span", "lib-problems-err", p.error || ""));
+      ul.append(li);
+    }
+    if (ul.childElementCount) card.append(ul);
+    return card;
+  }
+
+  function nativeFilters() {
+    const bar = el("div", "lib-native-filters");
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", t("Environment and kind filters"));
+    const envs = [...new Set((native?.roots || []).map((r) => r.environment).filter(Boolean))];
+    if (nativeEnv && !envs.includes(nativeEnv)) nativeEnv = "";
+    const envSeg = segs([["", t("All")], ...envs.map((e) => [e, nativeEnvLabel(e)])], nativeEnv, (id) => { nativeEnv = id; render(); });
+    envSeg.dataset.nativeFilter = "env";
+    envSeg.setAttribute("aria-label", t("Environment"));
+    const kindSeg = segs([["", t("All")], ...NATIVE_KINDS.map((k) => [k, nativeKindLabel(k)])], nativeKind, (id) => { nativeKind = id; render(); });
+    kindSeg.dataset.nativeFilter = "kind";
+    kindSeg.setAttribute("aria-label", t("Kind"));
+    const envLab = el("span", "label", t("Environment"));
+    const kindLab = el("span", "label", t("Kind"));
+    const envWrap = el("div", "lib-native-filter");
+    envWrap.append(envLab, envSeg);
+    const kindWrap = el("div", "lib-native-filter");
+    kindWrap.append(kindLab, kindSeg);
+    bar.append(envWrap, kindWrap);
+    return bar;
+  }
+
+  function nativeShownRoots() {
+    return (native?.roots || []).filter((r) => (!nativeEnv || r.environment === nativeEnv) && (!nativeKind || r.kind === nativeKind));
+  }
+  function nativeShownItems() {
+    return (native?.items || []).filter((it) => (!nativeEnv || it.environment === nativeEnv) && (!nativeKind || it.kind === nativeKind));
+  }
+  function nativeCreateRoots() {
+    return nativeShownRoots().filter((r) => nativeWritable(r) && (NATIVE_DIR_KINDS.has(r.kind) || !(native?.items || []).some((it) => it.root === r.id)));
+  }
+
+  function nativeRoots(body) {
+    const roots = nativeShownRoots();
+    const rh = el("div", "row-head");
+    rh.append(el("span", "label", t("Roots")), el("span", "note", t("Native path")), el("span", "grow"));
+    body.append(rh);
+    if (!roots.length) {
+      body.append(el("div", "lib-none", t("No roots match these filters.")));
+      return;
+    }
+    const list = el("div", "list lib-list lib-native-roots");
+    list.setAttribute("role", "list");
+    for (const r of roots) {
+      const row = el("div", "row lib-row lib-native-root");
+      row.setAttribute("role", "listitem");
+      row.dataset.nativeRoot = r.id;
+      const who = el("div", "who");
+      const nm = el("div", "name", r.name || r.cli || r.agent || r.id);
+      who.append(nm, el("div", "sub", [nativeEnvLabel(r.environment), nativeKindOne(r.kind), r.cli].filter(Boolean).join(" · ")));
+      const path = el("div", "lib-src");
+      path.append(nativePathEl(r.path));
+      who.append(path);
+      row.append(glyph(nativeGlyphOf(r.kind)), who);
+      const tags = el("div", "lib-tags");
+      if (r.error) tags.append(tag(t("Unavailable"), "warn", r.error));
+      else tags.append(tag(nativeKindOne(r.kind), ""));
+      row.append(tags);
+      if (r.error) {
+        const why = el("div", "lib-native-why", t("This root cannot be written: {error}", { error: r.error }));
+        why.setAttribute("role", "status");
+        row.append(why);
+      }
+      list.append(row);
+    }
+    body.append(list);
+  }
+
+  function nativePathEl(p) {
+    if (!p) return el("span", "lib-path", "");
+    const b = el("button", "lib-path", p);
+    b.type = "button";
+    b.title = t("Show in {fm}", { fm: fileManager() });
+    b.onclick = (e) => { e.stopPropagation(); reveal(p); };
+    return b;
+  }
+
+  function nativeItems(body) {
+    const items = [...nativeShownItems()].sort((a, b) =>
+      (a.environment || "").localeCompare(b.environment || "")
+      || (a.kind || "").localeCompare(b.kind || "")
+      || (a.cli || "").localeCompare(b.cli || "")
+      || (a.name || "").localeCompare(b.name || "")
+      || (a.path || "").localeCompare(b.path || "")
+      || (a.id || "").localeCompare(b.id || ""));
+    const rh = el("div", "row-head");
+    rh.append(el("span", "label", t("Files")), el("span", "note", items.length ? String(items.length) : ""), el("span", "grow"));
+    body.append(rh);
+    if (!items.length) {
+      body.append(empty(
+        (native?.items || []).length ? t("Nothing matches these filters.") : t("No native files yet"),
+        t("Create one on a writable root, or refresh after files change in WSL."),
+        nativeCreateRoots().length ? button(t("Create…"), "action", () => nativeCreate()) : null,
+      ));
+      return;
+    }
+    const list = el("div", "list lib-list lib-native-list");
+    list.setAttribute("role", "list");
+    for (const it of items) list.append(nativeRow(it));
+    body.append(list);
+  }
+
+  function nativeRow(it) {
+    const row = el("div", "row lib-row click lib-native-item");
+    row.setAttribute("role", "listitem");
+    row.dataset.nativeId = it.id;
+    const who = el("div", "who");
+    const nm = el("div", "name mono", it.name || it.id);
+    who.append(nm, el("div", "sub", nativeWho(it)));
+    const src = el("div", "lib-src");
+    src.append(nativePathEl(it.path));
+    who.append(src);
+    const acts = el("div", "lib-rowacts");
+    const copy = button("", "lib-icon lib-native-copy", (e) => { e.stopPropagation(); nativeCopy(it); });
+    copy.append(svg(GLYPH.out, 13, 1.4));
+    copy.title = it.kind === "mcp" ? t("MCP configs are not copied as a whole — Windows and Linux commands stay on their own files") : t("Copy…");
+    if (it.kind === "mcp") copy.disabled = true;
+    const rm = button("", "lib-icon danger lib-rm", (e) => { e.stopPropagation(); nativeDelete(it); });
+    rm.append(svg(GLYPH.trash, 13, 1.4));
+    rm.title = t("Remove");
+    acts.append(copy, rm);
+    row.append(glyph(nativeGlyphOf(it.kind)), who, acts);
+    row.onclick = () => openNativeEditor(it.id);
+    row.title = t("Open {name}", { name: it.name || it.id });
+    return row;
+  }
+
+  async function openNativeEditor(id, kept) {
+    const ed = el("div", "editor lib-editor lib-native-edit");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.doc), el("b", "", t("Open")));
+    ed.append(head);
+    const err = el("div", "editor-error");
+    err.setAttribute("role", "alert");
+    const note = el("p", "lib-aside lib-native-note", t("Saving this native file makes it authoritative and stops the library deploying the resources this save changes. Unrelated bindings stay. A shared symlink is followed by every consumer."));
+    const conflict = el("div", "lib-warn lib-native-conflict");
+    conflict.hidden = true;
+    conflict.setAttribute("role", "alert");
+    const meta = el("p", "lib-confirm lib-native-meta");
+    const ta = el("textarea", "lib-text lib-native-text");
+    ta.spellcheck = false;
+    ta.setAttribute("aria-label", t("Contents"));
+    let item = nativeItemOf(id), version = "", original = kept ?? null, current = "";
+    const drawMeta = () => {
+      if (!item) return;
+      head.replaceChildren(glyph(nativeGlyphOf(item.kind)), el("b", "", item.name || item.id), el("span", "note", nativeKindOne(item.kind)));
+      meta.replaceChildren();
+      meta.append(el("span", "", nativeWho(item)), el("span", "lib-problems-sep", " · "), nativePathEl(item.path));
+    };
+    try {
+      const v = await nativeReq("native/file?id=" + encodeURIComponent(id));
+      item = v.item || item;
+      version = v.version || "";
+      current = v.text ?? "";
+      if (original == null) original = current;
+      ta.value = original;
+      drawMeta();
+    } catch (e) {
+      err.textContent = e.message;
+      ed.append(err);
+      const bar = el("div", "bar");
+      bar.append(el("span", "grow"), button(t("Close"), "", () => closeLibModal(true)));
+      ed.append(bar);
+      modal = { save: () => {}, dirty: () => false };
+      openLib(ed);
+      return;
+    }
+    const showConflict = (msg, disk) => {
+      conflict.hidden = false;
+      conflict.replaceChildren();
+      conflict.append(el("p", "", msg || t("This file changed outside the editor. Your unsaved text is kept.")));
+      if (disk != null) {
+        const pre = el("pre", "lib-md lib-native-disk", disk);
+        pre.setAttribute("aria-label", t("The file on disk"));
+        conflict.append(pre);
+      }
+      const use = button(t("Load the file's version"), "action", () => {
+        ta.value = current;
+        original = current;
+        conflict.hidden = true;
+        err.textContent = "";
+      });
+      conflict.append(use);
+    };
+    const save = async (over) => {
+      err.textContent = "";
+      try {
+        const v = await nativeReq("native/file", { id, text: ta.value, version });
+        takeNative(v);
+        original = ta.value;
+        status(t("Saved"), "ok");
+        closeLibModal(true);
+        render();
+      } catch (e) {
+        if (e.conflict) {
+          try {
+            const now = await nativeReq("native/file?id=" + encodeURIComponent(id));
+            item = now.item || item;
+            version = now.version || version;
+            current = now.text ?? current;
+            drawMeta();
+            showConflict(e.message, current);
+          } catch (e2) {
+            err.textContent = e.message + " — " + e2.message;
+          }
+          if (over) err.textContent = t("The source changed since the preview. Preview again.");
+        } else err.textContent = e.message;
+      }
+    };
+    ed.append(meta, note, conflict, err, ...field(t("Contents"), ta));
+    const bar = el("div", "bar");
+    bar.append(button(t("Remove"), "danger", () => nativeDelete(item)), el("span", "grow"));
+    if (item?.kind && item.kind !== "mcp") bar.append(button(t("Copy…"), "", () => nativeCopy(item)));
+    bar.append(button(t("Cancel"), "", closeLibModal), button(t("Save"), "primary lib-native-save", () => save()));
+    ed.append(bar);
+    modal = { save: () => save(), dirty: () => ta.value !== original };
+    openLib(ed);
+    requestAnimationFrame(() => ta.focus());
+  }
+
+  function nativeCreate() {
+    const roots = nativeCreateRoots();
+    if (!roots.length) { status(t("No writable root for this kind"), "warn"); return; }
+    let rootId = roots[0].id;
+    let name = NATIVE_DIR_KINDS.has(roots[0].kind) ? "" : roots[0].path.split(/[\\/]/).pop();
+    const ed = el("div", "editor lib-editor lib-native-create");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.doc), el("b", "", t("Create a native file")));
+    ed.append(head);
+    ed.append(el("p", "lib-confirm", t("The file is created on the selected root. Give a name relative to that root, not a full path.")));
+    const rootBox = el("div", "lib-native-rootpick");
+    const drawRoots = () => {
+      rootBox.replaceChildren();
+      for (const r of roots) {
+        const b = el("button", "lib-native-rootopt" + (r.id === rootId ? " on" : ""));
+        b.type = "button";
+        b.setAttribute("aria-pressed", r.id === rootId ? "true" : "false");
+        b.dataset.nativeRoot = r.id;
+        b.append(el("span", "name", r.name || r.cli || r.id), el("span", "sub", [nativeEnvLabel(r.environment), nativeKindOne(r.kind), r.path].filter(Boolean).join(" · ")));
+        b.onclick = () => {
+          rootId = r.id;
+          name = NATIVE_DIR_KINDS.has(r.kind) ? "" : r.path.split(/[\\/]/).pop();
+          nameIn.value = name;
+          nameIn.readOnly = !NATIVE_DIR_KINDS.has(r.kind);
+          drawRoots();
+        };
+        rootBox.append(b);
+      }
+    };
+    drawRoots();
+    const nameIn = field2(name, "foo/SKILL.md", (v) => { name = v; });
+    nameIn.classList.add("mono");
+    nameIn.setAttribute("aria-label", t("Name"));
+    nameIn.readOnly = !NATIVE_DIR_KINDS.has(roots[0].kind);
+    const err = el("div", "editor-error");
+    err.setAttribute("role", "alert");
+    ed.append(...field(t("Root"), rootBox), ...field(t("Name"), nameIn, t("Give a name relative to the selected root, not a full path")), err);
+    const bar = el("div", "bar");
+    const go = button(t("Create"), "primary", async () => {
+      err.textContent = "";
+      const bad = nativeNameErr(name);
+      if (bad) { err.textContent = bad; nameIn.focus(); return; }
+      const root = nativeRootOf(rootId);
+      if (!nativeWritable(root)) { err.textContent = t("This root cannot be written: {error}", { error: root?.error || t("Unavailable") }); return; }
+      go.disabled = true;
+      try {
+        const initial = /\.jsonc?$/i.test(name) ? "{}\n" : "";
+        takeNative(await nativeReq("native/file", { root: rootId, name: name.trim(), text: initial }));
+        status(t("Saved"), "ok");
+        closeLibModal(true);
+        render();
+        const made = (native.items || []).find((it) => it.root === rootId && it.name === name.trim());
+        if (made) openNativeEditor(made.id);
+      } catch (e) {
+        err.textContent = e.message;
+        go.disabled = false;
+      }
+    });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click(), dirty: () => !!name.trim() };
+    openLib(ed);
+    requestAnimationFrame(() => nameIn.focus());
+  }
+
+  function nativeDelete(it) {
+    if (!it?.id) return;
+    const ed = el("div", "editor lib-editor lib-rmone");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.trash), el("b", "", t("Remove {name}?", { name: it.name || it.id })));
+    ed.append(head);
+    ed.append(el("p", "lib-confirm", t("This deletes the native file at {path}. It is not imported into the library.", { path: it.path || it.name || it.id })));
+    const err = el("div", "editor-error");
+    const bar = el("div", "bar");
+    const go = button(t("Remove"), "primary danger-fill", async () => {
+      go.disabled = true;
+      try {
+        const doc = await nativeReq("native/file?id=" + encodeURIComponent(it.id));
+        takeNative(await nativeReq("native/file", { id: it.id, version: doc.version, remove: true }));
+        status(t("{name} removed", { name: it.name || it.id }), "ok");
+        closeLibModal(true);
+        render();
+      } catch (e) {
+        err.textContent = e.message;
+        go.disabled = false;
+      }
+    });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(err, bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
+  }
+
+  function nativeCopy(it) {
+    if (!it?.id) return;
+    if (it.kind === "mcp") {
+      const ed = el("div", "editor lib-editor");
+      const head = el("div", "ehead");
+      head.append(glyph(GLYPH.cmd), el("b", "", t("Copy {name}", { name: it.name || it.id })));
+      ed.append(head);
+      ed.append(el("p", "lib-confirm", t("MCP configs are not copied as a whole: mixed settings and Windows versus Linux commands would overwrite the target. Edit the native MCP file in place instead.")));
+      const bar = el("div", "bar");
+      bar.append(el("span", "grow"), button(t("Close"), "primary", () => closeLibModal(true)));
+      ed.append(bar);
+      modal = { save: () => closeLibModal(true) };
+      openLib(ed);
+      return;
+    }
+    const targets = (native?.roots || []).filter((r) => r.kind === it.kind && r.cli === it.cli && r.id !== it.root);
+    const ed = el("div", "editor lib-editor lib-native-copy");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.out), el("b", "", t("Copy {name}", { name: it.name || it.id })));
+    ed.append(head);
+    ed.append(el("p", "lib-confirm", t("Pick where to copy this native file. Nothing is written until you confirm.")));
+    const src = el("p", "lib-confirm");
+    src.append(el("b", "", t("Source")), el("span", "lib-problems-sep", " · "), el("span", "", nativeWho(it)), el("span", "lib-problems-sep", " · "), nativePathEl(it.path));
+    ed.append(src);
+    const pick = new Set();
+    const list = el("div", "lib-picks lib-native-targets");
+    const previewBox = el("div", "lib-native-preview");
+    const err = el("div", "editor-error");
+    err.setAttribute("role", "alert");
+    let preview = null;
+    const drawList = () => {
+      list.replaceChildren();
+      if (!targets.length) {
+        list.append(el("div", "lib-none", t("No compatible root to copy to")));
+        return;
+      }
+      for (const r of targets) {
+        const blocked = !nativeWritable(r);
+        const row = el("label", "lib-pick" + (blocked ? " dim" : ""));
+        const c = el("input");
+        c.type = "checkbox";
+        c.checked = pick.has(r.id);
+        c.disabled = blocked;
+        c.onchange = () => { if (c.checked) pick.add(r.id); else pick.delete(r.id); preview = null; previewBox.replaceChildren(); go.textContent = t("Preview"); };
+        const w = el("span", "who");
+        w.append(el("span", "name", r.name || r.cli || r.id), el("span", "sub", [nativeEnvLabel(r.environment), r.path || ""].filter(Boolean).join(" · ")));
+        row.append(c, w);
+        if (blocked) row.append(tag(t("Unavailable"), "warn", r.error));
+        list.append(row);
+      }
+    };
+    drawList();
+    const drawPreview = (p) => {
+      previewBox.replaceChildren();
+      if (!p) return;
+      for (const tg of p.targets || []) {
+        const card = el("div", "lib-native-diff");
+        const title = el("div", "name", nativeEnvLabel(tg.root?.environment) + " · " + (tg.root?.name || tg.root?.id || ""));
+        card.append(title);
+        if (tg.error) {
+          const why = el("div", "lib-native-why", tg.error);
+          why.setAttribute("role", "status");
+          card.append(why);
+        } else {
+          card.append(el("div", "sub", tg.exists ? t("Already exists") : t("Will create {name}", { name: tg.name || "" })));
+          const grid = el("div", "lib-native-diffgrid");
+          const before = el("pre", "lib-md", tg.before || "");
+          before.setAttribute("aria-label", t("Before"));
+          const after = el("pre", "lib-md", tg.after || "");
+          after.setAttribute("aria-label", t("After"));
+          grid.append(el("span", "label", t("Before")), el("span", "label", t("After")), before, after);
+          card.append(grid);
+        }
+        previewBox.append(card);
+      }
+    };
+    const go = button(t("Preview"), "primary", async () => {
+      err.textContent = "";
+      if (!pick.size) { err.textContent = t("Select at least one target"); return; }
+      if (!preview) {
+        go.disabled = true;
+        try {
+          preview = await nativeReq("native/copy/preview", { source: it.id, targets: [...pick] });
+          drawPreview(preview);
+          go.textContent = t("Apply copy");
+        } catch (e) {
+          err.textContent = e.message;
+        }
+        go.disabled = false;
+        return;
+      }
+      const ready = (preview.targets || []).filter((tg) => !tg.error && pick.has(tg.root?.id || tg.root));
+      if (!ready.length) { err.textContent = t("Nothing to copy"); return; }
+      go.disabled = true;
+      try {
+        const v = await nativeReq("native/copy/apply", {
+          source: it.id,
+          sourceVersion: preview.sourceVersion || it.version,
+          targets: ready.map((tg) => ({ root: tg.root?.id || tg.root, version: tg.version })),
+        });
+        takeNative(v.inventory || v);
+        const bad = (v.results || []).filter((r) => r.error);
+        if (bad.length) status(t("Copied with {n} errors", { n: bad.length }), "warn", 8000);
+        else status(t("Copied"), "ok");
+        closeLibModal(true);
+        render();
+      } catch (e) {
+        err.textContent = e.conflict ? t("The source changed since the preview. Preview again.") : e.message;
+        preview = null;
+        go.textContent = t("Preview");
+        go.disabled = false;
+      }
+    });
+    const bar = el("div", "bar");
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(list, previewBox, err, bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
+  }
+
   // ---------- the dialog ----------
 
   function openLib(content) { openModal(content); $("#modal").classList.add("lib"); }
@@ -5189,6 +5774,7 @@ magpie.plugin("library", (ctx) => {
   async function quietLoad() {
     if (page.hidden || modal || dirty() || probing) return;
     await load(true);
+    if (tab === "native") await loadNative(true);
   }
   const shelf = () => JSON.stringify([lib?.servers?.map((x) => x.name), lib?.skills?.map((x) => x.name)]);
 

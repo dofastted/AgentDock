@@ -495,11 +495,10 @@ func readView(problems []Problem, glance bool) (*View, error) {
 		} else if _, err := os.Lstat(p); err == nil && sv.Kind == "folder" {
 			sv.Kind, sv.Source = "", ""
 		}
-		if sharedHas(s.Name) {
-			for _, t := range targets {
-				if t.Skills != "" && (slices.Contains(readsShared, t.Agent.ID) || realDir(t.Skills) == realDir(sharedSkillsDir())) {
-					sv.Always = append(sv.Always, t.Agent.ID)
-				}
+		for _, t := range targets {
+			shared := SharedSkillsDirOf(t.Agent)
+			if t.Skills != "" && sharedHasIn(shared, s.Name) && (ReadsSharedSkills(t.Agent.ID) || realDir(t.Skills) == realDir(shared)) {
+				sv.Always = append(sv.Always, t.Agent.ID)
 			}
 		}
 		if o, ok := ccSwitchOrigin(s); ok {

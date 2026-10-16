@@ -1122,6 +1122,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	backupRoutes(mux, w)
 	archiveRoutes(mux)
 	libraryRoutes(mux, w)
+	nativeRoutes(mux)
 	updateRoutes(mux, w)
 	whatsNewRoutes(mux)
 	cliBehindRoutes(mux)

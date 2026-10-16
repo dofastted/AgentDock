@@ -11,16 +11,6 @@ import (
 // through \\wsl.localhost. A subagent names nothing on Windows, so it is
 // written as it is.
 
-// wslSubagentDirs are the folders under the distro's $HOME of the agents
-// that keep their subagents beside their home there.
-var wslSubagentDirs = map[string]string{
-	"claude":  filepath.Join(".claude", "agents"),
-	"codex":   filepath.Join(".codex", "agents"),
-	"gemini":  filepath.Join(".gemini", "agents"),
-	"cursor":  filepath.Join(".cursor", "agents"),
-	"copilot": filepath.Join(".copilot", "agents"),
-}
-
 // wslSubagentSpecOf is how t, an agent in a WSL distro, keeps subagents:
 // its kind's spec on this computer, in its folder in the distro. An agent
 // that keeps them in its own folder (OpenCode, Qwen Code, Droid, Grok) has
@@ -31,6 +21,7 @@ func wslSubagentSpecOf(t *Target) (*subagentSpec, string) {
 		return nil, fmt.Sprintf("WSL %s isn't running: %s is given its subagents once it runs", a.WSL, a.Name)
 	}
 	kind, _, _ := strings.Cut(a.ID, "@")
+	kind, _, _ = strings.Cut(kind, "#")
 	local := *a
 	local.ID, local.WSL = kind, ""
 	sp, why := subagentSpecOf(&Target{Agent: &local})
@@ -38,8 +29,7 @@ func wslSubagentSpecOf(t *Target) (*subagentSpec, string) {
 		return nil, why
 	}
 	c := *sp
-	if rel, ok := wslSubagentDirs[kind]; ok {
-		c.dir = filepath.Join(a.Home, rel)
+	if a.Dir != "" && under(c.dir, a.Dir) {
 		return &c, ""
 	}
 	if !under(c.dir, a.Home) {

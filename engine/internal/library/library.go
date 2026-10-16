@@ -215,7 +215,7 @@ func checkName(kind, name string) error {
 
 // agentRe is an agent's id: a name, or one in a WSL distro's
 // (codex@wsl:Ubuntu-24.04).
-var agentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(@wsl:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$`)
+var agentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(#[A-Za-z0-9][A-Za-z0-9._-]{0,63})?(@wsl:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$`)
 
 func checkAgent(id string) error {
 	if !agentRe.MatchString(id) {

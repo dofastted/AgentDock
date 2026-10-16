@@ -313,14 +313,16 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			http.Error(rw, "no path", http.StatusBadRequest)
 			return
 		}
-		v, err := library.Read(nil)
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		if !slices.Contains(revealable(v), in.Path) {
-			http.Error(rw, "not a path the library shows", http.StatusForbidden)
-			return
+		if !library.NativeRevealable(in.Path) {
+			v, err := library.Read(nil)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			if !slices.Contains(revealable(v), in.Path) {
+				http.Error(rw, "not a path the library shows", http.StatusForbidden)
+				return
+			}
 		}
 		// a file is shown in its folder; one not written yet, the folder it will be in
 		p := in.Path

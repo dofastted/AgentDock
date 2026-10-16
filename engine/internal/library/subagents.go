@@ -103,9 +103,15 @@ func subagentSpecOf(t *Target) (*subagentSpec, string) {
 		return [][2]string{{"name", yamlStr(s.Name)}, {"description", yamlStr(s.Description)}}
 	}
 	h := home()
+	dir := func(fallback string) string {
+		if a.Dir != "" {
+			return a.Dir
+		}
+		return fallback
+	}
 	switch a.ID {
 	case "claude":
-		sp := md(filepath.Join(claudeDir(), "agents"), func(s *Subagent, skills, mcp []string) [][2]string {
+		sp := md(filepath.Join(dir(claudeDir()), "agents"), func(s *Subagent, skills, mcp []string) [][2]string {
 			kv := plain(s, nil, nil)
 			if len(skills) > 0 {
 				kv = append(kv, [2]string{"skills", yamlList(skills)})
@@ -118,14 +124,14 @@ func subagentSpecOf(t *Target) (*subagentSpec, string) {
 		sp.skills, sp.mcp = true, true
 		return sp, ""
 	case "codex":
-		return &subagentSpec{dir: filepath.Join(codexDir(), "agents"), ext: ".toml", render: codexRole}, ""
+		return &subagentSpec{dir: filepath.Join(dir(codexDir()), "agents"), ext: ".toml", render: codexRole}, ""
 	case "opencode":
 		// named by its file; mode subagent is for the main agent to call
 		return md(filepath.Join(filepath.Dir(a.Path), "agents"), func(s *Subagent, _, _ []string) [][2]string {
 			return [][2]string{{"description", yamlStr(s.Description)}, {"mode", "subagent"}}
 		}), ""
 	case "gemini":
-		return md(filepath.Join(h, ".gemini", "agents"), plain), ""
+		return md(filepath.Join(dir(filepath.Join(h, ".gemini")), "agents"), plain), ""
 	case "qwen":
 		return md(filepath.Join(a.Dir, "agents"), plain), ""
 	case "droid":
@@ -141,13 +147,13 @@ func subagentSpecOf(t *Target) (*subagentSpec, string) {
 	case "grok":
 		return md(filepath.Join(a.Dir, "agents"), plain), ""
 	case "cursor":
-		return md(filepath.Join(h, ".cursor", "agents"), plain), ""
+		return md(filepath.Join(dir(filepath.Join(h, ".cursor")), "agents"), plain), ""
 	case "copilot":
 		d := appdir.Getenv("COPILOT_HOME")
 		if d == "" {
 			d = filepath.Join(h, ".copilot")
 		}
-		sp := md(filepath.Join(d, "agents"), plain)
+		sp := md(filepath.Join(dir(d), "agents"), plain)
 		sp.ext = ".agent.md"
 		return sp, ""
 	}

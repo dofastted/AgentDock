@@ -426,19 +426,22 @@ func linked(p string) bool {
 	return ok
 }
 
-// sharedSkillsDir is the user-wide shared skills folder, the cross-agent
-// convention a project's .agents/skills is the project's own of (#227):
-// the library finds skills there but never moves one out of it. It gives
-// skills to it only for the agents whose one place it is (Kimi Code,
-// Goose, Cindy): one link there, whichever of them it's for.
-func sharedSkillsDir() string { return filepath.Join(home(), ".agents", "skills") }
+// sharedSkillsDir is this machine's user-wide shared skills folder, the
+// cross-agent convention a project's .agents/skills is the project's own
+// of (#227): the library finds skills there but never moves one out of it.
+// It gives skills to it only for the agents whose one place it is (Kimi
+// Code, Goose, Cindy): one link there, whichever of them it's for. A WSL
+// distro has its own folder, SharedSkillsDirOf.
+func sharedSkillsDir() string { return SharedSkillsDirOf(nil) }
 
-// sharedHas is whether the library's skill by that name is kept in
-// ~/.agents/skills: the user's own entry there (not a link magpie made)
-// is the very folder the library's is or links to, so every agent that
-// reads the shared folder has it, whatever the library gives.
-func sharedHas(name string) bool {
-	p, lib := filepath.Join(sharedSkillsDir(), name), skillDir(name)
+// sharedHas is whether the library's skill by that name is kept in this
+// machine's ~/.agents/skills: the user's own entry there (not a link
+// magpie made) is the very folder the library's is or links to, so every
+// agent that reads the shared folder has it, whatever the library gives.
+func sharedHas(name string) bool { return sharedHasIn(sharedSkillsDir(), name) }
+
+func sharedHasIn(dir, name string) bool {
+	p, lib := filepath.Join(dir, name), skillDir(name)
 	if _, err := os.Lstat(p); err != nil || ours(p, name) {
 		return false
 	}
@@ -477,20 +480,23 @@ func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
 	}
 	// an agent that reads ~/.agents/skills as well as its own folder finds
 	// a skill magpie put there for another (Kimi Code) already: a link in
-	// its own too would be the skill twice
-	shared := realDir(sharedSkillsDir())
+	// its own too would be the skill twice. Only that environment's shared
+	// root counts: a Windows shared skill is not Debian's.
+	sharedDir := SharedSkillsDirOf(t.Agent)
+	shared := realDir(sharedDir)
+	env := targetEnv(t.Agent)
 	inShared := func(s *Skill) bool {
-		if s == nil || !slices.Contains(readsShared, id) || realDir(t.Skills) == shared {
+		if s == nil || !ReadsSharedSkills(id) || realDir(t.Skills) == shared {
 			return false
 		}
 		// the library's skill is kept in the shared folder itself (brought
 		// in from there): every agent reading it has it, ticked or not (#595)
-		if sharedHas(s.Name) {
+		if sharedHasIn(sharedDir, s.Name) {
 			return true
 		}
-		p := filepath.Join(sharedSkillsDir(), s.Name)
+		p := filepath.Join(sharedDir, s.Name)
 		return slices.ContainsFunc(all, func(o *Target) bool {
-			return o.Skills != "" && realDir(o.Skills) == shared && slices.Contains(s.Agents, o.Agent.ID)
+			return o.Skills != "" && targetEnv(o.Agent) == env && realDir(o.Skills) == shared && slices.Contains(s.Agents, o.Agent.ID)
 		}) && (ours(p, s.Name) || realDir(p) == realDir(skillDir(s.Name)))
 	}
 	var mine []string
@@ -1660,6 +1666,10 @@ type FoundSkill struct {
 	// there; the agents that have it are those whose entry is a link (or a
 	// junction) to the very same folder
 	Shared string `json:"shared,omitempty"`
+	// Env is empty for this machine, or "wsl:<distro>" for a skill that
+	// lives in that distro. Same-named skills in different environments
+	// stay separate rows so a Windows import cannot own a WSL folder.
+	Env string `json:"env,omitempty"`
 	// Library is its folder in the library's own skills folder, put there
 	// by hand (or left by a library.json that lost it): brought in, it is
 	// listed where it is (#595)
@@ -1670,20 +1680,38 @@ type FoundSkill struct {
 
 func foundSkills(l *Library) []FoundSkill {
 	var out []*FoundSkill
-	byName := map[string]*FoundSkill{}
+	byKey := map[string]*FoundSkill{}
 	// the library's own folder first, for what it holds that the library
-	// doesn't list, then the shared folder, so a skill there is the row the
-	// agents' links to it join
+	// doesn't list, then each environment's shared folder, so a skill
+	// there is the row the agents' links to it join — Windows and WSL
+	// roots of the same name stay distinct
 	type place struct {
-		dir, agent string
-		lib        bool
+		dir, agent, env string
+		lib             bool
 	}
-	places := []place{{dir: skillsDir(), lib: true}, {dir: sharedSkillsDir()}}
-	for _, t := range Targets() {
+	ts := Targets()
+	places := []place{{dir: skillsDir(), lib: true}}
+	seenShared := map[string]bool{}
+	addShared := func(dir, env string) {
+		if dir == "" {
+			return
+		}
+		k := env + "\x00" + filepath.Clean(dir)
+		if seenShared[k] {
+			return
+		}
+		seenShared[k] = true
+		places = append(places, place{dir: dir, env: env})
+	}
+	addShared(sharedSkillsDir(), "")
+	for _, t := range ts {
+		if t.Agent.Home != "" {
+			addShared(SharedSkillsDirOf(t.Agent), targetEnv(t.Agent))
+		}
 		// Claude Desktop's are its own, built in or made there, kept in its
 		// manifest: one brought in would leave it a link it can't read from
 		if t.Skills != "" && t.Desktop == nil {
-			places = append(places, place{dir: t.Skills, agent: t.Agent.ID})
+			places = append(places, place{dir: t.Skills, agent: t.Agent.ID, env: targetEnv(t.Agent)})
 		}
 	}
 	// a skill in several agents is compared with the first found, which
@@ -1694,7 +1722,8 @@ func foundSkills(l *Library) []FoundSkill {
 		for _, e := range es {
 			name := e.Name()
 			p := filepath.Join(pl.dir, name)
-			f := byName[name]
+			key := name + "\x00" + pl.env
+			f := byKey[key]
 			// magpie's link to the library's folder is an agent having the
 			// one found there
 			if strings.HasPrefix(name, ".") || ours(p, name) && (f == nil || f.Library == "") || l.skill(name) != nil || !nameRe.MatchString(name) {
@@ -1707,7 +1736,7 @@ func foundSkills(l *Library) []FoundSkill {
 			r := realDir(p)
 			switch {
 			case f == nil:
-				f = &FoundSkill{Name: name, Description: m.Description, Agents: []string{}, real: r, at: p}
+				f = &FoundSkill{Name: name, Description: m.Description, Agents: []string{}, Env: pl.env, real: r, at: p}
 				switch {
 				case pl.lib:
 					f.Library = p
@@ -1719,7 +1748,7 @@ func foundSkills(l *Library) []FoundSkill {
 				if linked(p) {
 					f.Link = r
 				}
-				byName[name] = f
+				byKey[key] = f
 				out = append(out, f)
 			case f.real == r:
 				if pl.agent == "" {
@@ -1737,7 +1766,12 @@ func foundSkills(l *Library) []FoundSkill {
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Env < out[j].Env
+	})
 	res := []FoundSkill{}
 	for _, f := range out {
 		res = append(res, *f)
@@ -1779,7 +1813,7 @@ func ImportSkills(names []string) (*Result, error) {
 }
 
 func importSkill(l *Library, found []FoundSkill, name string) error {
-	i := slices.IndexFunc(found, func(f FoundSkill) bool { return f.Name == name })
+	i := importFound(found, name)
 	if i < 0 {
 		return fmt.Errorf("no agent has a skill called %s that the library hasn't", name)
 	}
@@ -1794,9 +1828,10 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	// .git behind, and the skills CLI's lock names it where it was
 	from := (&tracer{}).folder(f.real)
 	src := &Source{Kind: "folder", Dir: f.real}
-	// one in the shared ~/.agents/skills (or a link into it) stays
-	// there, linked to: the shared folder is the user's, never emptied
-	shared := f.Shared != "" || within(f.real, realDir(sharedSkillsDir()))
+	// one in a shared ~/.agents/skills (or a link into it) stays there,
+	// linked to: the shared folder is the user's, never emptied. A native
+	// WSL folder is never moved into the Windows library.
+	keep := f.Link != "" || f.Shared != "" || nativeWSLSkill(f) || withinAnyShared(f.real)
 	switch {
 	case f.Library != "":
 		// in the library's folder already (#595): listed where it is, a
@@ -1804,7 +1839,7 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 		if !linked(f.Library) {
 			src = nil
 		}
-	case f.Link != "" || shared:
+	case keep:
 		if err := dirLink(f.real, skillDir(name)); err != nil {
 			return err
 		}
@@ -1834,6 +1869,70 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	slices.Sort(agents)
 	l.Skills = append(l.Skills, &Skill{Name: name, Source: src, Agents: slices.Compact(agents), From: from})
 	return nil
+}
+
+// importFound is the found skill to bring in by name: this machine's row
+// when both environments have one, so a WSL folder is not chosen as the
+// Windows library's source.
+func importFound(found []FoundSkill, name string) int {
+	host, other := -1, -1
+	for i, f := range found {
+		if f.Name != name {
+			continue
+		}
+		if f.Env == "" && !nativeWSLSkill(f) {
+			if host < 0 {
+				host = i
+			}
+			continue
+		}
+		if other < 0 {
+			other = i
+		}
+	}
+	if host >= 0 {
+		return host
+	}
+	return other
+}
+
+func nativeWSLSkill(f FoundSkill) bool {
+	if f.Env != "" {
+		return true
+	}
+	return wslSkillPath(f.real) || wslSkillPath(f.Shared) || wslSkillPath(f.at)
+}
+
+func wslSkillPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	s := strings.ToLower(filepath.ToSlash(p))
+	if strings.Contains(s, "/wsl.localhost/") || strings.Contains(s, "/wsl$/") {
+		return true
+	}
+	r := realDir(p)
+	for _, t := range Targets() {
+		if t.Agent.WSL == "" || t.Agent.Home == "" {
+			continue
+		}
+		if within(p, t.Agent.Home) || within(r, t.Agent.Home) {
+			return true
+		}
+	}
+	return false
+}
+
+func withinAnyShared(p string) bool {
+	if within(p, realDir(sharedSkillsDir())) {
+		return true
+	}
+	for _, t := range Targets() {
+		if t.Agent.Home != "" && within(p, realDir(SharedSkillsDirOf(t.Agent))) {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveFoundSkill takes a skill the agents have of their own out of every

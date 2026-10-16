@@ -251,6 +251,13 @@ func (f *mcpFile) supports(s *Server) error {
 // backslash in it, or …/npx.cmd.
 var windowsPath = regexp.MustCompile(`^[A-Za-z]:[\\/]|\\|(?i)\.(?:exe|cmd|bat|ps1)$`)
 
+// WindowsMCPCommand is whether command is a Windows program a WSL agent
+// cannot start. Magpie's own image server is still rewritten by side;
+// a user's command is refused. Do not strip .exe to invent a Linux one.
+func WindowsMCPCommand(command string) bool {
+	return command != "" && windowsPath.MatchString(command)
+}
+
 // foreign says why an entry by the server's name that magpie can't read as
 // a server is one it mustn't write over, or nil: Zed's server from an
 // extension is its "settings" alone, which a command written beside it
