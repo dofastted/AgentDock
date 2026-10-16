@@ -154,8 +154,10 @@ pub fn show_error(app: &AppHandle, err: &anyhow::Error) {
 
 fn spawn_engine(app: &AppHandle, initial: bool) -> Result<()> {
     let sidecar = sidecar_path()?;
-    let xdg = settings::app_dir();
-    fs::create_dir_all(&xdg).with_context(|| format!("create {}", xdg.display()))?;
+    let app_dir = settings::app_dir();
+    let magpie = app_dir.join("magpie");
+    fs::create_dir_all(&app_dir).with_context(|| format!("create {}", app_dir.display()))?;
+    fs::create_dir_all(&magpie).with_context(|| format!("create {}", magpie.display()))?;
     fs::create_dir_all(settings::log_dir())
         .with_context(|| format!("create {}", settings::log_dir().display()))?;
 
@@ -183,7 +185,8 @@ fn spawn_engine(app: &AppHandle, initial: bool) -> Result<()> {
         let mut cmd = Command::new(&sidecar);
         cmd.arg("serve")
             .arg(format!("--web=127.0.0.1:{port}"))
-            .env("XDG_CONFIG_HOME", &xdg)
+            // Isolate engine state without redirecting external CLI config roots.
+            .env("AGENTDOCK_DATA_DIR", &magpie)
             .env("MAGPIE_WEB_KEY", &key)
             .stdin(Stdio::null())
             .stdout(log_file)

@@ -34,6 +34,7 @@ func TestConfigNeverRelative(t *testing.T) {
 	t.Setenv(homeVar(), home)
 	t.Setenv("XDG_CONFIG_HOME", "relative/cfg")
 	t.Setenv("XDG_CACHE_HOME", "relative/cache")
+	t.Setenv(DataDirVar, "relative/agentdock")
 	if got, want := Config(), filepath.Join(home, ".config", "magpie"); got != want {
 		t.Errorf("Config() = %q, want %q", got, want)
 	}
@@ -107,6 +108,7 @@ func TestTildeFolderVariables(t *testing.T) {
 		{"APPDATA", "~/AppData/Roaming", false},
 		{"LOCALAPPDATA", "~/AppData/Local", false},
 		{"MAGPIE_BIN_DIR", "~/.local/bin", false},
+		{DataDirVar, "~/.config/AgentDock/magpie", false},
 		{"CODEX_HOME", "~/.codex", false},
 		{"OPENCODE_CONFIG_DIR", "~/opencode", false},
 		{"OPENCHAMBER_DATA_DIR", "~", false},

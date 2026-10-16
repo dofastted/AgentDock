@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -121,6 +122,7 @@ func TestResolveAppImage(t *testing.T) {
 
 func TestFolders(t *testing.T) {
 	t.Setenv("APPIMAGE", "")
+	t.Setenv(DataDirVar, "")
 	r := root(t)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(r, "cfg"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(r, "cache"))
@@ -143,6 +145,139 @@ func TestFolders(t *testing.T) {
 	}
 	if d, _ := SystemCache(); d != filepath.Join(data, "cache") {
 		t.Errorf("portable system cache %q", d)
+	}
+}
+
+// AGENTDOCK_DATA_DIR names magpie's own state folder without taking
+// XDG_CONFIG_HOME from the agents. It is that folder itself; portable
+// still wins; a relative or empty value is ignored.
+func TestAgentDockDataDir(t *testing.T) {
+	t.Setenv("APPIMAGE", "")
+	t.Cleanup(func() { UseExecutable("") })
+	UseExecutable("")
+	r := root(t)
+	home := filepath.Join(r, "home")
+	mkdir(t, home)
+	t.Setenv(homeVar(), home)
+	xdg := filepath.Join(r, "xdg")
+	engine := filepath.Join(r, "AgentDock", "magpie")
+	mkdir(t, engine)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(r, "cache"))
+
+	t.Setenv(DataDirVar, "")
+	if got, want := Config(), filepath.Join(xdg, "magpie"); got != want {
+		t.Errorf("standalone Config() = %q, want %q", got, want)
+	}
+	if got, want := installed(), filepath.Join(xdg, "magpie"); got != want {
+		t.Errorf("standalone installed() = %q, want %q", got, want)
+	}
+	if got := Getenv("XDG_CONFIG_HOME"); got != xdg {
+		t.Errorf("standalone Getenv(XDG_CONFIG_HOME) = %q, want %q", got, xdg)
+	}
+	if got, want := Redirected(), filepath.Join(home, ".config", "magpie"); got != want {
+		t.Errorf("standalone Redirected() = %q, want %q", got, want)
+	}
+
+	t.Setenv(DataDirVar, engine)
+	if got := Config(); got != filepath.Clean(engine) {
+		t.Errorf("Config() = %q, want the engine folder %q, not XDG/magpie", got, engine)
+	}
+	if got := installed(); got != filepath.Clean(engine) {
+		t.Errorf("installed() = %q, want %q", got, engine)
+	}
+	if got := Getenv("XDG_CONFIG_HOME"); got != xdg {
+		t.Errorf("Getenv(XDG_CONFIG_HOME) = %q, want the agents' %q", got, xdg)
+	}
+	if got := os.Getenv("XDG_CONFIG_HOME"); got != xdg {
+		t.Errorf("environment XDG_CONFIG_HOME = %q, want %q kept for children", got, xdg)
+	}
+	if got, want := ClaudeDirIn(home), filepath.Join(home, ".claude"); got != want {
+		t.Errorf("ClaudeDirIn = %q, want %q (CLI roots unchanged)", got, want)
+	}
+	if got, want := Cache(), filepath.Join(r, "cache", "magpie"); got != want {
+		t.Errorf("Cache() = %q, want XDG_CACHE_HOME/magpie %q", got, want)
+	}
+	def := filepath.Join(home, ".config", "magpie")
+	if got := Redirected(); got != def {
+		t.Errorf("Redirected() = %q, want the default %q", got, def)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got := Config(); got != filepath.Clean(engine) {
+		t.Errorf("Config() with empty XDG = %q, want AGENTDOCK_DATA_DIR", got)
+	}
+	if got := Redirected(); got != def {
+		t.Errorf("Redirected() with empty XDG = %q, want %q", got, def)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv(DataDirVar, def)
+	if got := Config(); got != filepath.Clean(def) {
+		t.Errorf("Config() = %q, want the default folder itself", got)
+	}
+	if got := Redirected(); got != "" {
+		t.Errorf("Redirected() when AGENTDOCK_DATA_DIR is the default = %q, want empty", got)
+	}
+
+	t.Setenv(DataDirVar, engine)
+	for _, bad := range []string{"", "relative/magpie", ".", "~/.config/AgentDock/magpie"} {
+		t.Setenv(DataDirVar, bad)
+		if got, want := Config(), filepath.Join(xdg, "magpie"); got != want {
+			t.Errorf("Config() with AGENTDOCK_DATA_DIR=%q = %q, want XDG %q", bad, got, want)
+		}
+		if got, want := installed(), filepath.Join(xdg, "magpie"); got != want {
+			t.Errorf("installed() with AGENTDOCK_DATA_DIR=%q = %q, want XDG %q", bad, got, want)
+		}
+		if got := os.Getenv(DataDirVar); got != bad {
+			t.Errorf("environment AGENTDOCK_DATA_DIR = %q, want %q kept for children", got, bad)
+		}
+	}
+	t.Setenv(DataDirVar, "relative/magpie")
+	ignored, err := CheckEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(ignored, DataDirVar) {
+		t.Errorf("CheckEnv ignored %v, want %s among them", ignored, DataDirVar)
+	}
+	if got := Getenv(DataDirVar); got != "" {
+		t.Errorf("Getenv(%s) = %q, want unset inside magpie", DataDirVar, got)
+	}
+
+	t.Setenv(DataDirVar, engine)
+	exe := touch(t, filepath.Join(r, "port", "magpie"))
+	data := filepath.Join(r, "port", "data")
+	mkdir(t, data)
+	UseExecutable(exe)
+	if got := Config(); got != data {
+		t.Errorf("portable Config() = %q, want %q, not AGENTDOCK_DATA_DIR", got, data)
+	}
+	if got := Redirected(); got != "" {
+		t.Errorf("portable Redirected() = %q, want empty", got)
+	}
+	if got := installed(); got != filepath.Clean(engine) {
+		t.Errorf("portable installed() = %q, want AGENTDOCK_DATA_DIR %q", got, engine)
+	}
+
+	UseExecutable("")
+	touch(t, filepath.Join(engine, "providers.json"))
+	was := sharedFolder
+	apps := filepath.Join(r, "Applications")
+	sharedFolder = func(dir string) bool { return dir == apps }
+	t.Cleanup(func() { sharedFolder = was })
+	sharedExe := touch(t, filepath.Join(apps, "magpie"))
+	sharedData := filepath.Join(apps, "data")
+	mkdir(t, sharedData)
+	touch(t, filepath.Join(sharedData, "settings.json"))
+	if got := Resolve(sharedExe); got != "" {
+		t.Errorf("installed AGENTDOCK_DATA_DIR has files: Resolve = %q, want installed", got)
+	}
+	if got := Passed(sharedExe); got != sharedData {
+		t.Errorf("Passed = %q, want %q", got, sharedData)
+	}
+	UseExecutable(sharedExe)
+	if got := Config(); got != filepath.Clean(engine) {
+		t.Errorf("Config with passed shared data = %q, want AGENTDOCK_DATA_DIR", got)
 	}
 }
 
@@ -170,6 +305,7 @@ func TestWebView(t *testing.T) {
 // magpie's files; it is when nothing is installed, or with .portable.
 func TestResolveSharedFolder(t *testing.T) {
 	t.Setenv("APPIMAGE", "")
+	t.Setenv(DataDirVar, "")
 	r := root(t)
 	apps := filepath.Join(r, "Applications")
 	was := sharedFolder
@@ -233,6 +369,7 @@ func TestResolveDownloads(t *testing.T) {
 	t.Setenv("HOME", h)
 	t.Setenv("USERPROFILE", h)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv(DataDirVar, "")
 	dl := filepath.Join(h, "Downloads")
 	exe := touch(t, filepath.Join(dl, "magpie.exe"))
 	data := filepath.Join(dl, "data")

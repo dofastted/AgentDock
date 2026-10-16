@@ -125,6 +125,11 @@ func Isolate() (string, error) {
 			return "", err
 		}
 	}
+	// appdir tests import testenv, so importing appdir for its constant would
+	// create a cycle. Never let the engine-only override escape the sandbox.
+	if err := os.Unsetenv("AGENTDOCK_DATA_DIR"); err != nil {
+		return "", err
+	}
 	for _, k := range append(slices.Clone(agentenv.Vars), agentenv.ClaudeProviders...) {
 		if err := os.Unsetenv(k); err != nil {
 			return "", err
@@ -163,7 +168,7 @@ func checkChild(home string) error {
 	if !within(home, tmp) {
 		return fmt.Errorf("%s is %q, outside the temporary folder %s", Marker, home, tmp)
 	}
-	vars := append([]string{}, folderVars...)
+	vars := append([]string{"AGENTDOCK_DATA_DIR"}, folderVars...)
 	for _, k := range agentenv.Vars {
 		if !agentenv.NotPaths[k] {
 			vars = append(vars, k)

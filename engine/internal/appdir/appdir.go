@@ -20,6 +20,13 @@
 // keychain, the folders the OS reads for autostart and link handling, and
 // temporary folders.
 //
+// AGENTDOCK_DATA_DIR, when it names a rooted folder, is the installed
+// magpie state directory itself, so a host can keep magpie's files
+// somewhere other than $XDG_CONFIG_HOME/magpie without taking
+// XDG_CONFIG_HOME from the agents. Portable still wins; a relative or
+// empty value is ignored; without it, installed magpie is
+// $XDG_CONFIG_HOME/magpie or ~/.config/magpie, as it always was.
+//
 // A data folder in a folder every app or download shares (/Applications on
 // a Mac; the home folder, Downloads, Desktop and Documents everywhere) is
 // taken for magpie's own only when it already holds magpie's files and the
@@ -51,6 +58,11 @@ const (
 	// MarkerName is a file beside magpie that makes it portable too, its
 	// files then going into a data folder made beside it.
 	MarkerName = ".portable"
+	// DataDirVar is the absolute folder AgentDock's engine keeps magpie's
+	// own files in. It is that magpie folder itself, not a parent of
+	// "magpie". Portable still wins; a relative or empty value is ignored,
+	// as other folder variables are.
+	DataDirVar = "AGENTDOCK_DATA_DIR"
 )
 
 var (
@@ -172,9 +184,24 @@ var sharedFolder = func(dir string) bool {
 	return false
 }
 
+// dataDir is the installed magpie folder AGENTDOCK_DATA_DIR names, or ""
+// when the variable is unset, empty or not rooted. It is the folder
+// itself: Config, installed and Redirected use it as magpie's state
+// directory, and the agents still read XDG_CONFIG_HOME as the user set it.
+func dataDir() string {
+	x := os.Getenv(DataDirVar)
+	if !rooted(x) {
+		return ""
+	}
+	return filepath.Clean(x)
+}
+
 // installed is the folder an installed magpie keeps its files in, or ""
 // with no home folder.
 func installed() string {
+	if d := dataDir(); d != "" {
+		return d
+	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); rooted(x) {
 		return filepath.Join(x, "magpie")
 	}
@@ -227,6 +254,9 @@ func Config() string {
 	if p := Portable(); p != "" {
 		return p
 	}
+	if d := dataDir(); d != "" {
+		return d
+	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); rooted(x) {
 		return filepath.Join(x, "magpie")
 	}
@@ -235,12 +265,12 @@ func Config() string {
 
 // Redirected is the folder magpie keeps its files in when it is opened
 // from the Dock, the Start menu or a desktop launcher (~/.config/magpie),
-// while this magpie reads them from another that XDG_CONFIG_HOME, set in
-// the shell it was run from, names; "" when they are the same, or magpie
-// is portable. A magpie run in such a shell sees none of what the app's
-// window shows.
+// while this magpie reads them from another that AGENTDOCK_DATA_DIR or
+// XDG_CONFIG_HOME, set in the shell it was run from, names; "" when they
+// are the same, or magpie is portable. A magpie run in such a shell sees
+// none of what the app's window shows.
 func Redirected() string {
-	if Portable() != "" || os.Getenv("XDG_CONFIG_HOME") == "" {
+	if Portable() != "" || (dataDir() == "" && os.Getenv("XDG_CONFIG_HOME") == "") {
 		return ""
 	}
 	h, err := Home()
