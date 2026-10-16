@@ -2,8 +2,8 @@
 
 `engine/` is a squash `git subtree` of github.com/yetone/magpie `main`.
 
-- Split: `422d057ded55e4eddf0b719bf2229e537c1fef24` (2026-10-15). Not yet pulled forward.
-- Next pull target, once `main` is still that SHA: `674b6ca2881f1289c4ccdec158762978a463320c`.
+- Split: `7597c13237c6eaecba89b478771f2f1d244108e4` (2026-10-16), pulled in `c00eb7543`. `main` had moved past the planned `674b6ca`; the pull includes that extra commit (`7597c1323`, provider curl-paste).
+- Last resolution: `internal/library/targets.go` conflicted. Kept upstream `SharedName` (Cursor editor files named for both apps) and AgentDock `switch targetKind(a.ID)`. Nothing dropped. `agents.go` and `i18n.js` auto-merged.
 - Command: `git subtree pull --prefix=engine https://github.com/yetone/magpie.git main --squash`.
 - After every pull, on the Windows box: `cd engine && go vet ./... && go test -tags nogui ./...`.
 
@@ -49,7 +49,7 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/library/skills.go` | environment-local shared skills, no import-on-browse |
 | `internal/library/subagents.go` | WSL subagents |
 | `internal/library/sync.go` | native files are not moved by library sync |
-| `internal/library/targets.go` | WSL shared/private/profile roots and capabilities |
+| `internal/library/targets.go` | WSL shared/private/profile roots and capabilities; `targetKind` strips `@wsl` and profile. 2026-10-16 pull also kept upstream `SharedName` |
 | `internal/library/wsl_test.go` | target regression |
 | `internal/sessions/wsl.go` | a distro turned off lists no sessions |
 | `internal/settings/settings.go` | `WSLDistrosOff`, kept in `KeepOwn` |
