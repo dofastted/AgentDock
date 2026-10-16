@@ -21,6 +21,6 @@
   "children": [],
   "parent": "10-15-unified-agent-manager",
   "relatedFiles": [],
-  "notes": "In-place repair implemented and unit-tested for native inventory fairness. Live API before the cap fix showed Windows skill files filling the 4000-item limit and omitting WSL items. That fix now passes TestNative, but the rebuilt engine was not smoked again. Other local magpie services were already stopped; magpie-bun.exe is the current AgentDock plugin host and was kept. Docker container magpie is exited.",
+  "notes": "Rebuilt engine smoked on 2026-10-16: Debian running as mci777, native Gemini at ~/.nvm with the Windows npm launcher recorded separately. Native inventory returned 887 Windows and 794 Debian items, including 240 WSL shared skills and 13 Codex prompts. A disposable Debian Codex skill was created from Windows, edited inside WSL, reread by Windows, then deleted. TestNative passed. Full engine suite was not rerun to green. Docker magpie container remains exited; the running magpie-bun.exe is this AgentDock engine's plugin host.",
   "meta": {}
 }
