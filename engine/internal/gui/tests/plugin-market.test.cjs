@@ -98,10 +98,12 @@ function server(lang, asked) {
 const L = {
   en: { tab: "Plugins", ours: "Subscriptions", install: "Install", soon: "Coming soon", signIn: "Sign in", onNpm: "On npm",
     installed: "Installed", failed: /Didn't load: Cannot find module/, update: "Update", remove: "Remove", moreTile: "More in Plugins",
-    lookFor: "look for a plugin", week: "48k/week", readme: "Install", signing: "GitHub Copilot" },
+    lookFor: "look for a plugin", week: "48k/week", readme: "Install", signing: "GitHub Copilot",
+    replaces: "Replaces built-in", replacesWhy: /sign-in to this subscription is deprecated: this plugin takes its place/ },
   zh: { tab: "插件", ours: "订阅", install: "安装", soon: "即将上线", signIn: "登录", onNpm: "npm 上的插件",
     installed: "已安装", failed: /没有加载成功：Cannot find module/, update: "更新", remove: "移除", moreTile: "插件中还有更多",
-    lookFor: "找找插件", week: "48k/周", readme: "Install", signing: "GitHub Copilot" },
+    lookFor: "找找插件", week: "48k/周", readme: "Install", signing: "GitHub Copilot",
+    replaces: "替代内置", replacesWhy: /此订阅登录已弃用：由此插件接替/ },
 };
 
 const shot = async (loc, name) => {
@@ -145,6 +147,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.doesNotMatch(await view.innerText(), /OpenCode 社区|OpenCode's community/);
         assert.equal(await view.locator('.pm-card[data-pkg="@magpie-community/opencode-qoder-auth"] .pm-act').innerText(), w.soon);
         assert.ok(await view.locator('.pm-card[data-pkg="@magpie-community/opencode-qoder-auth"] .pm-act').isDisabled());
+        // a plugin that takes a deprecated built-in's place says so, not
+        // that magpie still has it too (molvqingtai on Discord: a new
+        // user can't add the built-in at all)
+        const replaces = view.locator('.pm-card[data-pkg="@magpie-community/opencode-zed-auth"] .pm-chip.soft');
+        assert.equal((await replaces.innerText()).trim(), w.replaces);
+        assert.match(await replaces.getAttribute("title"), w.replacesWhy);
         await shot(view, `plugins-discover-${engine}-${lang}`);
         await view.locator(".pm-find input").fill("copilot");
         const copilot = view.locator('.pm-card[data-pkg="opencode-copilot-auth"]');

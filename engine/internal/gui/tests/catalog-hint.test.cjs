@@ -62,7 +62,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator(".row.provider", { has: page.locator(".name", { hasText: /^002$/ }) }).click();
         const ed = page.locator(".editor");
         await ed.waitFor();
-        const more = ed.locator("details.more");
+        const more = ed.locator("details.more:not(.advanced)");
         await more.locator("summary", { hasText: w.more }).click();
         const hint = more.locator(".hint", { hasText: w.prices });
         assert.equal(await hint.count(), 1, "one hint names list prices");

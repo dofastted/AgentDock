@@ -13,6 +13,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 const relay = {
   id: "relay", name: "Relay", icon: "generic", chat: "", responses: "", anthropic: "https://relay.example.com", catalog: "",
   models: [{ id: "claude-haiku-4-5", name: "Claude Haiku 4.5", on: true }], agents: [], fallback: [], headers: {},
@@ -80,6 +87,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).first().click();
+      await unfold(page);
       await page.locator(".editor .bar").waitFor();
       return { page, errors, posts };
     };
@@ -143,6 +151,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal("authHeader" in saved.body, false);
       await page.locator(".editor .bar").getByRole("button", { name: lang === "zh" ? "取消" : "Cancel", exact: true }).click().catch(() => {});
       await page.locator(".row.provider", { hasText: "Codex" }).first().click();
+      await unfold(page);
       await page.locator(".editor .bar").waitFor();
       assert.equal(await seg(page).count(), 0);
       assert.deepEqual(errors, []);

@@ -624,12 +624,14 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		out.KeyList = []provider.KeyInfo{}
 	}
 	// a key the gateway passes over after a failure says so on its row
+	restKey := p.RestKeys()
 	for i, k := range out.KeyList {
 		if !k.On {
 			continue
 		}
-		if r, ok := keyRestOf(p.RestKey(k)); ok {
-			out.KeyList[i].Rest = &provider.KeyRest{Why: r.Why, Status: r.Status, Until: r.Until, Key: p.RestKey(k)}
+		key := restKey(k)
+		if r, ok := keyRestOf(key); ok {
+			out.KeyList[i].Rest = &provider.KeyRest{Why: r.Why, Status: r.Status, Until: r.Until, Key: key}
 		}
 	}
 	if !out.Key.Set && p.Ready() {
@@ -957,18 +959,25 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	})
 	// Recent-call bodies are read only when their row is opened, not with
 	// every Providers or Gateway refresh (#1521): forty calls' bodies made
-	// /api/providers 20 MB. The ring may have moved on by then.
+	// /api/providers 20 MB. The ring may have moved on by then. ?route= is
+	// the Routing page's request instead of the ring's number (Fate on
+	// Discord: a request there is opened to its request and response).
 	mux.HandleFunc("GET /api/gateway/call", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Cache-Control", "no-store")
 		if gw := served.Load(); gw != nil {
+			var c gateway.Call
+			ok := false
 			if id, err := strconv.ParseUint(r.URL.Query().Get("id"), 10, 64); err == nil {
-				if c, ok := gw.RecentCall(id); ok {
-					writeJSON(rw, map[string]any{
-						"requestBody": c.RequestBody, "responseBody": c.ResponseBody,
-						"requestTruncated": c.RequestTruncated, "responseTruncated": c.ResponseTruncated,
-					})
-					return
-				}
+				c, ok = gw.RecentCall(id)
+			} else if route, err := strconv.ParseInt(r.URL.Query().Get("route"), 10, 64); err == nil {
+				c, ok = gw.RouteCall(route)
+			}
+			if ok {
+				writeJSON(rw, map[string]any{
+					"requestBody": c.RequestBody, "responseBody": c.ResponseBody,
+					"requestTruncated": c.RequestTruncated, "responseTruncated": c.ResponseTruncated,
+				})
+				return
 			}
 		}
 		rw.Header().Set("Content-Type", "application/json")
@@ -1255,6 +1264,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// a removed account signed out for good: adding it back
 			// later signs in afresh rather than bringing it back (#694)
 			if err := provider.ForgetAccount(in.ID); err != nil {
+				fail(rw, err)
+				return
+			}
+		case "keychain-retry":
+			// Try again beside Codex's sign-in the macOS keychain didn't
+			// give: a refusal kept is dropped and the item read once
+			// (#2367); its answer, or that the prompt is still up
+			if err := provider.RetryCodexKeychain(); err != nil {
 				fail(rw, err)
 				return
 			}

@@ -21,6 +21,7 @@ import (
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
@@ -204,6 +205,28 @@ func codexEfforts(ms []catalog.Model, model string) []Option {
 	return append([]Option{d}, static(e...)...)
 }
 
+// catalogParses is whether b is a model list magpie writes for Codex, the
+// shape Keep reads of the file there.
+func catalogParses(b []byte) bool {
+	var v struct {
+		Models []map[string]any `json:"models"`
+	}
+	return json.Unmarshal(b, &v) == nil
+}
+
+// writeOwnList writes the model list magpie keeps for Codex at path. A file
+// there that doesn't parse is copied aside first: Keep (#1450) holds
+// nothing of a file it can't read, so writing the new list over one would
+// end the keys the user added by hand with no copy (#2263's rule for
+// magpie's state files, which this file had missed). An error stops the
+// write.
+func writeOwnList(path string, b []byte) error {
+	if err := lastgood.KeepUnparsed(path, catalogParses); err != nil {
+		return err
+	}
+	return edit.WriteAtomic(path, b)
+}
+
 func codexIn(at place) *Agent {
 	dir := at.codexHome()
 	path := filepath.Join(dir, "config.toml")
@@ -257,6 +280,12 @@ func codexIn(at place) *Agent {
 		}
 		b := list()
 		if string(codexcat.Keep(cur, b)) == string(b) {
+			// one that doesn't parse is copied aside before it goes: Keep
+			// held nothing of it, so removing it outright would end the
+			// user's own keys with no copy
+			if err := lastgood.KeepUnparsed(catalogPath, catalogParses); err != nil {
+				return
+			}
 			os.Remove(catalogPath)
 		}
 	}
@@ -323,7 +352,7 @@ func codexIn(at place) *Agent {
 		case asProvider() && ownCatalog(get("model_catalog_json")):
 			b := ownList()
 			if cur, _ := edit.Read(catalogPath); string(cur) != string(b) {
-				return edit.WriteAtomic(catalogPath, b)
+				return writeOwnList(catalogPath, b)
 			}
 		case viaBase():
 			return codexStaleCache(filepath.Join(dir, "models_cache.json"), provider.CodexListTag())
@@ -980,7 +1009,7 @@ func codexIn(at place) *Agent {
 			if err := putProvider(); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, ownList()); err != nil {
+			if err := writeOwnList(catalogPath, ownList()); err != nil {
 				return err
 			}
 			// a thread started on Codex's built-in provider stays on it when
@@ -1177,7 +1206,7 @@ func codexIn(at place) *Agent {
 				}
 				b := ownList()
 				if cur, _ := edit.Read(catalogPath); string(cur) != string(b) {
-					if err := edit.WriteAtomic(catalogPath, b); err != nil {
+					if err := writeOwnList(catalogPath, b); err != nil {
 						return err
 					}
 				}

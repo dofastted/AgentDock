@@ -191,6 +191,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // none typed: said, nothing sent, the project focused and the
       // editor left where it was scrolled to
       await click(page, ed.locator("input.vertex-location"));
+      // Advanced open, so the editor is taller than the window and scrolls
+      await ed.locator("details.advanced > summary").click();
       const scroller = page.locator(".modal .editor > .ebody");
       await scroller.evaluate((e) => { e.scrollTop = e.scrollHeight; });
       await page.waitForTimeout(100);
@@ -268,7 +270,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await ed.locator(".eps .ep .res.ok").waitFor();
       assert.equal(await ed.locator(".eps .ep .res.ok").textContent(), w.ms);
 
-      // a header hint adds its header, its value typed next
+      // a header hint adds its header, its value typed next; the headers
+      // are under Advanced
+      await ed.locator("details.advanced > summary").click();
       await ed.locator(".headers .hadds button", { hasText: "+ X-Vertex-AI-LLM-Request-Type" }).click();
       await page.waitForFunction(() => !!document.activeElement?.closest(".headers"));
       await page.keyboard.type("shared");

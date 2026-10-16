@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
@@ -41,6 +42,30 @@ func TestHoldBuildsOnce(t *testing.T) {
 	}
 	if held.holds != 0 {
 		t.Fatalf("holds left: %d", held.holds)
+	}
+}
+
+// A change the plugin host tells (a sign-in saved, a plugin added) drops
+// what a request holds before it returns: a SyncCatalog running held the
+// plugins as they were before `magpie plugin login` saved its account,
+// and the look at the accounts right after it found none (#2449). The
+// hooks told in the background are left out, so only what goes at once
+// is looked at.
+func TestHeldGoesWithAPluginChange(t *testing.T) {
+	plugin.Told()
+	forget, changed := catalog.Forget, catalog.Changed
+	catalog.Forget, catalog.Changed = nil, nil
+	t.Cleanup(func() {
+		plugin.Told()
+		catalog.Forget, catalog.Changed = forget, changed
+	})
+	defer Hold()()
+	n := 0
+	build := func() int { n++; return n }
+	heldOf("t-2449", build)
+	plugin.Restart() // as the host's "auth" event and a plugin added do
+	if heldOf("t-2449", build); n != 2 {
+		t.Fatalf("held from before the change: built %d times, want 2", n)
 	}
 }
 

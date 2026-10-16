@@ -208,6 +208,9 @@ var (
 	// provEpoch counts the invalidations (forgetProviders), so a refresh
 	// that began before one doesn't put what it read over the newer state.
 	provEpoch uint64
+	// provSettling is set while Settle runs: no refresh starts, nor goes
+	// on to a newer invalidation, to start a host in a folder going away.
+	provSettling bool
 )
 
 func providersPath() string { return filepath.Join(settings.Dir(), "plugin-providers.json") }
@@ -355,7 +358,7 @@ func refreshProvidersInBackground(ctx context.Context, epoch uint64) {
 		}
 		provMu.Lock()
 		provCancel()
-		if provEpoch != epoch && !provGood && !provTried {
+		if provEpoch != epoch && !provGood && !provTried && !provSettling {
 			epoch = provEpoch
 			ctx, provCancel = context.WithCancel(context.Background())
 			provTried = true
@@ -537,7 +540,20 @@ func Answered() bool {
 // the next test starts with nothing of this one's running or seen. Each
 // ask is bounded and the retries are few, so this waits a bounded time
 // even for a host that never answers.
+//
+// No refresh starts meanwhile: one a hook started after the last wait
+// went on once Settle had returned, and its host started in the test's
+// folder as it went, or in the next test's, while that one signed in
+// (#2449).
 func Settle() {
+	provMu.Lock()
+	provSettling = true
+	provMu.Unlock()
+	defer func() {
+		provMu.Lock()
+		provSettling = false
+		provMu.Unlock()
+	}()
 	refreshing.Wait()
 	Restart()
 	// what the host said of a sign-in is written before the folder goes
@@ -617,7 +633,7 @@ func Cached() []Provider {
 		// Whether one is already in flight is read and set under one lock,
 		// so two callers asking at once start one refresh, not two.
 		provMu.Lock()
-		start := !provBusy && !provGood && !provTried
+		start := !provBusy && !provGood && !provTried && !provSettling
 		var ctx context.Context
 		if start {
 			ctx, provCancel = context.WithCancel(context.Background())

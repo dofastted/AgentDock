@@ -14,6 +14,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 const openrouter = {
   id: "openrouter", name: "OpenRouter", icon: "generic", chat: "https://openrouter.ai/api/v1", responses: "", anthropic: "", catalog: "",
   models: [{ id: "x/free", name: "Free", on: true }], agents: [], fallback: [], headers: {},
@@ -75,6 +82,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).click();
+      await unfold(page);
       await page.locator(".editor input.rpm").waitFor();
       await page.waitForTimeout(300); // the editor drawn again as what it asked for comes in
       return { page, errors, posts };
@@ -118,6 +126,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(saved.body.queueLimit, 0, "the queue goes with it as before");
 
       await page.locator(".row.provider", { hasText: "OpenRouter" }).click();
+      await unfold(page);
       await box(page).fill("");
       saved = await save(page, posts);
       assert(Object.hasOwn(saved.body, "maxRPM"), "an empty field is saved as no limit, not left out");

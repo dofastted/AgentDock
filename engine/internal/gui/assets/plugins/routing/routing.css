@@ -120,8 +120,16 @@
 .rt-stats > span { display: flex; flex-direction: column; }
 .rt-stats b { font-size: 19px; line-height: 1.2; font-weight: 650; letter-spacing: -.02em; color: var(--fg); font-variant-numeric: tabular-nums; }
 .rt-log { padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--line); }
-.rt-log-head { display: flex; align-items: center; font-size: 12px; font-weight: 600; color: var(--fg); }
+.rt-log-head { display: flex; flex-wrap: wrap; align-items: center; row-gap: 2px; font-size: 12px; font-weight: 600; color: var(--fg); }
 .rt-log-head .grow { flex: 1; }
+/* a request's request and response, opened from the story's head */
+.rt-bodies { margin-top: 8px; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; background: var(--card); }
+.rt-bodies[hidden] { display: none; }
+.rt-bodies > .call-details { border-top: 0; }
+.rt-bodies > .call-archive { border: 0; }
+.rt-bodies > .none, .rt-bodies-gone { margin: 0; padding: 10px 12px; font-size: 11.5px; font-weight: 400; color: var(--muted); }
+.rt-bodies > .call-archive-err { padding: 10px 12px 4px; }
+.rt-bodies > .call-archive-err + button.text { margin: 0 12px 10px; }
 .rt-steps { list-style: none; margin: 6px 0 0; padding: 0; display: grid; align-content: start; gap: 5px; counter-reset: rt; }
 .rt-steps li { position: relative; padding-left: 20px; font-size: 12.5px; line-height: 1.45; color: var(--fg-2); }
 .rt-steps li::before { content: ""; position: absolute; left: 5px; top: .5em; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
@@ -136,6 +144,20 @@
 .rt-steps li.ok::before { background: var(--green); }
 .rt-steps li.bad::before { background: var(--red); }
 .rt-steps li.wait::before { animation: rtlive 1.8s infinite; }
+/* where a try's time went: one stacked bar, magpie's, the network's and
+   the vendor's told apart by a swatch, each part named with its time */
+.rt-time { display: grid; gap: 5px; max-width: 560px; }
+.rt-time-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; color: var(--fg-2); }
+.rt-time-who { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.rt-time-who::before, .rt-time-parts li::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--rt-time); }
+.rt-time-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); gap: 1px; }
+.rt-time-bar span { min-width: 2px; background: var(--rt-time); }
+.rt-time-parts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.rt-time-parts li { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; }
+.rt-time-parts .v { color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.rt-time .magpie { --rt-time: var(--accent); }
+.rt-time .net { --rt-time: var(--amber); }
+.rt-time .vendor { --rt-time: var(--fg-2); }
 .rt-off { padding: 18px 4px; text-align: center; color: var(--muted); font-size: 13px; }
 @media (prefers-reduced-motion: reduce) {
   .rt-accts li.now .dot, .rt-wires path.live, .rt-sky .pkt.held, .rt-accts li.new, .rt-accts li.hit, .rt-hub.tick, .rt-src.tick, .rt-cap.in, .rt-steps li.wait::before, .masking .pii { animation: none; }

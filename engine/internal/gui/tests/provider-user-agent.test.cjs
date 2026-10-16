@@ -12,6 +12,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 const base = {
   icon: "generic", chat: "", responses: "", anthropic: "", catalog: "",
   models: [{ id: "m1", name: "M1", on: true }], agents: [], fallback: [], headers: {},
@@ -82,6 +89,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.route("**/*", serve(lang, posts));
         await page.goto("http://magpie.test/?view=providers");
         await page.locator(".row.provider", { hasText: name }).click();
+        await unfold(page);
         await page.locator(".editor .bar").waitFor();
         return { page, errors, posts };
       };

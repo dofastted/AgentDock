@@ -441,7 +441,7 @@ func TestRuleFirstAndOfMember(t *testing.T) {
 		pl.order = append(pl.order, Weighed{ID: c.rest, Model: c.model})
 	}
 	pl.order[3].Rest = &Rest{}
-	got, gp, lead := ruleFirst([]provider.Member{{Provider: b, Model: "m"}}, cs, pl)
+	got, gp, lead := ruleFirst([]provider.Member{{Provider: b, Model: "m"}}, cs, pl, 1, nil)
 	ok := lead == 0
 	var ids []string
 	for i, c := range got {
@@ -454,7 +454,7 @@ func TestRuleFirstAndOfMember(t *testing.T) {
 		t.Fatalf("%v %v", ok, ids)
 	}
 	// a later rule's member follows the first's, before everyone else (#112)
-	got, _, lead = ruleFirst([]provider.Member{{Provider: provider.Provider{ID: "c"}, Model: "m"}, {Provider: a, Model: "m"}, {Provider: b, Model: "m"}}, cs, pl)
+	got, _, lead = ruleFirst([]provider.Member{{Provider: provider.Provider{ID: "c"}, Model: "m"}, {Provider: a, Model: "m"}, {Provider: b, Model: "m"}}, cs, pl, 1, nil)
 	ids = nil
 	for _, c := range got {
 		ids = append(ids, c.rest+"/"+c.model)
@@ -462,7 +462,7 @@ func TestRuleFirstAndOfMember(t *testing.T) {
 	if lead != 1 || strings.Join(ids, " ") != "a/m ab/m ab@me/m ab#k2/x ab#k2/m" {
 		t.Fatalf("%d %v", lead, ids)
 	}
-	if _, _, lead := ruleFirst([]provider.Member{{Provider: provider.Provider{ID: "c"}, Model: "m"}}, cs, pl); lead >= 0 {
+	if _, _, lead := ruleFirst([]provider.Member{{Provider: provider.Provider{ID: "c"}, Model: "m"}}, cs, pl, 1, nil); lead >= 0 {
 		t.Fatal("no candidates of c")
 	}
 	// "a" is not "ab"'s

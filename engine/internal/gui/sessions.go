@@ -122,7 +122,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		for _, s := range list {
 			j := sessionJSON{Session: s, Name: s.Agent, Icon: "generic", Via: vias[s.Agent+"|"+s.ID]}
 			if a := agents[s.Agent]; a != nil {
-				j.Name, j.Icon = a.Name, a.Icon
+				j.Name, j.Icon = a.SharedName(), a.Icon
 			}
 			j.Name = wslName(j.Name, s)
 			j.Path = tilde(j.Path)
@@ -138,7 +138,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		st := statsFor(n)
 		names := map[string]string{}
 		for _, a := range agent.Clients() {
-			names[a.ID] = a.Name
+			names[a.ID] = a.SharedName()
 		}
 		agents := map[string]string{}
 		for _, d := range st.Days {
@@ -218,7 +218,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		j := sessionJSON{Session: s, Name: s.Agent, Icon: "generic"}
 		for _, a := range agent.Clients() {
 			if a.ID == s.Agent {
-				j.Name, j.Icon = a.Name, a.Icon
+				j.Name, j.Icon = a.SharedName(), a.Icon
 			}
 		}
 		j.Name = wslName(j.Name, s)
@@ -351,7 +351,7 @@ func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
 	name := s.Agent
 	for _, a := range agent.Clients() {
 		if a.ID == s.Agent {
-			name = a.Name
+			name = a.SharedName()
 		}
 	}
 	var b bytes.Buffer

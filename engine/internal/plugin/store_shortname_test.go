@@ -24,6 +24,13 @@ func TestSetOptionsShortName(t *testing.T) {
 	if l.Plugins[0].Options["x"] != true {
 		t.Errorf("zed's options = %v", l.Plugins[0].Options)
 	}
+	// a name it was called before its kind's word came off still finds it
+	writeList(t, `{"plugins":[{"spec":"@magpie-community/agent-aider"},{"spec":"@magpie-community/tools-calc"}]}`)
+	for i, name := range []string{"aider", "agent-aider", "calc", "tools-calc"} {
+		if err := SetOptions(name, map[string]any{"n": float64(i)}); err != nil {
+			t.Errorf("SetOptions(%q): %v", name, err)
+		}
+	}
 	if err := SetOptions("map", want); err == nil {
 		t.Error("a part of a name found a plugin")
 	}
@@ -33,6 +40,10 @@ func TestSetOptionsShortName(t *testing.T) {
 		"opencode-foo":                                "foo",
 		"/Users/me/plugins/think-tags":                "think-tags",
 		`C:\Users\me\plugins\middleware-zz-tags`:      "zz-tags",
+		"@magpie-community/tools-calc":                "calc",
+		"@magpie-community/page-usage":                "usage",
+		"@magpie-community/agent-aider":               "aider",
+		"tools-":                                      "tools-",
 	} {
 		if got := ShortName(in); got != out {
 			t.Errorf("ShortName(%q) = %q, want %q", in, got, out)

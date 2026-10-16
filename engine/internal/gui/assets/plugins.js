@@ -40,6 +40,7 @@
   const PIPE = "M1.5 8h3 M11.5 8h3 M4.5 4.5h7v7h-7z";
   const TERM = "M2 3.5h12v9H2z M4.5 6.5l2 1.5-2 1.5 M8 9.5h3";
   const PAGE = "M2 3.5h12v9H2z M2 6h12 M4 4.75h.01";
+  const TOOL = "M10.6 2.4a3 3 0 0 0-3.4 4L2.6 11a1.2 1.2 0 0 0 1.7 1.7l4.6-4.6a3 3 0 0 0 4-3.4l-1.7 1.7-1.6-.3-.3-1.6z";
   const FOLDER = "M14.7 12.7a1.3 1.3 0 0 1-1.3 1.3H2.6a1.3 1.3 0 0 1-1.3-1.3V3.3A1.3 1.3 0 0 1 2.6 2h3.3l1.3 2h6.2a1.3 1.3 0 0 1 1.3 1.3z";
 
   // a folder's path is its name whole, as plugin.Name: C:\Users\me@corp\…
@@ -113,15 +114,17 @@
   // subscription and serves its models; middleware ("mw") runs in the
   // gateway on every agent's requests and replies, whatever serves them;
   // an agent ("ag") is one magpie has no wiring of its own for, which it
-  // then connects as it does its own; a page ("pg") is a page of its own
-  // in the window's sidebar (pluginpages.js)
+  // then connects as it does its own; tools ("tl") are given to every
+  // agent through magpie's plugin tools MCP server; a page ("pg") is a
+  // page of its own in the window's sidebar (pluginpages.js)
   const KINDS = {
     pv: [PLUG, "Provider", "Signs in to a subscription and serves its models"],
     mw: [PIPE, "Middleware", "Runs in magpie's gateway on the requests your agents send and on the replies"],
     ag: [TERM, "Agent", "Adds an agent magpie has no setup of its own for: pick its model on the Agents page and it goes through magpie"],
+    tl: [TOOL, "Tools", "Gives every agent tools of its own, through magpie's MCP server"],
     pg: [PAGE, "Page", "Adds a page of its own to the sidebar. It runs shut off from the rest of magpie and can read only what its row lists"],
   };
-  const kindOf = (l) => l.kind === "middleware" ? "mw" : l.kind === "agent" ? "ag" : "pv";
+  const kindOf = (l) => ({ middleware: "mw", agent: "ag", tools: "tl", page: "pg" })[l.kind] || "pv";
   function kindChip(kind) {
     const [d, word, tip] = KINDS[kind];
     const c = el("span", "pm-chip kind " + kind);
@@ -132,7 +135,7 @@
   function logo(ic, big, kind) {
     const box = el("span", "pm-logo" + (big ? " big" : ""));
     if (ic) box.append(icon(ic));
-    else box.append(glyph(kind === "mw" ? PIPE : kind === "ag" ? TERM : kind === "pg" ? PAGE : PUZZLE, big ? 22 : 17, 1.4));
+    else box.append(glyph({ mw: PIPE, ag: TERM, tl: TOOL, pg: PAGE }[kind] || PUZZLE, big ? 22 : 17, 1.4));
     return box;
   }
 
@@ -520,8 +523,8 @@
     if (e?.error && !e.off) meta.append(el("span", "pm-chip bad", t("Didn't load")));
     else if (e?.off) meta.append(el("span", "pm-chip", t("Off")));
     if (l.replaces) {
-      const b = el("span", "pm-chip soft", t("Also built in"));
-      b.title = t("magpie also signs in to this itself, for now; the plugin keeps it working if the built-in one is retired");
+      const b = el("span", "pm-chip soft", t("Replaces built-in"));
+      b.title = t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it");
       meta.append(b);
     }
     c.append(top, sum, meta);
@@ -616,7 +619,7 @@
     // the kinds there are, in the market's order, each with how many the
     // field leaves of it; one kind alone needs no picking
     const found = ghList.filter(ghMatch);
-    const kinds = ["pv", "mw", "ag"].filter((k) => ghList.some((l) => kindOf(l) === k));
+    const kinds = ["pv", "mw", "ag", "tl", "pg"].filter((k) => ghList.some((l) => kindOf(l) === k));
     if (!kinds.includes(ghKind)) ghKind = "";
     // which of them are here, asked once each: the counts below would ask
     // it again for every pick in both strips. Like a kind alone, a list
@@ -806,9 +809,13 @@
       const ours = ls.filter((l) => l.community && kindOf(l) === "pv");
       const mws = ls.filter((l) => l.community && kindOf(l) === "mw");
       const ags = ls.filter((l) => l.community && kindOf(l) === "ag");
+      const tls = ls.filter((l) => l.community && kindOf(l) === "tl");
+      const pgs = ls.filter((l) => l.community && kindOf(l) === "pg");
       if (ours.length) out.push(section(t("Subscriptions"), t("written for magpie, checked against its own sign-ins"), ours));
       if (mws.length) out.push(section(t("Gateway middleware"), t("runs in magpie's gateway on what every agent sends and gets back, whichever provider serves it"), mws));
       if (ags.length) out.push(section(t("Agents"), t("agents magpie has no setup of its own for, connected to it as its own are"), ags));
+      if (tls.length) out.push(section(t("Tools for agents"), t("tools every agent can call, through magpie's MCP server"), tls));
+      if (pgs.length) out.push(section(t("Pages"), t("pages of their own in magpie's window, each shut off from the rest and reading only what it lists"), pgs));
       if (gh.length) out.push(ghSection(gh));
       out.push(manual());
       replaceKeeping(body, out);
@@ -838,14 +845,15 @@
   function intro() {
     const box = el("div", "pm-intro");
     const text = el("div", "pm-introtext");
-    text.append(el("h2", "", t("Subscriptions and gateway middleware")));
+    text.append(el("h2", "", t("Plugins extend magpie")));
     text.append(el("p", "", t("Plugins sign in to coding plans and make their requests; the models then work in every agent, like any provider's. They're OpenCode's provider plugins or pi's packages, run on Bun.")));
     const mw = el("p", "");
-    mw.append(document.createTextNode(t("A plugin can also be middleware in magpie's gateway: it reads and rewrites what agents send and get back, for every provider.") + " "));
-    // the docs in the reader's language: the site has en, zh and ja
-    const how = el("a", "pm-link", "");
-    how.href = "https://usemagpie.ai/docs/" + ({ zh: "zh/", ja: "ja/" }[lang()] || "") + "plugins#middleware";
-    how.append(el("span", "", t("Write a middleware")), glyph(OUTL, 11, 1.5));
+    mw.append(document.createTextNode(t("A plugin can also run in magpie's gateway on what agents send and get back, pick which account a routing asks, give every agent tools, connect an agent, or add a page of its own.") + " "));
+    // the docs in the reader's language: the site has en, zh and ja, and
+    // Chinese is nearer a zh-TW reader than English is
+    const how = el("a", "pm-link pm-write", "");
+    how.href = "https://usemagpie.ai/docs/" + ({ zh: "zh/", "zh-TW": "zh/", ja: "ja/" }[lang()] || "") + "plugins";
+    how.append(el("span", "", t("Write a plugin")), glyph(OUTL, 11, 1.5));
     how.onclick = (ev) => { ev.preventDefault(); api("open", { url: how.href }).catch(() => {}); };
     mw.append(how);
     text.append(mw);
@@ -1049,6 +1057,7 @@
     if (ag || e.isAgent) nm.append(kindChip("ag"));
     // a plugin of tools alone signs in to nothing: no Provider chip
     const toolsOnly = !!e.tools?.length && !e.providers?.length;
+    if (e.tools?.length) nm.append(kindChip("tl"));
     if (e.page) nm.append(kindChip("pg"));
     if (e.providers?.length || !(e.middlewareOnly || e.inMagpieOnly || toolsOnly || (mw && !e.isMiddleware) || (ag && !e.isAgent))) nm.append(kindChip("pv"));
     who.append(nm);
@@ -1101,7 +1110,7 @@
     if (mw && !e.off && !ask && editing?.pkg === pkg) who.append(optionsEditor(e));
     // the plugin's own picture (package.json's magpie.icon) before its
     // first provider's, which a plugin of several gives each its own (#1775)
-    r.append(logo(l?.icon || l?.npm?.icon || e.icon || subs[0]?.icon || ag?.icon, false, e.middlewareOnly ? "mw" : e.inMagpieOnly && e.isAgent && !e.isMiddleware ? "ag" : e.inMagpieOnly && e.page && !e.isAgent && !e.isMiddleware ? "pg" : ""), who);
+    r.append(logo(l?.icon || l?.npm?.icon || e.icon || subs[0]?.icon || ag?.icon, false, e.middlewareOnly ? "mw" : e.inMagpieOnly && e.isAgent && !e.isMiddleware ? "ag" : e.inMagpieOnly && e.page && !e.isAgent && !e.isMiddleware ? "pg" : toolsOnly && !e.page && !mw && !ag ? "tl" : ""), who);
     const val = el("div", "val");
     const b = busy.get(pkg) || busy.get(e.spec);
     // npm's newer version, or a git one's repository at a newer commit
@@ -1384,7 +1393,7 @@
       w.append(glyph(SHIELD, 12, 1.5), el("span", "", t(from, { owner: l.github.owner, topic })));
       main.append(w);
     }
-    if (l.replaces) main.append(el("p", "pm-note", t("magpie also signs in to this itself, for now; the plugin keeps it working if the built-in one is retired.")));
+    if (l.replaces) main.append(el("p", "pm-note", t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it.")));
     const readme = el("div", "pm-readme");
     readme.append(el("div", "pm-rskel"), el("div", "pm-rskel short"), el("div", "pm-rskel"));
     main.append(readme);

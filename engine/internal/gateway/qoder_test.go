@@ -263,6 +263,114 @@ func TestQoderEOF(t *testing.T) {
 	}
 }
 
+// A tool call written into the text that can't be read ends the turn as an
+// error, never as the answer (plugins#132, as the moved qoder plugin's
+// 0.2.16): a whole block whose JSON doesn't parse is a 502, and one the
+// stream ends inside is the call when its JSON is whole, else a 502. A
+// marker that is no call at all, or a block inside code, stays text.
+func TestQoderUnreadableToolCall(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	bad := qoderCallOpen + `{"path":}` + qoderCallClose
+	cutWhole := qoderCallOpen + `{"name":"read","arguments":{"path":"x"}}`
+	for _, tt := range []struct {
+		name    string
+		lines   []string
+		stream  bool
+		want    int
+		noText  string // never in the reply
+		text    string // the whole reply's text, when text is wanted
+		frame   string // in the reply as it came, when a frame is wanted
+		hasCall string // a tool call named so, when one is wanted
+	}{
+		{
+			name:   "unreadable block, whole reply",
+			lines:  []string{qoderChunk(qoderContent(t, bad)), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream: false,
+			want:   502,
+			noText: "tool_call>",
+		},
+		{
+			name:   "unreadable block, streamed",
+			lines:  []string{qoderChunk(qoderContent(t, bad)), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream: true,
+			want:   502,
+			noText: "tool_call>",
+		},
+		{
+			// text was already going out, so the 200 stands: the reason is
+			// an error frame, and no finish follows it
+			name:   "unreadable block after text, streamed",
+			lines:  []string{qoderChunk(qoderContent(t, "Sure. ")), qoderChunk(qoderContent(t, bad)), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream: true,
+			want:   200,
+			noText: `"finish_reason":"stop"`,
+			frame:  "can't be read",
+		},
+		{
+			name:    "stream ends inside, JSON whole",
+			lines:   []string{qoderChunk(qoderContent(t, cutWhole)), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream:  false,
+			want:    200,
+			noText:  "tool_call>",
+			hasCall: "read",
+		},
+		{
+			name:   "stream ends inside, unreadable",
+			lines:  []string{qoderChunk(qoderContent(t, qoderCallOpen+`{"path":`)), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream: false,
+			want:   502,
+			noText: "tool_call>",
+		},
+		{
+			name:   "a marker that is no call stays text",
+			lines:  []string{qoderChunk(qoderContent(t, "before "+qoderCallOpen+"incomplete")), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream: false,
+			want:   200,
+			text:   "before " + qoderCallOpen + "incomplete",
+		},
+		{
+			name:   "a block inside code stays text",
+			lines:  []string{qoderChunk(qoderContent(t, "```text\n"+bad+"\n```")), qoderChunk(`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)},
+			stream: false,
+			want:   200,
+			text:   bad,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			done := qoderUpstream(t, tt.lines)
+			defer done()
+			s := New()
+			w := httptest.NewRecorder()
+			body := `{"model":"qfmodel","stream":` + map[bool]string{true: "true", false: "false"}[tt.stream] + `,"messages":[{"role":"user","content":"hi"}]}`
+			r := httptest.NewRequest("POST", "/", strings.NewReader(body))
+			var u Usage
+			status, msg := s.serveQoder(w, r, provider.Chat, provider.Provider{Account: &provider.Account{User: "test"}}, "qfmodel", []byte(body), &u)
+			out := w.Body.String()
+			if status != tt.want {
+				t.Fatalf("status %d msg %q want %d\n%s", status, msg, tt.want, out)
+			}
+			if tt.noText != "" && strings.Contains(out, tt.noText) {
+				t.Fatalf("the unreadable block went out as the answer:\n%s", out)
+			}
+			if tt.text != "" && !strings.Contains(gjson.Get(out, "choices.0.message.content").String(), tt.text) {
+				t.Fatalf("text was changed to %q:\n%s", gjson.Get(out, "choices.0.message.content").String(), out)
+			}
+			if tt.frame != "" && !strings.Contains(out, tt.frame) {
+				t.Fatalf("the reply doesn't carry the reason:\n%s", out)
+			}
+			if tt.hasCall != "" {
+				if gjson.Get(out, "choices.0.message.tool_calls.0.function.name").String() != tt.hasCall {
+					t.Fatalf("the whole-JSON call cut short is not a call:\n%s", out)
+				}
+				if gjson.Get(out, "choices.0.finish_reason").String() != "tool_calls" {
+					t.Fatalf("finish %q, want tool_calls:\n%s", gjson.Get(out, "choices.0.finish_reason").String(), out)
+				}
+			}
+		})
+	}
+}
+
 func TestQoderEnvelopeErrors(t *testing.T) {
 	for _, status := range []int{401, 403, 429, 500} {
 		for _, proto := range []provider.Protocol{provider.Chat, provider.Responses, provider.Anthropic, provider.Gemini} {

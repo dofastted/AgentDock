@@ -32,6 +32,9 @@ func takebackClaude(t *testing.T) string {
 	}
 	dir := t.TempDir()
 	log := filepath.Join(dir, "stdin.log")
+	// its curl calls back past any proxy, as the helper does (#2440): the
+	// run hands Claude Code the system's proxy, which a LAN address isn't
+	// exempt from
 	script := `#!/bin/sh
 echo "args $*" >> ` + log + `
 cb=$(cat "$(printf '%s\n' "$@" | grep -o '"claude-mcp-helper","[^"]*"' | head -1 | sed 's/.*","//; s/"$//')")
@@ -65,7 +68,7 @@ while read -r line; do
   echo '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
   echo '{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}}'
   echo '{"type":"stream_event","event":{"type":"message_stop"}}'
-  got=$(curl -sS -X POST -H 'Content-Type: application/json' --data '{"tool_call_id":"toolu_T'$me'_'$n'","name":"read","arguments":{}}' "$cb" 2>> ` + log + `)
+  got=$(curl --noproxy '*' -sS -X POST -H 'Content-Type: application/json' --data '{"tool_call_id":"toolu_T'$me'_'$n'","name":"read","arguments":{}}' "$cb" 2>> ` + log + `)
   echo "got $got" >> ` + log + `
   start
   text "pid $$ turn $n read"

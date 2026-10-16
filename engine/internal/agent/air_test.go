@@ -277,3 +277,44 @@ func TestAirProviderWritesKeepCustomFields(t *testing.T) {
 		})
 	}
 }
+
+// An OpenCode a JetBrains IDE or Zed installed from the ACP registry, in
+// the editor's own folder and on no PATH, is the one Air starts (#2423,
+// whiteS18: IDEA 2026.2's on macOS); the newest of several.
+func TestAirFindsACPRegistryOpenCode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	put := func(p string, age time.Duration) string {
+		writeFile(t, p, "#!/bin/sh\n")
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, c := range []struct {
+		goos, name  string
+		older, want string
+	}{
+		{"darwin", "opencode",
+			filepath.Join(home, "Library", "Application Support", "Zed", "external_agents", "registry", "opencode", "v_1.18.11_c8581a12e4e7afe7_fd7ca24743b4ae6b", "opencode"),
+			filepath.Join(home, "Library", "Caches", "JetBrains", "IntelliJIdea2026.2", "acp-agents", "opencode", "1.19.0", "opencode")},
+		{"linux", "opencode",
+			filepath.Join(home, ".local", "share", "zed", "external_agents", "registry", "opencode", "v_1.18.11", "opencode"),
+			filepath.Join(home, ".cache", "JetBrains", "IntelliJIdea2026.2", "acp-agents", "opencode", "1.19.0", "opencode")},
+		{"windows", "opencode.exe",
+			filepath.Join(home, "AppData", "Local", "JetBrains", "IntelliJIdea2026.2", "acp-agents", "opencode", "1.18.0", "opencode.exe"),
+			filepath.Join(home, "AppData", "Local", "Zed", "external_agents", "registry", "opencode", "v_1.19.0", "opencode.exe")},
+	} {
+		if got := acpOpenCode(home, c.name, c.goos); got != "" {
+			t.Fatalf("%s: none installed, got %q", c.goos, got)
+		}
+		put(c.older, time.Hour)
+		put(c.want, time.Minute)
+		if got := acpOpenCode(home, c.name, c.goos); got != c.want {
+			t.Fatalf("%s: got %q, want %q", c.goos, got, c.want)
+		}
+	}
+}

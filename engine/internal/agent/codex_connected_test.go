@@ -31,9 +31,9 @@ func TestCodexOwnPickAfterMagpieModelStaysConnected(t *testing.T) {
 	if !cx.Wired() {
 		t.Fatalf("Codex's own pick disconnected it:\n%s", read())
 	}
-	// told as a change from outside, the row still connected
-	if d := cx.Drift(); d == nil || d.Kind != "replaced" || d.Now != "gpt-6.1-sol" {
-		t.Fatalf("drift: %+v", d)
+	// a pick beside magpie's models, not a change from outside (#2424)
+	if d := cx.Drift(); d != nil {
+		t.Fatalf("drift on Codex's own pick beside its sign-in: %+v", d)
 	}
 	if err := cx.Disconnect(); err != nil {
 		t.Fatal(err)

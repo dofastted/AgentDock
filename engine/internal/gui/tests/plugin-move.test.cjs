@@ -116,6 +116,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.ok(!text.includes(pkg), "names the npm package in the sentence");
       assert.ok(text.includes(w.own), "doesn't say Zed stays signed in");
 
+      // the reader opened Advanced (so the editor runs on past the field)
+      // and scrolled to the field: nothing the move does moves it, and the
+      // fold stays as they left it though the move starts a new draft
+      await ed.locator("details.advanced > summary").click();
+      assert.equal(await ed.locator("details.advanced").evaluate((d) => d.open), true);
       // the reader scrolled to the field: nothing the move does moves it.
       // A wheel, as a reader's scroll (a script's scrollTop is put back), and
       // only so far that the button stays in sight: a click on a button out
@@ -141,6 +146,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await press();
       await page.waitForFunction((busy) => [...document.querySelectorAll("#modal .move button")].some((b) => b.textContent === busy), w.busy, { timeout: 300 });
       assert.equal(await btn.isDisabled(), true, "the button can be pressed again mid-move");
+      // an account's allowance landing mid-move redraws the editor
+      // (loginUsageOf): the move is still said to run, and its end is said
+      // in the field drawn now
+      await page.evaluate(() => renderProviders());
+      assert.equal(await btn.innerText(), w.busy, "a redraw mid-move forgot the move");
+      assert.equal(await btn.isDisabled(), true, "a redraw mid-move lets the button be pressed again");
 
       // it fails: said under the button, the editor open where it was
       const why = ed.locator(".move-why");
@@ -149,6 +160,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await btn.innerText(), w.again);
       assert.equal(await btn.isDisabled(), false);
       assert.equal(await body.evaluate((e) => e.scrollTop), top, "the failure moved the editor");
+      await page.evaluate(() => renderProviders());
+      assert.equal(await why.innerText(), w.failed, "a redraw forgot why the move failed");
+      assert.equal(await btn.innerText(), w.again);
       if (process.env.ARTIFACT_DIR) await ed.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `plugin-move-failed-${engine}-${lang}.png`) });
 
       // tried again, it goes through: the same editor, turned over
@@ -161,6 +175,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.ok((await ed.innerText()).includes(w.own), "the moved Zed no longer says Zed stays signed in");
       assert.equal(await why.count() && await why.isVisible(), false, "the failure is still said");
       assert.equal(await body.evaluate((e) => e.scrollTop), top, "the move moved the editor");
+      assert.equal(await ed.locator("details.advanced").evaluate((d) => d.open), true, "the move shut Advanced");
       assert.ok((await page.locator("#status").innerText()).startsWith(w.done), "no toast saying what moved");
       assert.deepEqual(posts.map((p) => [p.path, p.body.id]), [["/api/provider/move", "zed"], ["/api/provider/move", "zed"]]);
       // its plugin:// URLs are magpie's own: no Endpoints, no Test

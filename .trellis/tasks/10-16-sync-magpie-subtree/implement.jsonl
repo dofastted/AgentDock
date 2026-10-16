@@ -1,0 +1,3 @@
+{"file": ".trellis/tasks/10-16-sync-magpie-subtree/design.md", "reason": "Squash-pull boundary, D2 hunk conflict rule, checklist classification, rollback."}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/design.md", "reason": "D4 subtree layout and the original AGENTDOCK_PATCHES contract this sync extends."}
+{"file": ".trellis/tasks/10-16-repair-wsl-agent-discovery/prd.md", "reason": "Repair behaviors the sync must not drop; that task stays open and is not re-smoked here."}

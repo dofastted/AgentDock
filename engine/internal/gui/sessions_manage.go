@@ -69,7 +69,7 @@ func trashJSON(looks map[string]*agent.Agent) []trashedJSON {
 	for _, t := range sessions.Trash() {
 		j := trashedJSON{Trashed: t, Name: t.Agent, Icon: "generic"}
 		if a := looks[t.Agent]; a != nil {
-			j.Name, j.Icon = a.Name, a.Icon
+			j.Name, j.Icon = a.SharedName(), a.Icon
 		}
 		j.Cwd = tilde(j.Cwd)
 		for i := range j.Items {
@@ -134,7 +134,7 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 		for _, a := range sessions.Agents() {
 			j := manageAgentJSON{AgentCount: a, Name: a.Agent, Icon: "generic"}
 			if l := looks[a.Agent]; l != nil {
-				j.Name, j.Icon = l.Name, l.Icon
+				j.Name, j.Icon = l.SharedName(), l.Icon
 			}
 			counts[a.Agent] = &j
 		}
@@ -154,7 +154,7 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			if j == nil {
 				j = &manageAgentJSON{AgentCount: sessions.AgentCount{Agent: s.Agent}, Name: s.Agent, Icon: "generic"}
 				if l := looks[s.Agent]; l != nil {
-					j.Name, j.Icon = l.Name, l.Icon
+					j.Name, j.Icon = l.SharedName(), l.Icon
 				}
 				counts[s.Agent] = j
 			}

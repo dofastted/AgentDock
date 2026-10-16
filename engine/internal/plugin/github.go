@@ -37,7 +37,7 @@ type Tagged struct {
 	// it as, its version, and whether it is gateway middleware or an agent
 	Package string `json:"package,omitempty"`
 	Version string `json:"version,omitempty"`
-	Kind    string `json:"kind,omitempty"` // "middleware" or "agent" when that is all it is
+	Kind    string `json:"kind,omitempty"` // "middleware", "agent" or "page" when that is all it is
 	// its package.json's magpie.icon, as an installed plugin gives its
 	// provider one: an https URL or a data:image URI, as it is written
 	Icon string `json:"icon,omitempty"`
@@ -304,6 +304,9 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 			Middleware string `json:"middleware"`
 			Agent      string `json:"agent"`
 			Icon       string `json:"icon"`
+			Page       struct {
+				File string `json:"file"`
+			} `json:"page"`
 		} `json:"magpie"`
 	}
 	if json.Unmarshal(pb, &pj) != nil || !pkgName.MatchString(pj.Name) {
@@ -319,6 +322,8 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 			t.Kind = "middleware"
 		case strings.TrimSpace(pj.Magpie.Agent) != "":
 			t.Kind = "agent"
+		case strings.TrimSpace(pj.Magpie.Page.File) != "":
+			t.Kind = "page"
 		}
 	}
 	// published to npm from this repository: npm's copy is the one
@@ -348,6 +353,8 @@ func readTagged(pc context.Context, t Tagged, branch string) (Tagged, bool, bool
 		entry := pj.Magpie.Middleware
 		if t.Kind == "agent" {
 			entry = pj.Magpie.Agent
+		} else if t.Kind == "page" {
+			entry = pj.Magpie.Page.File
 		} else if t.Kind != "middleware" {
 			entry = pkgEntry(pj.Exports, pj.Main)
 			if !IsGit(t.Spec) {

@@ -54,7 +54,7 @@ func TestInstallsOnlyMissing(t *testing.T) {
 	here := &Agent{ID: "codex", Name: "Codex", Path: filepath.Join(home, "codex.toml"), Dir: home}
 	gone := &Agent{ID: "gemini", Name: "Gemini CLI", Icon: "gemini", Path: filepath.Join(home, "nope", "settings.json"), Bin: "gemini"}
 	wsl := &Agent{ID: "claude@wsl:Ubuntu", Name: "Claude Code", WSL: "Ubuntu", Path: filepath.Join(home, "nope", "x")}
-	none := &Agent{ID: "cursor", Name: "Cursor", Path: filepath.Join(home, "nope", "y")}
+	none := &Agent{ID: "cursor", Name: "Cursor CLI", Path: filepath.Join(home, "nope", "y")}
 	got := installsOf([]*Agent{here, gone, wsl, none}, "darwin", true)
 	if len(got) != 1 || got[0].ID != "gemini" || got[0].Name != "Gemini CLI" || got[0].Icon != "gemini" || len(got[0].Commands) != 2 {
 		t.Fatalf("installs: %+v", got)

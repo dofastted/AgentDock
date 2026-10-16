@@ -19,7 +19,9 @@ import (
 // repositories), with three more items made from its first — a fork, an
 // archived one and magpie-community's — and someone/word-guard, whose
 // package.json is word-guard's own, a middleware alone; someone/agent-aider,
-// magpie-community's agent-aider package.json and module, an agent alone; alfaoz's
+// magpie-community's agent-aider package.json and module, an agent alone;
+// someone/page-glance, a page alone (internal/gui/testdata/page-plugin's
+// package.json), and someone/page-gone, whose page file isn't there; alfaoz's
 // opencode-see-image (real), whose main is a dist the repository hasn't;
 // and someone/flaky-entry, whose main GitHub doesn't answer for.
 // reads counts what fakeGitHub answered other than searches: package.json,
@@ -62,6 +64,8 @@ func fakeGitHub(t *testing.T, up *atomic.Bool, asked *atomic.Int32) {
 	items = append(items,
 		like("someone/word-guard", map[string]any{"description": "word guard", "stargazers_count": 3, "license": nil}),
 		like("someone/agent-aider", nil),
+		like("someone/page-glance", nil),
+		like("someone/page-gone", nil),
 		like("alfaoz/opencode-see-image", nil),
 		like("someone/flaky-entry", map[string]any{"license": map[string]any{"key": "other", "spdx_id": "NOASSERTION"}}),
 		like("cyberElar/magpie-x-search", nil),
@@ -141,7 +145,7 @@ func TestTaggedRepos(t *testing.T) {
 	// none would load. magpie-x-search (real, #1327) is on npm from its
 	// repository, but a command alone, an MCP server: npm's copy names no
 	// file to load, and it has no index.js
-	want := "rynfar/meridian griffinmartin/opencode-claude-auth slkiser/opencode-quota someone/word-guard someone/agent-aider someone/flaky-entry"
+	want := "rynfar/meridian griffinmartin/opencode-claude-auth slkiser/opencode-quota someone/word-guard someone/agent-aider someone/page-glance someone/flaky-entry"
 	if strings.Join(repos, " ") != want {
 		t.Fatalf("repos %v\nwant %s", repos, want)
 	}
@@ -167,6 +171,11 @@ func TestTaggedRepos(t *testing.T) {
 	}
 	if x := byRepo["someone/agent-aider"]; x.Kind != "agent" || x.Spec != "github:someone/agent-aider" {
 		t.Fatalf("an agent alone: %+v", x)
+	}
+	// a page alone: no module, magpie.page's file in the repository; one
+	// whose file isn't there would show nothing, and isn't listed
+	if x := byRepo["someone/page-glance"]; x.Kind != "page" || x.Spec != "github:someone/page-glance" || x.Package != "magpie-usage-glance" {
+		t.Fatalf("a page alone: %+v", x)
 	}
 	if x := byRepo["someone/word-guard"]; x.Kind != "middleware" || x.Package != "@magpie-community/middleware-word-guard" || x.License != "" {
 		t.Fatalf("a middleware alone: %+v", x)
@@ -197,7 +206,7 @@ func TestTaggedRepos(t *testing.T) {
 	taggedAt = time.Now().Add(-taggedTTL - time.Second)
 	taggedMu.Unlock()
 	before := reads.Load()
-	if l := TaggedRepos(ctx); len(l) != 6 || asked.Load() != 2 {
+	if l := TaggedRepos(ctx); len(l) != 7 || asked.Load() != 2 {
 		t.Fatalf("ten minutes on: asked %d times, %d repos", asked.Load(), len(l))
 	}
 	if n := reads.Load() - before; n != 3 {
@@ -212,7 +221,7 @@ func TestTaggedRepos(t *testing.T) {
 	if err := os.Chtimes(taggedCache(), time.Now(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if l := TaggedRepos(ctx); len(l) != 6 || asked.Load() != 1 {
+	if l := TaggedRepos(ctx); len(l) != 7 || asked.Load() != 1 {
 		t.Fatalf("restarted: asked %d times, %d repos", asked.Load(), len(l))
 	}
 
@@ -223,7 +232,7 @@ func TestTaggedRepos(t *testing.T) {
 	}
 	up.Store(false)
 	forget()
-	if l := TaggedRepos(ctx); len(l) != 6 || l[1].Package != "opencode-claude-auth" || asked.Load() != 1 {
+	if l := TaggedRepos(ctx); len(l) != 7 || l[1].Package != "opencode-claude-auth" || asked.Load() != 1 {
 		t.Fatalf("down: %+v", l)
 	}
 
@@ -258,7 +267,7 @@ func TestTaggedReposSlowRead(t *testing.T) {
 	up.Store(true)
 	fakeGitHub(t, &up, &asked)
 	ctx := context.Background()
-	if l := TaggedRepos(ctx); len(l) != 6 {
+	if l := TaggedRepos(ctx); len(l) != 7 {
 		t.Fatalf("%d repos", len(l))
 	}
 
@@ -292,7 +301,7 @@ func TestTaggedReposSlowRead(t *testing.T) {
 	cutAsked := time.Now()
 	l := TaggedRepos(ctx)
 	cutDone := time.Now()
-	if x := has(l, "someone/word-guard"); len(l) != 6 || x == nil || x.Kind != "middleware" {
+	if x := has(l, "someone/word-guard"); len(l) != 7 || x == nil || x.Kind != "middleware" {
 		t.Fatalf("slow package.json: %d repos, word-guard %+v", len(l), x)
 	}
 	if n := asked.Load(); n != 2 {
@@ -352,7 +361,7 @@ func TestTaggedReposSlowRead(t *testing.T) {
 	if n := asked.Load(); n != 3 {
 		t.Fatalf("a list cut short kept: asked %d times", n)
 	}
-	if x := has(l, "someone/word-guard"); len(l) != 6 || x == nil || x.Package != "@magpie-community/middleware-word-guard" {
+	if x := has(l, "someone/word-guard"); len(l) != 7 || x == nil || x.Package != "@magpie-community/middleware-word-guard" {
 		t.Fatalf("asked again: %d repos, word-guard %+v", len(l), x)
 	}
 	// flaky-entry's package.json, npm and entry, as ten minutes on

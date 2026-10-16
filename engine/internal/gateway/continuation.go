@@ -112,6 +112,73 @@ func geminiKin(actual provider.Protocol) bool {
 	return actual == provider.Gemini || actual == provider.CodeAssist
 }
 
+// saysItsEnd tells whether every whole reply of p in proto, serving model,
+// says it ended, so a stream that stops short of that is a reply cut
+// short: Anthropic's message_stop, Responses' response.completed, a
+// Gemini candidate's finishReason (#1643, #1644), and a finish_reason from
+// Gemini's OpenAI-compatible API (geminiCompat). That one sends a whole
+// function call in one chunk and its finish_reason in the next; an
+// upstream that hung up between the two ended the reply with no end, and
+// a strict client (Pi: "Stream ended without finish_reason") threw the
+// call away, while a lenient one took the turn as over (Linka on
+// Discord). When the last chunk counted the reply's usage, which that API
+// sends only once its generation is done, only the finish_reason was lost
+// and it is filled in (chatTail); without it the cut is said as one.
+// Other Chat APIs may end a whole reply with neither a finish_reason nor
+// [DONE], so only a failed read is a cut there.
+func saysItsEnd(p provider.Provider, proto provider.Protocol, model string) bool {
+	switch {
+	case proto == provider.Anthropic, proto == provider.Responses, geminiKin(proto):
+		return true
+	case proto == provider.Chat:
+		return geminiCompat(p.Host(), model)
+	}
+	return false
+}
+
+// chatTail follows a Chat stream's chunks for a Gemini OpenAI-compatible
+// reply that ended without its finish_reason (saysItsEnd): whether its
+// last chunk counted the usage and whether it made calls.
+type chatTail struct{ usage, calls bool }
+
+func (t *chatTail) see(data []byte) {
+	var v struct {
+		Choices []struct {
+			Delta struct {
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+		Usage *cUsage `json:"usage"`
+	}
+	if json.Unmarshal(data, &v) != nil {
+		return // [DONE], or nothing to read
+	}
+	t.usage = v.Usage != nil && (v.Usage.PromptTokens > 0 || v.Usage.CompletionTokens > 0)
+	for _, c := range v.Choices {
+		t.calls = t.calls || len(c.Delta.ToolCalls) > 0
+	}
+}
+
+// finish is the finish_reason a reply that ended without one is given:
+// Gemini's OpenAI-compatible API counts the usage only on the
+// generation's last chunks, so a last chunk with it says the generation
+// was done and only the chunk with its finish_reason was lost (Linka on
+// Discord). Without it, "": the reply was cut.
+func (t chatTail) finish() string {
+	switch {
+	case !t.usage:
+		return ""
+	case t.calls:
+		return "tool_calls"
+	}
+	return "stop"
+}
+
+// finishChunk is the Chat chunk that ends a reply with finish_reason fin.
+func finishChunk(fin string) []byte {
+	return []byte(`{"choices":[{"delta":{},"finish_reason":"` + fin + `","index":0}],"object":"chat.completion.chunk"}`)
+}
+
 // groupTryKey marks a try of a routing group's member. A member whose
 // stream breaks with an error mid-reply is failed as it used to be — the
 // group answers the agent's retry with another of its members (#733) —
@@ -463,7 +530,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					attemptSee, held = t.event, t.release
 				}
 				ended := false // the upstream said its reply ended
+				var tail chatTail
 				serr = readSSEAlive(rd, func(_, data string) error {
+					tail.see([]byte(data))
 					st := upstreamStop([]byte(data))
 					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st, Tier: upstreamTier([]byte(data))})
 					ended = ended || replyEnds(actual, data, st)
@@ -480,7 +549,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					serr = nil
 				}
 				if serr == nil && failed == "" && !ended && !relooped &&
-					(actual == provider.Anthropic || actual == provider.Responses || geminiKin(actual)) && r.Context().Err() == nil {
+					saysItsEnd(p, actual, model) && r.Context().Err() == nil {
 					// an Anthropic stream that just stopped — no
 					// stop_reason, no message_stop — or a Responses one
 					// with no response.completed is a reply cut short,
@@ -490,6 +559,12 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					// whole would say completed it never said. A Gemini
 					// one is told by its finishReason (geminiEnds, #1643)
 					serr = errEndedShort
+					if fin := tail.finish(); actual == provider.Chat && fin != "" {
+						// Gemini's OpenAI-compatible API lost only the
+						// finish_reason after its generation was done
+						u.add(Usage{Stop: fin})
+						serr = dec(string(finishChunk(fin)), attemptSee)
+					}
 				}
 			}
 		}

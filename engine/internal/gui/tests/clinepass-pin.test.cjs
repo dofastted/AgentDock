@@ -77,6 +77,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       if (lang === "zh") w.tick = zh[0];
 
       await page.locator(".row.provider", { hasText: "ClinePass" }).click();
+      // Upstream is under Advanced
+      { const adv = page.locator(".editor details.advanced"); await adv.waitFor({ state: "attached" }); if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click(); }
       const tick = page.locator(".editor label.pin-upstream");
       await tick.waitFor();
       assert.equal((await tick.textContent()).trim(), w.tick);
@@ -106,7 +108,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(posts.at(-1).body.pinUpstream, false);
 
       await page.locator(".row.provider", { hasText: "Relay" }).click();
-      await page.locator(".editor input.price-rate").waitFor();
+      // Relay sets nothing under Advanced, so its editor opens folded
+      await page.locator(".editor details.advanced:not([open]) input.price-rate").waitFor({ state: "attached" });
       assert.equal(await page.locator(".editor label.pin-upstream").count(), 0, "only a Cline provider has it");
       assert.deepEqual(errors, []);
     });

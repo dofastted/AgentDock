@@ -94,7 +94,7 @@ while read -r line; do
     got=
     for k in 1 2 3; do
       call='{"tool_call_id":"toolu_L'$$'_'$k'","name":"Agent","arguments":{"part":'$k'}}'
-      got="$got $(curl -s -X POST -H 'Content-Type: application/json' --data "$call" "$cb")"
+      got="$got $(curl --noproxy '*' -s -X POST -H 'Content-Type: application/json' --data "$call" "$cb")"
     done
     rm -f "$out/calls"
     say "$(printf '%s %s' "$got" "$(cat "$out/queued" 2>/dev/null)" | marks)"

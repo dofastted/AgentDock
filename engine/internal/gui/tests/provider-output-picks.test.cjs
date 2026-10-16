@@ -12,6 +12,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 
 function serve(lang, posts) {
   const state = { agents: [], profiles: [], settings: { lang, theme: "light" } };
@@ -49,6 +56,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/?view=providers");
       const zh = lang === "zh";
       await page.locator(".row.provider").click();
+      await unfold(page);
       const box = page.locator("input.outputs");
       await box.waitFor();
       const picks = box.locator("xpath=following-sibling::div[contains(@class,'cxpicks')]").locator(".cxpick");
@@ -66,7 +74,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await picks.nth(4).click();
 
       // More endpoints: each label on one line
-      await page.locator(".editor .more summary").click();
+      await page.locator(".editor .more:not(.advanced) > summary").click();
       for (const name of zh ? ["Anthropic 地址", "Responses 地址"] : ["Anthropic URL", "Responses URL"]) {
         const l = page.locator(".editor .more .inner label", { hasText: name });
         await l.waitFor();

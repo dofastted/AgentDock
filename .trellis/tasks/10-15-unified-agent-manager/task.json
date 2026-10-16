@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "10-16-repair-wsl-agent-discovery"
+    "10-16-repair-wsl-agent-discovery",
+    "10-16-sync-magpie-subtree"
   ],
   "parent": null,
   "relatedFiles": [],

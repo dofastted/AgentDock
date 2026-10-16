@@ -6,7 +6,8 @@
 // No click moves the page. No backend, the API is faked here.
 // znuaibot (#1989): with models in magpie but none left in the agent's
 // model list (its one picked model's provider switched off), the code is
-// all_hidden, and the toast points at Model list → Pick.
+// all_hidden, and the toast says to pick one; the list to pick from opens
+// there (94942f9f3, #2435), which agent-connect-all-hidden.test.cjs covers.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -28,6 +29,7 @@ function server(lang, posts, answer) {
       posts.push(url.pathname);
       return json(answer, 400);
     }
+    if (url.pathname === "/api/agent-models/codex") return json({ models: [{ id: "deepseek/deepseek-chat", name: "deepseek-chat", group: "DeepSeek", context: 1e5, hidden: true }], ordered: false });
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
@@ -53,10 +55,10 @@ const cases = {
   all_hidden: {
     answer: { error: "None of magpie's models is left in Codex's model list: pick one under Model list → Pick on the Agents page, then connect Codex", code: "all_hidden", agent: "Codex" },
     said: {
-      en: "None of magpie's models is left in Codex's model list: pick one under Model list → Pick, then connect Codex",
-      zh: "magpie 的模型都不在 Codex 的模型列表里：先在「模型列表 → 挑选」里选一个，再接入 Codex",
-      ja: "Codex のモデル一覧に magpie のモデルが一つも残っていません：「モデル一覧 → 選択」で一つ選んでから、Codex を接続してください",
-      de: "In der Modellliste von Codex ist keines der Modelle von magpie übrig: Wählen Sie unter Modellliste → Wählen eines aus und verbinden Sie dann Codex",
+      en: "None of magpie's models is left in Codex's model list: pick one, then connect Codex",
+      zh: "magpie 的模型都不在 Codex 的模型列表里：先选一个，再接入 Codex",
+      ja: "Codex のモデル一覧に magpie のモデルが一つも残っていません：一つ選んでから、Codex を接続してください",
+      de: "In der Modellliste von Codex ist keines der Modelle von magpie übrig: Wählen Sie eines aus und verbinden Sie dann Codex",
     },
   },
 };

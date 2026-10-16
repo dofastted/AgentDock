@@ -30,7 +30,7 @@ line; agents connected to magpie lose it when it quits.
     MiMo Code     anthropic/claude-sonnet-5
     Pi            openrouter/z-ai/glm-5.2:batch
     Goose         anthropic/claude-sonnet-5
-    Cursor        auto
+    Cursor CLI    auto
     Copilot CLI   claude-fable-5
 
   ↑↓ agent  ·  ←→ field  ·  ↵ change  ·  s save profile  ·  p profiles  ·  q quit

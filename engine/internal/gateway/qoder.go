@@ -562,9 +562,29 @@ func decodeQoder(ctx context.Context, res *http.Response, out chan<- Event, mode
 		return
 	}
 	a := qoderText{tool: -1}
+	// emit lifts one piece of the split text into events: a call, the text,
+	// or a call that can't be read, which ends the turn as an error so the
+	// agent can try it again (plugins#132, as the moved qoder plugin's).
+	// False when the turn ends here: the consumer went, or an error was
+	// sent — an error frame carries no finish.
+	emit := func(frag qoderFrag) bool {
+		switch {
+		case frag.err != "":
+			send(Event{Kind: KError, Status: 502, Text: frag.err})
+			return false
+		case frag.call != nil:
+			if !send(Event{Kind: KToolStart, ID: "call_" + qoder.NewID(), Name: frag.call.name}) {
+				return false
+			}
+			return send(Event{Kind: KToolArgs, Text: frag.call.args})
+		case frag.text != "":
+			return send(Event{Kind: KText, Text: frag.text})
+		}
+		return true
+	}
 	finish := func() {
 		for _, frag := range a.flush() {
-			if frag.text != "" && !send(Event{Kind: KText, Text: frag.text}) {
+			if !emit(frag) {
 				return
 			}
 		}
@@ -606,17 +626,7 @@ func decodeQoder(ctx context.Context, res *http.Response, out chan<- Event, mode
 		}
 		if content := delta.Get("content"); content.Exists() {
 			for _, frag := range a.feed(content.String()) {
-				ev := Event{}
-				if frag.call != nil {
-					ev = Event{Kind: KToolStart, ID: "call_" + qoder.NewID(), Name: frag.call.name}
-					if !send(ev) {
-						return
-					}
-					ev = Event{Kind: KToolArgs, Text: frag.call.args}
-				} else {
-					ev = Event{Kind: KText, Text: frag.text}
-				}
-				if !send(ev) {
+				if !emit(frag) {
 					return
 				}
 			}
@@ -628,7 +638,7 @@ func decodeQoder(ctx context.Context, res *http.Response, out chan<- Event, mode
 			if idx != a.tool {
 				a.tool = idx
 				for _, frag := range a.flush() {
-					if frag.text != "" && !send(Event{Kind: KText, Text: frag.text}) {
+					if !emit(frag) {
 						return
 					}
 				}
@@ -664,20 +674,48 @@ func decodeQoder(ctx context.Context, res *http.Response, out chan<- Event, mode
 }
 
 // qoderText is the streaming tool-call splitter: it holds text until a full
-// tool-call block arrives, then emits it as a call.
+// tool-call block arrives, then emits it as a call. A block on its way to
+// being a call that can't be read, or that the stream ends inside, is an
+// error, never the answer (plugins#132, as the moved qoder plugin's 0.2.16):
+// the turn fails, so it can be tried again. A block whose JSON is whole when
+// the stream ends without its close is still the call; one that is no call
+// at all, or one inside code, stays text.
 type qoderText struct {
 	textBuf string
 	callBuf string
 	inCall  bool
 	sawTool bool
-	tool    int // index of the native tool call being assembled, -1 for none
+	sent    string // the text given out so far, to tell a block in code from a call
+	tool    int    // index of the native tool call being assembled, -1 for none
 }
 
 type qoderFrag struct {
 	text string
 	call *qoderCall
+	err  string
 }
 type qoderCall struct{ name, args string }
+
+// qoderQuoted says text ends inside a code fence or an inline code span: a
+// tool-call block there is prose about one, not a call.
+func qoderQuoted(text string) bool {
+	if strings.Count(text, "```")%2 == 1 {
+		return true
+	}
+	line := text[strings.LastIndex(text, "\n")+1:]
+	return strings.Count(strings.ReplaceAll(line, "```", ""), "`")%2 == 1
+}
+
+// qoderCallish says a block was on its way to being a call: its JSON began,
+// or the XML function form.
+func qoderCallish(v string) bool {
+	return strings.HasPrefix(strings.TrimLeft(v, " \t\r\n"), "{") || strings.Contains(v, "\x3cfunction=")
+}
+
+const (
+	qoderCallUnreadable = "Qoder: the model's tool call, written as text, can't be read; it is not sent on as the answer"
+	qoderCallCutShort   = "Qoder: the model's tool call, written as text, was cut short; it is not sent on as the answer"
+)
 
 func (a *qoderText) feed(input string) []qoderFrag {
 	var out []qoderFrag
@@ -688,6 +726,7 @@ func (a *qoderText) feed(input string) []qoderFrag {
 			i := strings.Index(comb, qoderCallOpen)
 			if i < 0 {
 				if keep := qoderSuffix(comb); keep < len(comb) {
+					a.text(comb[:len(comb)-keep])
 					out = append(out, qoderFrag{text: comb[:len(comb)-keep]})
 					a.textBuf = comb[len(comb)-keep:]
 				} else {
@@ -696,6 +735,7 @@ func (a *qoderText) feed(input string) []qoderFrag {
 				break
 			}
 			if i > 0 {
+				a.text(comb[:i])
 				out = append(out, qoderFrag{text: comb[:i]})
 			}
 			input = comb[i+len(qoderCallOpen):]
@@ -709,11 +749,16 @@ func (a *qoderText) feed(input string) []qoderFrag {
 			a.callBuf = comb
 			break
 		}
-		if c, ok := qoderParseCall(comb[:j]); ok {
+		body := comb[:j]
+		if c, ok := qoderParseCall(body); ok {
 			a.sawTool = true
 			out = append(out, qoderFrag{call: &c})
+		} else if qoderCallish(body) && !qoderQuoted(a.sent) {
+			a.inCall = false
+			return append(out, qoderFrag{err: qoderCallUnreadable})
 		} else {
-			out = append(out, qoderFrag{text: qoderCallOpen + comb[:j] + qoderCallClose})
+			a.text(qoderCallOpen + body + qoderCallClose)
+			out = append(out, qoderFrag{text: qoderCallOpen + body + qoderCallClose})
 		}
 		input = comb[j+len(qoderCallClose):]
 		a.inCall = false
@@ -721,10 +766,23 @@ func (a *qoderText) feed(input string) []qoderFrag {
 	return out
 }
 
+// text hands a piece of text out, remembering it: whether the next block is
+// inside code is told from what came before it.
+func (a *qoderText) text(t string) { a.sent += t }
+
 func (a *qoderText) flush() []qoderFrag {
 	if a.inCall {
-		t := qoderCallOpen + a.callBuf
+		body := a.callBuf
 		a.inCall, a.callBuf = false, ""
+		if qoderCallish(body) && !qoderQuoted(a.sent) {
+			if c, ok := qoderParseCall(body); ok {
+				a.sawTool = true
+				return []qoderFrag{{call: &c}}
+			}
+			return []qoderFrag{{err: qoderCallCutShort}}
+		}
+		t := qoderCallOpen + body
+		a.text(t)
 		if t != "" {
 			return []qoderFrag{{text: t}}
 		}
@@ -732,6 +790,7 @@ func (a *qoderText) flush() []qoderFrag {
 	if a.textBuf != "" {
 		t := a.textBuf
 		a.textBuf = ""
+		a.text(t)
 		return []qoderFrag{{text: t}}
 	}
 	return nil

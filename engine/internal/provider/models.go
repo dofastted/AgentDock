@@ -165,9 +165,18 @@ func (p Provider) lists() bool {
 	return p.Account != nil || pr == nil || !pr.NoList || strings.TrimSpace(p.ModelsURL) != "" || p.listRegion(pr)
 }
 
+// listsRead counts liveAll's reads (ListsRead).
+var listsRead atomic.Int64
+
+// ListsRead is how many times a provider's saved lists have been asked
+// for whole in this process: a test counts them to say a request reads
+// them once, not once a key (@NetRozee on X).
+func ListsRead() int64 { return listsRead.Load() }
+
 // liveAll is live with the models that draw or make videos too
 // (catalog.LiveAll): which of its keys serves one is said there alone.
 func (p Provider) liveAll() ([]catalog.Model, bool) {
+	listsRead.Add(1)
 	if !p.lists() {
 		return nil, false
 	}
@@ -1151,6 +1160,10 @@ func (p Provider) fetchPerKey(ctx context.Context, keys []KeyAccount) ([]catalog
 	}
 	var deadKept []deadModel
 	at := map[string]int{}
+	// each model's keys as a set beside its list, and the models of the
+	// list before that each key saw: with a thousand keys, looking along
+	// the lists for every key and model took seconds (@NetRozee on X)
+	var has []map[string]bool
 	add := func(m catalog.Model, id string) int {
 		i, ok := at[m.ID]
 		if !ok {
@@ -1158,15 +1171,19 @@ func (p Provider) fetchPerKey(ctx context.Context, keys []KeyAccount) ([]catalog
 			at[m.ID], i = len(out), len(out)
 			out = append(out, m)
 			from = append(from, nil)
+			has = append(has, map[string]bool{})
 		} else {
 			out[i].ImageInput = sharedImageInput(out[i].ImageInput, m.ImageInput)
 			out[i].Images = out[i].Images && m.Images
 		}
-		if !slices.Contains(out[i].Keys, id) {
+		if !has[i][id] {
+			has[i][id] = true
 			out[i].Keys = append(out[i].Keys, id)
 		}
 		return i
 	}
+	var oldOf map[string][]int // a key's models in old, made when one fails
+	keptOld := map[int]bool{}  // the models of old kept for a key that failed
 	var base string
 	var lastErr error
 	for _, k := range keys {
@@ -1175,9 +1192,23 @@ func (p Provider) fetchPerKey(ctx context.Context, keys []KeyAccount) ([]catalog
 		l, err := q.fetchOne(ctx)
 		if err != nil {
 			lastErr = err
-			for _, m := range old {
-				if slices.Contains(m.Keys, id) {
-					deadKept = append(deadKept, deadModel{add(m, id), m.Keys})
+			if oldOf == nil {
+				oldOf = map[string][]int{}
+				for j, m := range old {
+					for _, kid := range m.Keys {
+						if js := oldOf[kid]; len(js) == 0 || js[len(js)-1] != j {
+							oldOf[kid] = append(js, j)
+						}
+					}
+				}
+			}
+			for _, j := range oldOf[id] {
+				i := add(old[j], id)
+				// each model kept once: its bases are worked out from
+				// its keys, the same whichever of them failed
+				if !keptOld[j] {
+					keptOld[j] = true
+					deadKept = append(deadKept, deadModel{i, old[j].Keys})
 				}
 			}
 			continue
@@ -1308,23 +1339,64 @@ func anyImageInput(a, b *bool) *bool {
 // first of five keys left out of every request). The lists are read whole,
 // the models that draw or make videos among them: a text key never says
 // it serves an image model only another key lists (#1657).
-func (p Provider) Serves(k KeyAccount, model string) bool {
-	live, ok := p.liveAll()
+func (p Provider) Serves(k KeyAccount, model string) bool { return p.Serving(model)(k) }
+
+// Serving is Serves for model, for each of the provider's keys in turn:
+// the lists are read once, not once a key. Read for every key of every
+// request, a provider of a thousand keys had its list's file looked at a
+// thousand times, and each model's thousand keys looked along, before a
+// request went out: a tenth of a second a request, seconds for five
+// thousand keys (@NetRozee on X).
+func (p Provider) Serving(model string) func(KeyAccount) bool {
+	x, ok := p.keyLists()
 	if !ok {
-		return true
+		return func(KeyAccount) bool { return true }
 	}
-	id := keyID(k.Key)
-	var keys []string
-	found, listed := false, false
+	keys, found := x.of[model]
+	return func(k KeyAccount) bool {
+		id := keyID(k.Key)
+		return !found || len(keys) == 0 || !x.listed[id] || keys[id]
+	}
+}
+
+// keyLists is which keys the provider's lists name: every key any model
+// is listed to, and each model's own, as sets. The last of a model listed
+// twice is its.
+type keyLists struct {
+	from   []catalog.Model // the lists they were made from
+	listed map[string]bool
+	of     map[string]map[string]bool
+}
+
+// keyListsMade is each provider's keyLists, made again when its lists are
+// read anew: a list read once is the same list until its file changes
+// (filememo), and is held here, so a new one is never at its address.
+var keyListsMade = struct {
+	sync.Mutex
+	m map[string]*keyLists
+}{m: map[string]*keyLists{}}
+
+func (p Provider) keyLists() (*keyLists, bool) {
+	live, ok := p.liveAll()
+	if !ok || len(live) == 0 {
+		return nil, false
+	}
+	keyListsMade.Lock()
+	defer keyListsMade.Unlock()
+	if x := keyListsMade.m[p.ID]; x != nil && len(x.from) == len(live) && &x.from[0] == &live[0] {
+		return x, true
+	}
+	x := &keyLists{from: live, listed: map[string]bool{}, of: make(map[string]map[string]bool, len(live))}
 	for _, m := range live {
-		if m.ID == model {
-			keys, found = m.Keys, true
+		set := make(map[string]bool, len(m.Keys))
+		for _, id := range m.Keys {
+			set[id] = true
+			x.listed[id] = true
 		}
-		if !listed && slices.Contains(m.Keys, id) {
-			listed = true
-		}
+		x.of[m.ID] = set
 	}
-	return !found || len(keys) == 0 || !listed || slices.Contains(keys, id)
+	keyListsMade.m[p.ID] = x
+	return x, true
 }
 
 // ServesNone is the user's Select none (NoModels) with nothing picked:

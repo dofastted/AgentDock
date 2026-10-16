@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -273,5 +274,20 @@ func TestMovedFactoryPayloadTooLarge(t *testing.T) {
 				t.Fatalf("size fallback: status %d, Factory calls %d, fallback calls %d, tries %+v", rec.Code, calls.Load(), fallbackCalls.Load(), lastRoute(s).Tries)
 			}
 		})
+	}
+}
+
+// A vendor's byte cap reaches an agent on the OpenAI routes in words pi
+// knows (its overflow.ts matches request_too_large), so pi compacts and
+// tries once more instead of stopping — @wilsonxuuuu on X, whose pi got
+// an api_error 413 and never compacted.
+func TestPayloadTooLargeSaysRequestTooLargeToPi(t *testing.T) {
+	const nginx = "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+	piOverflow := regexp.MustCompile(`(?i)request_too_large`)
+	fresh(t)
+	scriptedOn(t, "a", provider.Chat, &scripted{replies: []reply{{413, "text/html", nginx}}})
+	code, body := postAs(t, New(), "", `{"model":"a/m","messages":[{"role":"user","content":"hi"}]}`)
+	if code != 413 || !piOverflow.MatchString(body) || !strings.Contains(body, "byte limit") || strings.Contains(body, "context_length_exceeded") {
+		t.Fatalf("byte cap on the chat route: %d %s", code, body)
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/provider"
@@ -409,5 +411,48 @@ func TestFirstRunShowsCatalogSync(t *testing.T) {
 	}
 	if _, cmd := m.Update(keyMsg("S")); cmd != nil {
 		t.Fatal("S started a second sync while the first runs")
+	}
+}
+
+// The agents page keeps the row picked in view: a machine with more agents
+// than the terminal has rows can't scroll the highlight off and freeze the
+// page, as the library page did (#2220). What the terminal shows of a view
+// taller than itself is its last h lines — the top scrolls away.
+func TestAgentsViewKeepsTheRowPicked(t *testing.T) {
+	var agents []*agent.Agent
+	for i := 0; i < 30; i++ {
+		agents = append(agents, &agent.Agent{
+			ID:     fmt.Sprintf("agent-%02d", i),
+			Name:   fmt.Sprintf("agent-%02d", i),
+			Path:   fmt.Sprintf("/opt/agent-%02d/bin/agent", i),
+			Fields: []agent.Field{{Key: "model", Label: "model"}},
+		})
+	}
+	m := model{w: 120, agents: agents, hidden: len(agents),
+		values: make([]map[string]string, len(agents)), failover: make([]string, len(agents))}
+	for i := range m.values {
+		m.values[i] = map[string]string{"model": ""}
+	}
+	screen := func(v string, h int) string {
+		lines := strings.Split(v, "\n")
+		if len(lines) > h {
+			lines = lines[len(lines)-h:]
+		}
+		return strings.Join(lines, "\n")
+	}
+	// a plain 80×24 terminal: thirty agents are nine rows past it
+	m.h = 24
+	for _, pick := range []int{0, 4, 8, 15, 22, 29} {
+		m.row = pick
+		v := screen(m.viewList(), m.h)
+		if !strings.Contains(v, "▸ "+agents[pick].Name) {
+			t.Fatalf("row %d (%s) picked, but the screen stops short of it:\n%s", m.row, agents[pick].Name, v)
+		}
+	}
+	// the page starts at its top while it all fits
+	m.h = 60
+	m.row = 29
+	if v := screen(m.viewList(), m.h); !strings.Contains(v, "agent-00") {
+		t.Fatalf("a tall terminal dropped the top of the list:\n%s", v)
 	}
 }

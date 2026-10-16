@@ -1336,9 +1336,20 @@ func gooseIn(at place, cfg string) *Agent {
 func cursor(home string) *Agent {
 	path := filepath.Join(home, ".cursor", "cli-config.json")
 	return &Agent{
-		ID: "cursor", Name: "Cursor", Icon: "cursor", Aliases: []string{"cursor-agent"},
+		// Cursor CLI, not Cursor: the row is cursor-agent, and the Cursor
+		// editor is not on it (@G_Z_Y on X looked for Cursor CLI on the
+		// Agents page and took "Cursor" for the editor)
+		ID: "cursor", Name: "Cursor CLI", Icon: "cursor", Aliases: []string{"cursor-agent"},
 		UA:  []string{"cursor"},
 		Bin: "cursor-agent", Dir: filepath.Dir(path), Path: path,
+		// the editor reads ~/.cursor's mcp.json, skills and hooks, and its
+		// chats are listed with the CLI's
+		shared: "Cursor",
+		// the Cursor editor makes ~/.cursor (argv.json, extensions, mcp.json,
+		// projects) with no cursor-agent anywhere, so the folder says nothing
+		// of the CLI: cli-config.json or the cursor-agent command does
+		// (@G_Z_Y on X saw a Cursor row that wasn't the CLI)
+		dirShared: true,
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: jsonGet(path, "model.modelId"),

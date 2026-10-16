@@ -27,6 +27,7 @@ var notAnAgent = map[string]string{
 	"USER":                  "the process' own",
 	"XDG_CONFIG_HOME":       "magpie's own folder's, which appdir decides",
 	"XDG_DATA_HOME":         "the same",
+	"XDG_CACHE_HOME":        "Go's build cache's too, which a sandbox keeps shared; Air's ACP OpenCode under it is found by path in a test's own home (#2423)",
 	"MAGPIE_ADDR":           "magpie's own",
 	"MAGPIE_DEBUG":          "magpie's own debug flag",
 	"MAGPIE_PUBLIC_URL":     "magpie's own public URL",

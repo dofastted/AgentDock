@@ -232,6 +232,11 @@ func TestArchiveWholeBodies(t *testing.T) {
 			if u := lastUsage(t); u.Archive == "" || u.Archive != c.Archive {
 				t.Errorf("usage row names archive %q, the call %q", u.Archive, c.Archive)
 			}
+			// the Routing page's request names it too, for its bodies to be
+			// read back once the recent calls have let them go
+			if rts := s.Trace(context.Background(), 0, 0).Routes; len(rts) != 1 || rts[0].Archive != c.Archive || c.Route != rts[0].ID {
+				t.Errorf("route names archive %q (call %q, route %d of %d)", rts[0].Archive, c.Archive, c.Route, rts[0].ID)
+			}
 			if left, _ := os.ReadDir(tmp); len(left) != 0 {
 				t.Errorf("files left behind: %v", left)
 			}

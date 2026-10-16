@@ -54,6 +54,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.route("**/*", serve(lang, posts));
         await page.goto("http://magpie.test/?view=providers");
         await page.locator(".row.provider").click();
+        // the Context window is under Advanced
+        { const adv = page.locator(".editor details.advanced"); await adv.waitFor({ state: "attached" }); if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click(); }
 
         const picks = page.locator(".cxpicks").first();
         assert.deepEqual(await picks.locator(".cxpick").allTextContents(), ["128K", "200K", "256K", "400K", "512K", "1M"]);

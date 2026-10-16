@@ -61,7 +61,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await page.route("**/*", server(posted, lang, saved ? { ...relay, balanceMethod: saved } : relay));
             await page.goto("http://magpie.test/?view=providers");
             await page.locator(".row.provider", { hasText: "Relay" }).click();
-            await page.locator(".editor details.more summary").click();
+            await page.locator(".editor details.more:not(.advanced) > summary").click();
 
             const method = page.locator(".editor .bal-method");
             await method.waitFor();

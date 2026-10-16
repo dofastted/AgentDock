@@ -172,6 +172,13 @@ func targetOf(a *agent.Agent) *Target {
 func hostTargetOf(a *agent.Agent) *Target {
 	h := targetHome(a)
 	t := &Target{Agent: a}
+	if n := a.SharedName(); n != a.Name {
+		// the files are another app's too (the Cursor editor's ~/.cursor):
+		// named for both, not for the CLI alone
+		named := *a
+		named.Name = n
+		t.Agent = &named
+	}
 	switch targetKind(a.ID) {
 	case "claude":
 		d := agentDir(a, appdir.ClaudeDirIn(h))
@@ -736,7 +743,13 @@ func targets(gone bool) []*Target {
 	for _, a := range apps() {
 		own[a.ID] = true
 	}
-	for _, a := range agent.Detected() {
+	for _, a := range agent.All() {
+		// the agents here, and a folder an agent shares with its vendor's
+		// other app when only that app is here: the Cursor editor reads
+		// ~/.cursor's mcp.json and skills with no cursor-agent installed
+		if !a.Detected() && !a.SharedHere() {
+			continue
+		}
 		// an app magpie also sets up as an agent (Claude Desktop) keeps its
 		// MCP servers where apps says, once
 		if own[a.ID] {
@@ -753,7 +766,7 @@ func targets(gone bool) []*Target {
 		}
 	}
 	for _, a := range apps() {
-		if !a.Detected() {
+		if !a.Detected() && !a.SharedHere() {
 			continue
 		}
 		if t := targetOf(a); t != nil && t.open() {

@@ -124,6 +124,8 @@ func TestBodyRejectionErrorShapes(t *testing.T) {
 		want   string
 	}{
 		{provider.Anthropic, 413, `"type":"request_too_large"`},
+		{provider.Chat, 413, `"type":"request_too_large"`},
+		{provider.Responses, 413, `"type":"request_too_large"`},
 		{provider.Gemini, 413, `"status":"INVALID_ARGUMENT"`},
 		{provider.Gemini, 408, `"status":"DEADLINE_EXCEEDED"`},
 	} {

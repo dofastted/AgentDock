@@ -620,7 +620,8 @@ func savedButSignedOut() []Exclusion {
 		if saved[a] > 1 {
 			n = fmt.Sprintf("%d accounts are", saved[a])
 		}
-		out = append(out, Exclusion{Agent: a, SignedOut: true, Users: users[a],
+		_, _, err := readCodexLogin(codexHome(), false)
+		out = append(out, Exclusion{Agent: a, SignedOut: true, Users: users[a], Retry: codexKeychainUnread(err),
 			Why: fmt.Sprintf("%s saved in magpie, and they are only offered beside the account Codex is signed in to. %s", n, codexSignedOutWhy())})
 	}
 	return out
@@ -646,7 +647,7 @@ func codexSignedOutWhy() string {
 	case se.Setting.Mode == "ephemeral":
 		return se.Error() + ". Set cli_auth_credentials_store = \"file\" there and sign in again (codex login)."
 	case se.Cause != nil:
-		return se.Error() + ". Allow magpie when macOS asks for the keychain, or set cli_auth_credentials_store = \"file\" there and sign in again (codex login)."
+		return se.Error() + ". Allow magpie when macOS asks for the keychain (\"Always Allow\" lets /usr/bin/security read that item from then on, so macOS stops asking each time Codex changes it), or set cli_auth_credentials_store = \"file\" there and sign in again (codex login)."
 	}
 	return se.Error() + fmt.Sprintf(": here it reads only %s. Set cli_auth_credentials_store = \"file\" there and sign in again (codex login).", codexAuthPath())
 }

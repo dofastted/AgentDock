@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -476,5 +477,82 @@ func TestImportCCSwitchConfigWithBOM(t *testing.T) {
 	items, err := readCCSwitch(path)
 	if err != nil || len(items) != 1 || items[0].Provider.Key != "sk-relay" {
 		t.Fatalf("config.json with a BOM: %+v %v", items, err)
+	}
+}
+
+// A provider's Gemini URL (#1346) names its host like its other endpoints
+// do: the same key at that host is the provider already here, not another
+// one to add beside it.
+func TestGeminiURLIsItsHost(t *testing.T) {
+	isolate(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+
+	// a Gemini-protocol relay added from the editor is known by its
+	// Gemini URL: the same key there again is the one already here
+	first := Provider{Name: "Gemini Relay", Key: "sk-g", Gemini: "https://g.example.com"}
+	if _, err := Add(first); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := Add(Provider{Name: "Gemini Relay", Key: "sk-g", Gemini: "https://g.example.com"}); err == nil {
+		t.Fatalf("the same relay was added again as %q", id)
+	}
+
+	// an import entry at the relay over another protocol is the provider
+	// already here at its Gemini URL, the same key in hand
+	it := settle([]AppImport{{Ref: "r", Provider: Provider{
+		ID: "gr", Name: "Gemini Relay", Key: "sk-g", Chat: "https://g.example.com/v1",
+	}}}, All(), map[string]bool{})[0]
+	if it.Status != "same" || it.Existing != "Gemini Relay" {
+		t.Fatalf("the relay's import entry: %+v", it)
+	}
+}
+
+// While magpie routes Claude Code, its settings.json points at the
+// gateway and what the user had there stands by in the stash. The import
+// reads the stash back as magpie stepping out would put it back: the
+// tier and subagent models beside the endpoint, token and main model.
+func TestClaudeImportWhileRoutedTakesTheStashedEnv(t *testing.T) {
+	isolate(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:49999")
+	path := claudeSettingsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// routed: magpie wrote its own address and key over the user's relay
+	if err := os.WriteFile(path, []byte(`{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:49999","ANTHROPIC_AUTH_TOKEN":"sk-magpie"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stash := map[string]string{
+		"claude.base_url":   "https://relay.example.com/anthropic",
+		"claude.auth_token": "sk-claude",
+		"claude.model":      "claude-sonnet-5",
+		"claude.env.ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-x",
+		"claude.env.ANTHROPIC_SMALL_FAST_MODEL":     "claude-haiku-x",
+	}
+	b, _ := json.Marshal(stash)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(Path()), "stash.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	it := itemsOf(t, "claude-code")["settings"]
+	if it.Skip != "" || it.Provider.Key != "sk-claude" {
+		t.Fatalf("the relay in the stash: %+v", it)
+	}
+	for _, m := range []string{"claude-sonnet-5", "claude-sonnet-5-x", "claude-haiku-x"} {
+		if !slices.Contains(it.Provider.Models, m) {
+			t.Fatalf("models %v miss %s", it.Provider.Models, m)
+		}
 	}
 }

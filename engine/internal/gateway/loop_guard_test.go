@@ -380,16 +380,16 @@ func (v *loopingVendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // loopAsks are a streamed request on each of the agents' protocols, and
 // how each one's stream says it ended well, and with magpie's error; asks
-// is how many times the vendor is asked when every reply loops: a reply
-// translated to the agent's protocol is asked again once (loopReasks), a
-// Chat stream passed through as it comes is not.
+// is how many times the vendor is asked when every reply loops: once, and
+// again once (loopReasks), whether magpie translates the reply to the
+// agent's protocol or passes a Chat stream through as it comes (#2436).
 var loopAsks = []struct {
 	name, path, body string
 	done, failed     string
 	asks             int
 }{
 	{"chat", "/v1/chat/completions", `{"model":"ds/deepseek-v4-max","stream":true,"messages":[{"role":"user","content":"add TOML"}]}`,
-		"data: [DONE]", `data: {"error":{"message":"magpie ended this reply`, 1},
+		"data: [DONE]", `data: {"error":{"message":"magpie ended this reply`, 2},
 	{"anthropic", "/v1/messages", `{"model":"ds/deepseek-v4-max","max_tokens":32000,"stream":true,"messages":[{"role":"user","content":"add TOML"}]}`,
 		`"type":"message_stop"`, "event: error\ndata: {\"error\":{", 2},
 	{"responses", "/v1/responses", `{"model":"ds/deepseek-v4-max","stream":true,"input":"add TOML"}`,
@@ -500,6 +500,11 @@ func loopCut(t *testing.T, v *loopingVendor, got, done, failed, provider string,
 	if rec.ErrType != loopErrType || !strings.Contains(rec.Error, "stuck in a loop") || rec.Provider != provider {
 		t.Fatalf("usage record %+v", rec)
 	}
+	// a reply asked again counts its tries, in place or not (#2436: five
+	// reply_loop rows, tries empty)
+	if want := asks; asks == 1 && rec.Tries != 0 || asks > 1 && rec.Tries != want {
+		t.Fatalf("usage record's tries %d, the vendor asked %d times", rec.Tries, asks)
+	}
 }
 
 // loopLines counts the lines of the reporter's loop in what the agent got,
@@ -557,22 +562,19 @@ func TestLoopEndsWorkBuddysReply(t *testing.T) {
 }
 
 // A reply whose reasoning loops before it says anything is asked again
-// once, in place, when magpie translates it to the agent's protocol: the
-// agent keeps the reasoning it has, the next try's follows it, and the
-// reply ends whole, the loop no error (cdredfox on X: WorkBuddy's DeepSeek
-// v4 flash now and then looping in a long turn, the agent's turn ended).
-// A Chat stream passed through as it comes is ended with the loop's error,
-// as before: its events aren't magpie's to splice.
+// once: the agent keeps the reasoning it has, the next try's follows it,
+// and the reply ends whole, the loop no error (cdredfox on X: WorkBuddy's
+// DeepSeek v4 flash now and then looping in a long turn, the agent's turn
+// ended). Translated to the agent's protocol, it is asked again in place;
+// a Chat stream passed through as it comes is let go at the end of the
+// event the loop was found in, and the next try's stream follows it
+// (#2436: pi's Chat to WorkBuddy was ended at once, its tries empty).
 func TestReasoningLoopIsAskedAgain(t *testing.T) {
 	for _, x := range loopAsks {
 		t.Run(x.name, func(t *testing.T) {
 			v := &loopingVendor{loops: 1, letGo: make(chan bool, 4)}
 			gw := deepseekOn(t, v)
 			got := askStream(t, gw+x.path, x.body)
-			if x.asks == 1 {
-				loopCut(t, v, got, x.done, x.failed, "ds", 1)
-				return
-			}
 			if !strings.Contains(got, x.done) || strings.Contains(got, "magpie ended this reply") || !strings.Contains(got, "parse() now takes .toml") {
 				t.Fatalf("the reply asked again didn't end whole:\n%s", got[max(len(got)-1500, 0):])
 			}
@@ -589,6 +591,26 @@ func TestReasoningLoopIsAskedAgain(t *testing.T) {
 			// false only after 20s unreleased.
 			if a, b := <-v.letGo, <-v.letGo; a == b {
 				t.Fatalf("let go: %v and %v, want the looping try let go and the next not", a, b)
+			}
+			if x.name == "chat" {
+				// both tries' chunks, each whole: the first ends on an
+				// event's end, not halfway through one
+				for _, ln := range strings.Split(got, "\n") {
+					if d, ok := strings.CutPrefix(ln, "data: "); ok && d != "[DONE]" && !json.Valid([]byte(d)) {
+						t.Fatalf("a chunk spliced halfway: %q", ln)
+					}
+				}
+			}
+			var rec usage.Record
+			for i := 0; i < 50; i++ {
+				if recs := usage.Load(time.Time{}); len(recs) > 0 {
+					rec = recs[len(recs)-1]
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if rec.Tries != 2 || rec.Error != "" || rec.ErrType != "" {
+				t.Fatalf("usage record %+v, want an answer in 2 tries", rec)
 			}
 		})
 	}

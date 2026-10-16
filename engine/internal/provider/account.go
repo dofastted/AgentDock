@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -314,6 +315,10 @@ type Exclusion struct {
 	// Tucked: hidden from the Add sheet too, but for its "Show N hidden"
 	// and a search by name (#116).
 	Tucked bool `json:"tucked,omitempty"`
+	// Retry: the keychain didn't give Codex's sign-in (refused, no
+	// answer, or its prompt still up); Try again asks it once more
+	// (RetryCodexKeychain, #2367).
+	Retry bool `json:"retry,omitempty"`
 }
 
 // Excluded lists sign-ins magpie detects but leaves out: the accounts the
@@ -353,11 +358,20 @@ var (
 	claudeCacheC   claudeCredentials
 	claudeCacheLoc claudeCredentialLocation
 	claudeCacheOK  bool
+
+	claudeAskMu sync.Mutex
+	claudeAskAt time.Time // a keychain read that may have shown a dialog
 )
 
 // claudeCacheTTL keeps All() from spawning `security` on every gateway
 // request while still noticing a fresh login quickly.
 const claudeCacheTTL = 10 * time.Second
+
+// keychainDeniedTTL is how long a keychain read that may have shown the
+// user a dialog is not asked again, as copilotCLISecret doesn't re-ask a
+// denied one at once (#723, #2408): with the item's trust list holding no
+// `security`, every ask can show the dialog again.
+const keychainDeniedTTL = 10 * time.Minute
 
 type claudeAuth struct {
 	AccessToken      string   `json:"accessToken"`
@@ -492,6 +506,14 @@ type claudeKeychainItem struct {
 	hex       bool
 }
 
+// keychainDenied says whether a failed `security find-generic-password`
+// could have been a dialog the user answered no to: 44 is the item not
+// being there, which asks nobody.
+func keychainDenied(err error) bool {
+	var xe *exec.ExitError
+	return errors.As(err, &xe) && xe.ExitCode() != 44
+}
+
 // readClaudeKeychainItem reads the item for a keychain account, or by
 // service alone when the account is "". Either way it is the one under
 // $USER that a sign-in is written back to.
@@ -502,6 +524,11 @@ func readClaudeKeychainItem(account string) claudeKeychainItem {
 	}
 	out, err := proc.Command("security", args...).Output()
 	if err != nil {
+		if keychainDenied(err) {
+			claudeAskMu.Lock()
+			claudeAskAt = time.Now()
+			claudeAskMu.Unlock()
+		}
 		return claudeKeychainItem{}
 	}
 	b, wasHex := keychainText(bytes.TrimSpace(out))
@@ -563,7 +590,16 @@ func claudeCredential() (claudeCredentials, claudeCredentialLocation, bool) {
 	}
 	claudeCacheMu.Lock()
 	defer claudeCacheMu.Unlock()
-	if time.Since(claudeCacheAt) < claudeCacheTTL {
+	ttl := claudeCacheTTL
+	if !claudeCacheOK {
+		claudeAskMu.Lock()
+		ask := claudeAskAt
+		claudeAskMu.Unlock()
+		if time.Since(ask) < keychainDeniedTTL {
+			ttl = keychainDeniedTTL
+		}
+	}
+	if time.Since(claudeCacheAt) < ttl {
 		return claudeCacheC, claudeCacheLoc, claudeCacheOK
 	}
 	c, loc, ok := readClaudeCredential()
@@ -582,6 +618,9 @@ func forgetClaudeCredential() {
 	claudeCacheMu.Lock()
 	claudeCacheAt = time.Time{}
 	claudeCacheMu.Unlock()
+	claudeAskMu.Lock()
+	claudeAskAt = time.Time{}
+	claudeAskMu.Unlock()
 }
 
 func saveClaudeCredential(loc claudeCredentialLocation, c claudeCredentials) error {

@@ -1,0 +1,3 @@
+{"file": ".trellis/tasks/10-16-sync-magpie-subtree/design.md", "reason": "Acceptance is the split SHA, hunk rule, and checklist completeness, not a new feature."}
+{"file": ".trellis/tasks/10-15-unified-agent-manager/prd.md", "reason": "Parent AC10 names the upstream test failures that must not be treated as regressions."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Engine merge can change API and UI strings together; check both sides of a resolved hunk."}

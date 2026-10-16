@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -49,6 +50,31 @@ func desktopAccepts(id string) bool {
 		}
 	}
 	return false
+}
+
+// desktopKnowsMythos says a Claude Desktop build keeps the mythos word its
+// 2.7032 filter knows (desktopWords). Older builds have no such word: the
+// Store's 1.6608.2 keeps a gateway model only when its id reads as a
+// sonnet|opus|haiku tier or has claude, sonnet, opus, haiku or anthropic in
+// it (its app.asar has neither mythos nor fable), so every reasoning-level
+// model listed by mythos-magpie-<n> vanished from its menu
+// (sublatesublate-design). The version a User-Agent names ("Mozilla/5.0 …
+// Claude/2.7032.0 Chrome/…") is the only word magpie gets of the build: one
+// that says a version below 2 falls back to the plain alias every build
+// keeps (no effort picker there, and those builds have no mythos effort
+// table either). Anything else keeps the picker alias: 2 and up, and a
+// request that names no build at all, as the Code tab's Claude Code
+// ("claude-cli/… (external, claude-desktop)", known by its key) whose
+// ids are mythos-magpie-<n> already.
+var desktopUAVersion = regexp.MustCompile(` Claude/(\d+)`)
+
+func desktopKnowsMythos(ua string) bool {
+	m := desktopUAVersion.FindStringSubmatch(ua)
+	if m == nil {
+		return true
+	}
+	n, err := strconv.Atoi(m[1])
+	return err != nil || n >= 2
 }
 
 // desktopAlias is the prefix of the id a model is listed by to Claude
@@ -160,8 +186,10 @@ func DesktopID(e provider.Entry) string { return claudeLooking(e) }
 // folds rows of one name into one entry, so no two of one name read the
 // same (desktopNames). A model of 1M or more is listed by its "[1m]" id
 // under settings.DesktopLongest, described as Desktop's own 1M entry is
-// (desktop1M).
-func desktopModels(entries []provider.Entry) []map[string]any {
+// (desktop1M). A build that has no mythos word (desktopKnowsMythos) is
+// shown a reasoning-level model by its plain alias instead of the picker
+// one, which such a build would drop whole (#2426).
+func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any {
 	names := desktopNames(entries)
 	// the tier each model stands in for: the user's pick (a model picked
 	// for two is tagged with the first, desktopTierTurn sends the other),
@@ -178,7 +206,11 @@ func desktopModels(entries []provider.Entry) []map[string]any {
 	for i, e := range entries {
 		m := modelObject(e)
 		m["display_name"] = names[i]
-		m["id"] = claudeLooking(e)
+		id := claudeLooking(e)
+		if !knowsMythos && strings.HasPrefix(id, desktopEffortAlias) {
+			id = aliasFor(e.ID)
+		}
+		m["id"] = id
 		if desktopListed1M(e, longest) {
 			m["id"] = m["id"].(string) + "[1m]"
 			m["description"] = desktop1MSaid

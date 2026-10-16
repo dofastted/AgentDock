@@ -983,6 +983,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		errType = provider.ErrorType(refusal)
 	}
 	end(call.Status, call.Error, uu.Input+uu.Output+uu.CacheRead+uu.CacheWrite, uu.Output)
+	call.Route = tr.ID
 	s.record(call)
 	servedProvider, servedAccount := codexServed(base, r.Header, on)
 	rec := usage.Record{RouteID: tr.ID, Time: start, Agent: call.Agent,
