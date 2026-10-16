@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -184,12 +186,13 @@ func fakeWSL(t *testing.T, installed, running string, probes, roots map[string]s
 	t.Helper()
 	run, root := wslRun, wslRoot
 	reset := func() {
-		wsl.seen, wsl.at, wsl.runAt, wsl.names, wsl.running, wsl.dirty = nil, time.Time{}, time.Time{}, nil, nil, false
+		wsl.seen, wsl.at, wsl.runAt, wsl.names, wsl.running, wsl.probed, wsl.failed, wsl.failErr, wsl.listErr, wsl.dirty = nil, time.Time{}, time.Time{}, nil, nil, nil, nil, nil, "", false
 		wsl.runOK = false
 	}
 	t.Cleanup(func() { wslRun, wslRoot = run, root; reset() })
 	reset()
 	asked, opened = &[]string{}, &[]string{}
+	var mu sync.Mutex
 	wslRun = func(_ time.Duration, args ...string) ([]byte, error) {
 		switch strings.Join(args, " ") {
 		case "-l -q":
@@ -198,13 +201,17 @@ func fakeWSL(t *testing.T, installed, running string, probes, roots map[string]s
 			return utf16le(running, true), nil
 		}
 		if len(args) > 2 && args[0] == "-d" {
+			mu.Lock()
 			*asked = append(*asked, args[1])
+			mu.Unlock()
 			return []byte(probes[args[1]]), nil
 		}
 		return nil, errors.New("unexpected wsl.exe " + strings.Join(args, " "))
 	}
 	wslRoot = func(name string) string {
+		mu.Lock()
 		*opened = append(*opened, name)
+		mu.Unlock()
 		return roots[name]
 	}
 	return asked, opened
@@ -238,7 +245,7 @@ func TestWSLStoppedDistro(t *testing.T) {
 	if len(ds) != 2 || ds[0].Name != "Ubuntu" || !ds[0].Running || ds[1].Name != "Stopped" || ds[1].Running {
 		t.Fatalf("%+v", ds)
 	}
-	if strings.Join(*asked, ",") != "Ubuntu,Other" || strings.Join(*opened, ",") != "Ubuntu" {
+	if !sameNames(*asked, "Ubuntu", "Other") || strings.Join(*opened, ",") != "Ubuntu" {
 		t.Fatalf("asked %v, opened %v", *asked, *opened)
 	}
 	as := wslAgentsOf(ds)
@@ -297,20 +304,33 @@ func TestWSLStoppedDistro(t *testing.T) {
 	}
 }
 
-// When wsl.exe can't list, nothing remembered is forgotten.
+// When wsl.exe can't list, nothing remembered is forgotten: the last
+// success is shown stale, not as an empty inventory.
 func TestWSLListFails(t *testing.T) {
 	codexHome(t, "", "")
 	fakeWSL(t, "", "", nil, nil)
 	wslRun = func(time.Duration, ...string) ([]byte, error) { return nil, errors.New("no wsl") }
-	b, _ := json.Marshal(map[string]*distro{"Keep": {Name: "Keep", Has: map[string]bool{"dir:.codex": true}}})
+	b, _ := json.Marshal(map[string]*distro{"Keep": {Name: "Keep", Home: "/home/me", Has: map[string]bool{"dir:.codex": true}}})
 	os.MkdirAll(filepath.Dir(wslStatePath()), 0o755)
 	os.WriteFile(wslStatePath(), b, 0o600)
-	if ds := wslDistros(); len(ds) != 0 {
+	ds := wslDistros()
+	if len(ds) != 1 || ds[0].Name != "Keep" {
 		t.Fatalf("%+v", ds)
 	}
-	if b2, _ := os.ReadFile(wslStatePath()); string(b2) != string(b) {
-		t.Fatalf("rewrote %s", b2)
+	if WSLListError() == "" {
+		t.Fatal("list failure looked like an empty inventory")
 	}
+	if b2, _ := os.ReadFile(wslStatePath()); !strings.Contains(string(b2), `"Keep"`) {
+		t.Fatalf("forgot %s", b2)
+	}
+}
+
+func sameNames(got []string, want ...string) bool {
+	g := append([]string(nil), got...)
+	slices.Sort(g)
+	w := append([]string(nil), want...)
+	slices.Sort(w)
+	return slices.Equal(g, w)
 }
 
 // TJHHHH on Discord: magpie kept starting WSL while they repaired it. An

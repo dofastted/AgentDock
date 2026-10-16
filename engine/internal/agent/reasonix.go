@@ -80,13 +80,12 @@ type reasonixState struct {
 func reasonix(home string) *Agent { return reasonixIn(here(home)) }
 
 // reasonixIn is Reasonix at a place: this machine's home, or a WSL
-// distro's (see wsl.go), where its CLI keeps Linux's ~/.reasonix
-// (REASONIX_HOME isn't read) and its provider names the gateway as the
-// distro reaches it, with the key it takes from there.
+// distro's (see wsl.go), where REASONIX_HOME as probed relocates ~/.reasonix
+// and its provider names the gateway as the distro reaches it.
 func reasonixIn(at place) *Agent {
-	goos, getenv := runtime.GOOS, os.Getenv
+	goos, getenv := runtime.GOOS, at.getenv
 	if at.spell != nil {
-		goos, getenv = "linux", func(string) string { return "" }
+		goos = "linux"
 	}
 	dir := reasonixHome(goos, at.home, getenv)
 	gwKey := func() string { return agentKeyAt("reasonix", at.gw()) }

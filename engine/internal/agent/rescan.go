@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/wslrun"
 )
 
 // Rescan forgets what was found of the agents on this machine a while ago,
@@ -15,6 +16,7 @@ import (
 // server), and where each command was found on PATH (proc.LookPath).
 func Rescan() {
 	proc.Forget()
+	wslrun.Forget()
 
 	cursorLocalSeen.Lock()
 	cursorLocalSeen.at = time.Time{}
@@ -22,9 +24,10 @@ func Rescan() {
 
 	wsl.Lock()
 	wsl.at, wsl.runAt = time.Time{}, time.Time{}
+	wsl.listErr = ""
 	// a running distro is asked again, and one that failed is retried now
 	// rather than in ten minutes
-	wsl.probed, wsl.failed = map[string]bool{}, map[string]time.Time{}
+	wsl.probed, wsl.failed, wsl.failErr = map[string]bool{}, map[string]time.Time{}, map[string]string{}
 	wsl.Unlock()
 
 	almaRead.Lock()

@@ -904,21 +904,39 @@ func opencode(home, cfg string) *Agent {
 		[]string{"opencode"}, "oc")
 }
 
-// opencodeIn is OpenCode in a WSL distro (see wsl.go): its config in
-// ~/.config/opencode, as XDG_CONFIG_HOME and OPENCODE_CONFIG_DIR, the
-// distro's variables, aren't read; OpenChamber, a Windows app, isn't there.
+// opencodeIn is OpenCode in a WSL distro (see wsl.go): $OPENCODE_CONFIG_DIR
+// or $XDG_CONFIG_HOME/opencode as the distro probed them, else
+// ~/.config/opencode.
 func opencodeIn(at place) *Agent {
+	dir := filepath.Join(at.home, ".config", "opencode")
+	if d := strings.TrimSpace(at.getenv("OPENCODE_CONFIG_DIR")); d != "" {
+		dir = d
+	} else if cfg := strings.TrimSpace(at.getenv("XDG_CONFIG_HOME")); cfg != "" {
+		dir = filepath.Join(cfg, "opencode")
+	}
+	auth := filepath.Join(at.home, ".local", "share", "opencode", "auth.json")
+	if data := strings.TrimSpace(at.getenv("XDG_DATA_HOME")); data != "" {
+		auth = filepath.Join(data, "opencode", "auth.json")
+	}
 	return openCodeLike(at, "opencode", "OpenCode", "opencode", "opencode",
-		filepath.Join(at.home, ".config", "opencode"), filepath.Join(at.home, ".local", "share", "opencode", "auth.json"),
-		[]string{"opencode"}, "oc")
+		dir, auth, []string{"opencode"}, "oc")
 }
 
-// mimocodeIn is MiMo Code in a WSL distro: ~/.config/mimocode, as
-// MIMOCODE_HOME isn't read there.
+// mimocodeIn is MiMo Code in a WSL distro: $MIMOCODE_HOME/config when that
+// is set, else ~/.config/mimocode.
 func mimocodeIn(at place) *Agent {
+	dir := filepath.Join(at.home, ".config", "mimocode")
+	if h := at.getenv("MIMOCODE_HOME"); filepath.IsAbs(h) {
+		dir = filepath.Join(h, "config")
+	} else if cfg := strings.TrimSpace(at.getenv("XDG_CONFIG_HOME")); cfg != "" {
+		dir = filepath.Join(cfg, "mimocode")
+	}
+	auth := filepath.Join(at.home, ".local", "share", "mimocode", "auth.json")
+	if data := strings.TrimSpace(at.getenv("XDG_DATA_HOME")); data != "" {
+		auth = filepath.Join(data, "mimocode", "auth.json")
+	}
 	return openCodeLike(at, "mimocode", "MiMo Code", "mimocode", "mimo",
-		filepath.Join(at.home, ".config", "mimocode"), filepath.Join(at.home, ".local", "share", "mimocode", "auth.json"),
-		[]string{"mimocode"}, "mimo")
+		dir, auth, []string{"mimocode"}, "mimo")
 }
 
 // openCodeDir is the folder OpenCode reads its user config from:
@@ -984,15 +1002,9 @@ func piIn(at place) *Agent {
 	return a
 }
 
-// piDir is Pi's agent folder at a place: PI_CODING_AGENT_DIR's when set,
-// "~" in it standing for home, else ~/.pi/agent (config.js, getAgentDir).
-// A relative one is Pi's working directory's, which magpie can't know, so
-// it is not taken; nor this machine's variable for a WSL distro's Pi.
 func piDir(at place) string {
-	if at.spell == nil {
-		if d := homeDir(at.home, appdir.Getenv("PI_CODING_AGENT_DIR")); d != "" {
-			return d
-		}
+	if d := homeDir(at.home, at.getenv("PI_CODING_AGENT_DIR")); d != "" {
+		return d
 	}
 	return filepath.Join(at.home, ".pi", "agent")
 }
@@ -1415,12 +1427,18 @@ func crush(home, cfg string) *Agent {
 	return crushAt(here(home), path, data)
 }
 
-// crushIn is Crush in a WSL distro: ~/.config/crush/crush.json, Linux's
-// place for it.
+// crushIn is Crush in a WSL distro: $XDG_CONFIG_HOME/crush when that is
+// set, else ~/.config/crush.
 func crushIn(at place) *Agent {
-	// Crush's data file is in Linux's place there too
-	return crushAt(at, filepath.Join(at.home, ".config", "crush", "crush.json"),
-		filepath.Join(at.home, ".local", "share", "crush", "crush.json"))
+	cfg := filepath.Join(at.home, ".config")
+	if d := strings.TrimSpace(at.getenv("XDG_CONFIG_HOME")); d != "" {
+		cfg = d
+	}
+	data := filepath.Join(at.home, ".local", "share", "crush", "crush.json")
+	if d := strings.TrimSpace(at.getenv("XDG_DATA_HOME")); d != "" {
+		data = filepath.Join(d, "crush", "crush.json")
+	}
+	return crushAt(at, filepath.Join(cfg, "crush", "crush.json"), data)
 }
 
 // crushAt is Crush with its config at path and its data file at data,

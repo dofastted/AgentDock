@@ -94,6 +94,7 @@ function environmentsPage(ctx) {
       if (e.reach?.magpie?.length) say(t("A magpie of its own runs in WSL {distro} (pid {pids}): it writes the same agents' files there. Quit it there.", { distro: e.distro, pids: e.reach.magpie.join(", ") }));
     }
     if (!s.looked) say(t("Detect agents in WSL is off in Settings: no distro is looked in."), "info");
+    if (s.listError) say(t("Couldn't list WSL distros: {error}. Showing the last known list.", { error: s.listError }));
   }
 
   // ---------- the environments ----------
@@ -113,6 +114,18 @@ function environmentsPage(ctx) {
     return p;
   }
 
+  function agentStatus(a) {
+    const words = {
+      native: t("native CLI"),
+      interop: t("Windows launcher only"),
+      "config-only": t("config only, no CLI"),
+      missing: t("missing executable"),
+    };
+    const kind = (a.id || "").split("@")[0];
+    return kind + (words[a.provenance] ? " · " + words[a.provenance] : "");
+  }
+
+
   function drawList() {
     const box = $("#envList");
     box.replaceChildren();
@@ -127,11 +140,22 @@ function environmentsPage(ctx) {
         sub.push(t("gateway at {url}", { url: s.gateway }));
       } else {
         sub.push(e.state === "running" ? t("running") : t("not running"));
+        if (e.user) sub.push(t("user {user}", { user: e.user }));
+        if (e.homeLinux) sub.push(e.homeLinux);
         if (e.net) sub.push(t("{mode} networking", { mode: e.net }));
         else if (e.known) sub.push(e.mirrored ? t("mirrored networking (.wslconfig)") : t("networking unknown"));
         if (e.enabled) sub.push(t("{n} agents", { n: (e.agents || []).length }));
+        if (e.stale) sub.push(t("last successful snapshot"));
       }
       who.append(el("div", "sub", sub.join(" · ")));
+      if (e.kind !== "windows" && e.probeError) {
+        who.append(el("div", "sub env-why", t("last probe failed: {error}", { error: e.probeError })));
+      }
+      if (e.kind !== "windows" && e.agentDetails?.length) {
+        const chips = el("div", "sub");
+        chips.append(el("span", "", (e.agentDetails || []).map(agentStatus).join(" · ")));
+        who.append(chips);
+      }
       row.append(who);
       if (e.kind === "windows") {
         const p = el("span", "env-pill " + (e.hostListener ? "ok" : "blocked"));

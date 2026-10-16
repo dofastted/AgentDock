@@ -186,18 +186,39 @@ func Forget() {
 	up.Unlock()
 }
 
+// LookupScript is sh that defines wslbin (the folders installers put a
+// command in: bun, nvm, mise, asdf, …) and onwin (whether a path is on a
+// Windows drive, from /proc/mounts, not a hard-coded /mnt/c). Find and the
+// agent probe share it so they agree on a distro's own binary.
+func LookupScript() string {
+	return `nv="${NVM_DIR:-$HOME/.nvm}"; nd=; [ -s "$nv/nvm.sh" ] && command -v bash >/dev/null 2>&1 && nd=$(NVM_DIR="$nv" timeout 10 bash -c '. "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1; nvm_version default 2>/dev/null' </dev/null 2>/dev/null); ` +
+		`wslbin() { for d in "$HOME/.bun/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/.volta/bin" "$HOME/.local/share/pnpm"; do [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }; done; ` +
+		`for v in $nd $(ls "$nv/versions/node" 2>/dev/null | sort -t. -k1.2,1nr -k2,2nr -k3,3nr); do d="$nv/versions/node/$v/bin"; [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }; done; ` +
+		`for d in "$HOME/.local/share/mise/shims" "$HOME/.asdf/shims" /usr/local/bin; do [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }; done; return 1; }; ` +
+		`winlist=$(awk '$1 ~ /^[A-Za-z]:/ {print $2}' /proc/mounts 2>/dev/null); ` +
+		`onwin() { p=$1; case "$p" in /mnt/[A-Za-z]/*) return 0;; esac; for m in $winlist; do case "$p" in "$m"/*|"$m") return 0;; esac; done; return 1; }; `
+}
+
 // probeScript prints where name is in the distro, with the PATH it is on,
 // from a login shell, then an interactive one (nvm's node is put on PATH
-// by .bashrc), then where Claude Code's installer puts it; and where
-// Windows' drives are mounted, whether its user is root, the default route
-// (the Windows host under NAT) and WSL's networking mode.
+// by .bashrc), then where its installers put it (wslbin); a Windows-mounted
+// candidate is reported as winbin and does not stop the native lookup.
+// It also prints where Windows' drives are mounted, whether its user is
+// root, the default route (the Windows host under NAT) and WSL's networking
+// mode.
 func probeScript(name string) string {
-	return `for p in "$(command -v ` + name + ` 2>/dev/null)" ` +
-		`"$(bash -ic 'command -v ` + name + `' 2>/dev/null </dev/null | tail -n1)" ` +
-		`"$HOME/.local/bin/` + name + `" "/usr/local/bin/` + name + `"; do ` +
-		`case "$p" in /mnt/*|"") continue;; esac; ` +
-		`[ -x "$p" ] && { echo "bin:$p"; ` +
-		`echo "path:$(bash -ic 'echo $PATH' 2>/dev/null </dev/null | tail -n1)"; echo "lpath:$PATH"; break; }; done; ` +
+	return LookupScript() +
+		`native=; ` +
+		`for p in "$(command -v ` + name + ` 2>/dev/null)" ` +
+		`"$(bash -ic 'command -v ` + name + `' 2>/dev/null </dev/null | tail -n1)"; do ` +
+		`case "$p" in "") continue;; esac; ` +
+		`if onwin "$p"; then echo "winbin:$p"; continue; fi; ` +
+		`[ -x "$p" ] && { native=$p; break; }; done; ` +
+		`[ -z "$native" ] && native=$(wslbin ` + name + `); ` +
+		`if [ -n "$native" ] && onwin "$native"; then native=; fi; ` +
+		`[ -n "$native" ] && echo "bin:$native"; ` +
+		`echo "path:$(bash -ic 'echo $PATH' 2>/dev/null </dev/null | tail -n1)"; echo "lpath:$PATH"; ` +
+		`awk '$1 ~ /^[A-Za-z]:/ {print "win:" $2}' /proc/mounts 2>/dev/null; ` +
 		`echo "mount:$(wslpath -u 'C:\' 2>/dev/null)"; echo "uid:$(id -u)"; ` +
 		`ip route show default 2>/dev/null | head -n1 | sed 's/^/route:/'; ` +
 		`command -v wslinfo >/dev/null 2>&1 && echo "net:$(wslinfo --networking-mode 2>/dev/null)"; true`
@@ -205,7 +226,8 @@ func probeScript(name string) string {
 
 func parseProbe(distro, out string) (Tool, bool) {
 	t := Tool{Distro: distro, Mount: "/mnt/"}
-	var ipath, lpath, net_ string
+	var ipath, lpath, net_, bin string
+	var win []string
 	sc := bufio.NewScanner(strings.NewReader(out))
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -213,11 +235,15 @@ func parseProbe(distro, out string) (Tool, bool) {
 		v = strings.TrimSpace(v)
 		switch k {
 		case "bin":
-			t.Path = v
+			bin = v
 		case "path":
 			ipath = v
 		case "lpath":
 			lpath = v
+		case "win":
+			if v = strings.TrimRight(v, "/"); strings.HasPrefix(v, "/") {
+				win = append(win, v+"/")
+			}
 		case "mount":
 			// /mnt/c/ → /mnt/
 			if m := strings.TrimSuffix(strings.TrimSuffix(v, "/"), "c"); strings.HasPrefix(m, "/") && m != v {
@@ -234,9 +260,10 @@ func parseProbe(distro, out string) (Tool, bool) {
 			t.Root = v == "0"
 		}
 	}
-	if !strings.HasPrefix(t.Path, "/") {
+	if !strings.HasPrefix(bin, "/") || OnWindowsDrive(bin, win) {
 		return Tool{}, false
 	}
+	t.Path = bin
 	t.PATH = lpath
 	if strings.HasPrefix(ipath, "/") {
 		t.PATH = ipath
@@ -268,6 +295,20 @@ func HostLoopback(mode string) bool {
 		return true
 	}
 	return false
+}
+
+// OnWindowsDrive is whether path, inside a distro, is on one of Windows'
+// drives: under a mount win lists, or under /mnt/<letter>/ as WSL mounts
+// them unless told otherwise.
+func OnWindowsDrive(path string, win []string) bool {
+	for _, w := range win {
+		if strings.HasPrefix(path, w) {
+			return true
+		}
+	}
+	rest, ok := strings.CutPrefix(path, "/mnt/")
+	return ok && len(rest) >= 2 && rest[1] == '/' &&
+		(rest[0] >= 'a' && rest[0] <= 'z' || rest[0] >= 'A' && rest[0] <= 'Z')
 }
 
 func onPath(path, dir string) bool {

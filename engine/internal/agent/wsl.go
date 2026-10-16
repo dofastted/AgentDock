@@ -56,44 +56,72 @@ type place struct {
 	// version is the agent's CLI's there, as the probe found it; "" when
 	// not known (one on this machine is asked itself)
 	version string
+	// env is a distro's probed path variables (CODEX_HOME, …), as the
+	// distro spelled them; nil on this machine, which reads appdir.Getenv
+	env map[string]string
+	// localPath is a Linux path inside a distro as magpie opens it (UNC);
+	// nil on this machine
+	localPath func(string) string
 }
 
 func here(home string) place { return place{home: home} }
 
-// getenv is this machine's variable for this machine's agent; "" for one
-// in a distro, whose variables magpie can't read.
+// getenv is this machine's variable for this machine's agent, or a distro's
+// probed path variable for one there. A distro never takes this machine's
+// CODEX_HOME/XDG_CONFIG_HOME/…. Only rooted Linux values the probe printed
+// are used, opened through the distro (UNC); relative values are ignored.
 func (p place) getenv(k string) string {
 	if p.spell != nil {
+		v := strings.TrimSpace(p.env[k])
+		if v == "" {
+			return ""
+		}
+		if v == "~" || strings.HasPrefix(v, "~/") {
+			rest := strings.TrimPrefix(strings.TrimPrefix(v, "~"), "/")
+			if rest == "" {
+				return p.home
+			}
+			return filepath.Join(p.home, filepath.FromSlash(rest))
+		}
+		if strings.HasPrefix(v, "/") && p.localPath != nil {
+			return p.localPath(v)
+		}
 		return ""
 	}
 	return appdir.Getenv(k)
 }
 
-// codexHome is Codex's folder at the place: $CODEX_HOME on this machine
-// (appdir.CodexHome), ~/.codex in a distro, whose variables magpie can't
-// read.
+// codexHome is Codex's folder at the place: $CODEX_HOME when that is set
+// (this machine's, or the distro's probed value), else ~/.codex.
 func (p place) codexHome() string {
+	if d := strings.TrimSpace(p.getenv("CODEX_HOME")); d != "" {
+		return d
+	}
 	if p.spell != nil {
 		return filepath.Join(p.home, ".codex")
 	}
 	return appdir.CodexHomeIn(p.home)
 }
 
-// claudeDir is Claude Code's folder at the place: $CLAUDE_CONFIG_DIR on
-// this machine (appdir.ClaudeDir), ~/.claude in a distro, whose variables
-// magpie can't read.
+// claudeDir is Claude Code's folder at the place: $CLAUDE_CONFIG_DIR when
+// that is set (this machine's, or the distro's probed value), else ~/.claude.
 func (p place) claudeDir() string {
+	if d := strings.TrimSpace(p.getenv("CLAUDE_CONFIG_DIR")); d != "" {
+		return d
+	}
 	if p.spell != nil {
 		return filepath.Join(p.home, ".claude")
 	}
 	return appdir.ClaudeDirIn(p.home)
 }
 
-// hermesHome is Hermes Agent's folder at the place: $HERMES_HOME, else
-// %LOCALAPPDATA%\hermes on Windows and ~/.hermes elsewhere, on this machine
-// (appdir.HermesHome); ~/.hermes in a distro, which is Linux and whose
-// variables magpie can't read.
+// hermesHome is Hermes Agent's folder at the place: $HERMES_HOME when that
+// is set (this machine's, or the distro's probed value); else the platform
+// default on this machine, ~/.hermes in a distro.
 func (p place) hermesHome() string {
+	if d := strings.TrimSpace(p.getenv("HERMES_HOME")); d != "" {
+		return d
+	}
 	if p.spell != nil {
 		return filepath.Join(p.home, ".hermes")
 	}
@@ -186,6 +214,19 @@ type distro struct {
 	// ~/.omp/profiles there: each is an agent of its own (omp#<name>).
 	// Kept so a stopped distro lists them without being started.
 	OmpProfiles []string `json:"ompProfiles,omitempty"`
+	// User is the distro's default user as the probe said (id -un).
+	User string `json:"user,omitempty"`
+	// Env is the distro's probed path variables (CODEX_HOME, XDG_CONFIG_HOME, …)
+	// as Linux paths; never secrets.
+	Env map[string]string `json:"env,omitempty"`
+	// Bins is each native command the probe found, by the command name, as
+	// a Linux path inside the distro.
+	Bins map[string]string `json:"bins,omitempty"`
+	// WinBins is each Windows-mounted launcher command -v found, by name.
+	WinBins map[string]string `json:"winBins,omitempty"`
+	// ProbeErr is why the last probe of a running distro failed; the rest
+	// of the record is the last success, shown stale.
+	ProbeErr string `json:"probeErr,omitempty"`
 	// Mirrored is whether the distro's 127.0.0.1 is Windows' (mirror): in
 	// mirrored networking, or in consomme
 	Mirrored bool `json:"-"`
@@ -262,7 +303,7 @@ func (d distro) place(id string) place {
 	if k, _, ok := strings.Cut(kind, "#"); ok {
 		kind = k
 	}
-	return place{home: d.local(d.Home), id: id, spell: d.native, sys: d.local, base: d.base, cold: !d.Running, version: d.Versions[kind]}
+	return place{home: d.local(d.Home), id: id, spell: d.native, sys: d.local, base: d.base, cold: !d.Running, version: d.Versions[kind], env: d.Env, localPath: d.local}
 }
 
 // wslKind is an agent magpie looks for in a distro: what the probe finds
@@ -593,6 +634,35 @@ func (k wslKind) found(d distro) bool {
 	return k.dir != "" && d.Has["dir:"+k.dir] || k.bin != "" && d.Has["bin:"+k.bin]
 }
 
+const (
+	ProvenanceNative  = "native"
+	ProvenanceInterop = "interop"
+	ProvenanceConfig  = "config-only"
+	ProvenanceMissing = "missing"
+)
+
+func (k wslKind) provenance(d distro) string {
+	if k.accept != nil && !k.accept(d) {
+		if k.dir != "" && d.Has["dir:"+k.dir] {
+			return ProvenanceConfig
+		}
+		if k.bin != "" && d.WinBins[k.bin] != "" {
+			return ProvenanceInterop
+		}
+		return ProvenanceMissing
+	}
+	if k.bin != "" && d.Has["bin:"+k.bin] {
+		return ProvenanceNative
+	}
+	if k.bin != "" && d.WinBins[k.bin] != "" {
+		return ProvenanceInterop
+	}
+	if k.dir != "" && d.Has["dir:"+k.dir] {
+		return ProvenanceConfig
+	}
+	return ProvenanceMissing
+}
+
 // memo is the key a field of the agent is kept under in distro.Values:
 // Codex's as they are, as wsl.json has always had them.
 func (k wslKind) memo(key string) string {
@@ -888,9 +958,11 @@ var wsl struct {
 	runAt   time.Time       // when running was listed
 	runOK   bool            // running is wsl.exe's answer, not a failure
 	listed  bool            // names is a real answer, and may forget distros
+	listErr string          // why wsl.exe -l failed; last names kept
 	seen    map[string]*distro
 	probed  map[string]bool
 	failed  map[string]time.Time
+	failErr map[string]string
 	dirty   bool
 }
 
@@ -903,9 +975,10 @@ const (
 	// which would start it again (TJHHHH on Discord)
 	wslRunningAge = 3 * time.Second
 	// wslRunningFailedAge is how long wsl.exe failing to say is kept: each
-	// ask that times out holds wsl's lock, and so the GUI, for 10s, and
-	// leaves a wsl.exe behind (#2341)
+	// ask that times out can hold its caller for 10s and leaves a wsl.exe
+	// behind (#2341). The inventory mutex is not held during the ask.
 	wslRunningFailedAge = 30 * time.Second
+	wslProbeParallel    = 4
 )
 
 // wslOn is whether there is WSL to look in: on Windows, or in tests.
@@ -938,52 +1011,57 @@ func wslStatePath() string { return filepath.Join(filepath.Dir(provider.Path()),
 func wslDistros() []distro {
 	set := settings.Load()
 	wsl.Lock()
-	defer wsl.Unlock()
-	if wsl.seen == nil {
-		wsl.seen, wsl.probed, wsl.failed = map[string]*distro{}, map[string]bool{}, map[string]time.Time{}
-		if b, err := os.ReadFile(wslStatePath()); err == nil {
-			json.Unmarshal(b, &wsl.seen)
+	wslLoadLocked()
+	wsl.Unlock()
+	wslRefreshNames()
+	wslRefreshRunning()
+
+	wsl.Lock()
+	names := append([]string(nil), wsl.names...)
+	running := map[string]bool{}
+	for n, on := range wsl.running {
+		running[n] = on
+	}
+	probed := map[string]bool{}
+	for n, v := range wsl.probed {
+		probed[n] = v
+	}
+	failed := map[string]time.Time{}
+	for n, t := range wsl.failed {
+		failed[n] = t
+	}
+	wsl.Unlock()
+
+	var toProbe []string
+	for _, n := range names {
+		if set.WSLDistroOff(n) {
+			continue
 		}
-		wslForgetOldBins()
+		if !running[n] {
+			wsl.Lock()
+			delete(wsl.probed, n)
+			wsl.Unlock()
+			continue
+		}
+		if probed[n] {
+			continue
+		}
+		if t, ok := failed[n]; ok && time.Since(t) <= wslRetryAge {
+			continue
+		}
+		toProbe = append(toProbe, n)
 	}
-	if time.Since(wsl.at) > wslListAge {
-		wsl.names, wsl.listed = wslList("-l", "-q")
-		wsl.at = time.Now()
-	}
-	wslRunningLocked()
+	wslProbeAll(toProbe)
+
+	wsl.Lock()
+	defer wsl.Unlock()
 	installed := map[string]bool{}
 	cfg := wslConfig()
 	var out []distro
 	for _, n := range wsl.names {
 		installed[n] = true
-		// a distro turned off is neither probed nor listed; what was seen
-		// of it is kept for when it is turned on again
 		if set.WSLDistroOff(n) {
 			continue
-		}
-		// a distro that stopped is probed again once it runs: WSL may have
-		// been restarted meanwhile in another networking mode
-		if !wsl.running[n] {
-			delete(wsl.probed, n)
-		}
-		if wsl.running[n] && !wsl.probed[n] {
-			if t, ok := wsl.failed[n]; !ok || time.Since(t) > wslRetryAge {
-				if d := wslProbe(n); d == nil {
-					wsl.failed[n] = time.Now()
-				} else {
-					wsl.probed[n] = true
-					if wslKept(*d) {
-						if old := wsl.seen[n]; old != nil {
-							d.Values = old.Values
-							d.Was = wslWas(old.Was, old.Gateway, d.Gateway)
-						}
-						wsl.seen[n] = d
-					} else {
-						delete(wsl.seen, n)
-					}
-					wsl.dirty = true
-				}
-			}
 		}
 		d := wsl.seen[n]
 		if d == nil {
@@ -995,7 +1073,6 @@ func wslDistros() []distro {
 		c.mirror(cfg)
 		out = append(out, c)
 	}
-	// an unregistered distro is forgotten
 	for n := range wsl.seen {
 		if wsl.listed && !installed[n] {
 			delete(wsl.seen, n)
@@ -1004,6 +1081,104 @@ func wslDistros() []distro {
 	}
 	wslSaveLocked()
 	return out
+}
+
+func wslLoadLocked() {
+	if wsl.seen != nil {
+		return
+	}
+	wsl.seen, wsl.probed, wsl.failed, wsl.failErr = map[string]*distro{}, map[string]bool{}, map[string]time.Time{}, map[string]string{}
+	if b, err := os.ReadFile(wslStatePath()); err == nil {
+		json.Unmarshal(b, &wsl.seen)
+	}
+	wslForgetOldBins()
+}
+
+func wslRefreshNames() {
+	wsl.Lock()
+	need := time.Since(wsl.at) > wslListAge
+	wsl.Unlock()
+	if !need {
+		return
+	}
+	names, ok := wslList("-l", "-q")
+	wsl.Lock()
+	defer wsl.Unlock()
+	if ok {
+		wsl.names, wsl.listed, wsl.listErr = names, true, ""
+	} else {
+		wsl.listErr = "couldn't list WSL distros"
+		if len(wsl.names) == 0 {
+			for n := range wsl.seen {
+				wsl.names = append(wsl.names, n)
+			}
+			slices.Sort(wsl.names)
+		}
+	}
+	wsl.at = time.Now()
+}
+
+type wslProbeResult struct {
+	name string
+	d    *distro
+	err  error
+}
+
+func wslProbeAll(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	got := make([]wslProbeResult, len(names))
+	sem := make(chan struct{}, wslProbeParallel)
+	var wg sync.WaitGroup
+	for i, n := range names {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d, err := wslProbe(n)
+			got[i] = wslProbeResult{name: n, d: d, err: err}
+		}()
+	}
+	wg.Wait()
+	wsl.Lock()
+	defer wsl.Unlock()
+	now := time.Now()
+	for _, r := range got {
+		if r.d == nil {
+			wsl.failed[r.name] = now
+			if wsl.failErr == nil {
+				wsl.failErr = map[string]string{}
+			}
+			msg := "probe failed"
+			if r.err != nil {
+				msg = r.err.Error()
+			}
+			wsl.failErr[r.name] = msg
+			if old := wsl.seen[r.name]; old != nil {
+				old.ProbeErr = msg
+				wsl.dirty = true
+			}
+			continue
+		}
+		wsl.probed[r.name] = true
+		delete(wsl.failed, r.name)
+		if wsl.failErr != nil {
+			delete(wsl.failErr, r.name)
+		}
+		r.d.ProbeErr = ""
+		if wslKept(*r.d) {
+			if old := wsl.seen[r.name]; old != nil {
+				r.d.Values = old.Values
+				r.d.Was = wslWas(old.Was, old.Gateway, r.d.Gateway)
+			}
+			wsl.seen[r.name] = r.d
+		} else {
+			delete(wsl.seen, r.name)
+		}
+		wsl.dirty = true
+	}
 }
 
 // wslWas is the addresses a distro reached Windows at before, with the
@@ -1045,25 +1220,30 @@ func wslForgetOldBins() {
 	}
 }
 
-// wslRunningLocked lists the running distros again (wsl.exe -l --running,
+// wslRefreshRunning lists the running distros again (wsl.exe -l --running,
 // which starts none) when the last list is older than wslRunningAge. When
 // wsl.exe can't say, none is taken to run: a distro is never opened on a
-// guess.
-func wslRunningLocked() {
+// guess. The inventory mutex is not held while wsl.exe runs.
+func wslRefreshRunning() {
+	wsl.Lock()
 	age := wslRunningAge
 	if !wsl.runOK {
 		age = wslRunningFailedAge
 	}
 	if !wsl.runAt.IsZero() && time.Since(wsl.runAt) <= age {
+		wsl.Unlock()
 		return
 	}
+	wsl.Unlock()
 	run, ok := wslList("-l", "--running", "-q")
+	wsl.Lock()
 	wsl.runOK = ok
 	wsl.running = map[string]bool{}
 	for _, n := range run {
 		wsl.running[n] = true
 	}
 	wsl.runAt = time.Now()
+	wsl.Unlock()
 }
 
 // wslUp is whether distro runs, as wsl.exe said at most wslRunningAge ago:
@@ -1071,9 +1251,9 @@ func wslRunningLocked() {
 // catalog synced, requests counted, sessions listed) asks it first, so a
 // distro stopped since its agent was made isn't started again.
 func wslUp(distro string) bool {
+	wslRefreshRunning()
 	wsl.Lock()
 	defer wsl.Unlock()
-	wslRunningLocked()
 	return wsl.running[distro]
 }
 
@@ -1136,12 +1316,12 @@ func wslLastSeen(name, key string) string {
 // wslClaudeStandIn is StandIn for a Claude Code in a WSL distro routed
 // through magpie: the first, of the distros running now, whose
 // settings.json has a stand-in. Only magpie's memory of them and which run
-// (wslRunningLocked) are asked — nothing is probed, and a stopped distro
+// (wslRefreshRunning) are asked — nothing is probed, and a stopped distro
 // is never opened.
 func wslClaudeStandIn(model string) string {
 	set := settings.Load()
+	wslRefreshRunning()
 	wsl.Lock()
-	wslRunningLocked()
 	var ds []distro
 	for _, n := range wsl.names {
 		if d := wsl.seen[n]; d != nil && wsl.running[n] && !set.WSLDistroOff(n) && wslKindOf("claude").found(*d) {
@@ -1160,6 +1340,14 @@ func wslClaudeStandIn(model string) string {
 	return ""
 }
 
+// WSLListError is why the last wsl.exe -l failed; "" when the list is a
+// real answer. A failed list keeps the names last seen.
+func WSLListError() string {
+	wsl.Lock()
+	defer wsl.Unlock()
+	return wsl.listErr
+}
+
 // wslList is the names wsl.exe lists with args; ok is false when it
 // couldn't say (no WSL, or none installed).
 func wslList(args ...string) (names []string, ok bool) {
@@ -1175,161 +1363,6 @@ func wslList(args ...string) (names []string, ok bool) {
 // (wslinfo's networking mode came without a new version: a probe that
 // didn't ask leaves Net "", read as .wslconfig says, as before.)
 const wslProbeVersion = 2
-
-// wslProbeScript prints the distro's home, what of each of wslKinds it
-// has (each command with where it is), where Windows' drives are mounted,
-// its default route (the Windows host under NAT), and WSL's networking
-// mode as wslinfo (WSL 2.0 on) says it; and the version of each that asks
-// for it (omp, whose models.yml takes max only from 16.4.0).
-//
-// A command is also looked for in the folders its installers put it in
-// (wslbin): sh -l reads ~/.profile but not ~/.bashrc, where bun's and
-// nvm's installers add theirs to PATH (whqtian on Discord: a WSL omp from
-// bun was never asked its version, so its models still offered xhigh).
-// It is asked with its own folder on PATH, where bun's script finds bun.
-//
-// Of nvm's Nodes, the one a terminal there gets is looked in first: the
-// version nvm's default alias resolves to, asked of nvm itself
-// (nvm_version default, nvm.sh read by bash with --no-use), then the rest
-// highest first. The glob this replaced took them in name order, so a
-// command under v18 was found before the default v22's, and v9's after
-// both (as proc.UserPath did on a Mac or Linux, 9f407cafa).
-var wslProbeScript = func() string {
-	s := `nv="${NVM_DIR:-$HOME/.nvm}"; nd=; [ -s "$nv/nvm.sh" ] && command -v bash >/dev/null 2>&1 && nd=$(NVM_DIR="$nv" timeout 10 bash -c '. "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1; nvm_version default 2>/dev/null' </dev/null 2>/dev/null); ` +
-		`wslbin() { for d in "$HOME/.bun/bin" "$HOME/.local/bin" "$HOME/.npm-global/bin" "$HOME/.volta/bin" "$HOME/.local/share/pnpm"; do [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }; done; ` +
-		`for v in $nd $(ls "$nv/versions/node" 2>/dev/null | sort -t. -k1.2,1nr -k2,2nr -k3,3nr); do d="$nv/versions/node/$v/bin"; [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }; done; ` +
-		`for d in "$HOME/.local/share/mise/shims" "$HOME/.asdf/shims"; do [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }; done; return 1; }; `
-	s += `echo "home:$HOME"; `
-	for _, k := range wslKinds {
-		if k.dir != "" {
-			s += `[ -d "$HOME/` + k.dir + `" ] && echo dir:` + k.dir + `; `
-		}
-		if k.bin != "" {
-			s += `p=$(command -v ` + k.bin + ` 2>/dev/null || wslbin ` + k.bin + `) && echo "bin:` + k.bin + ` $p"`
-			if k.version {
-				// not one on Windows' drives (WSL's /mnt/c), which isn't the distro's
-				s += ` && case "$p" in /mnt/*) ;; *) echo "ver:` + k.id + ` $(PATH="${p%/*}:$PATH" timeout 10 "$p" --version </dev/null 2>&1 | head -n1)";; esac`
-			}
-			s += `; `
-		}
-	}
-	s += `[ -d "$HOME/` + wslCopilotDir + `" ] && echo dir:` + wslCopilotDir + `; `
-	// a drive's source in /proc/mounts is C:\ (written C:\134), under any automount root
-	s += `awk '$1 ~ /^[A-Za-z]:/ {print "win:" $2}' /proc/mounts 2>/dev/null; `
-	// named omp profiles: the probe runs only in a distro that is running,
-	// so this never starts a stopped one to find them
-	s += `for d in "$HOME"/.omp/profiles/*; do [ -d "$d" ] && echo "profile:omp:$(basename "$d")"; done; `
-	return s + `ip route show default 2>/dev/null | head -n1 | sed 's/^/route:/'; ` +
-		`grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/ns:/'; ` +
-		`command -v wslinfo >/dev/null 2>&1 && echo "net:$(wslinfo --networking-mode 2>/dev/null)"; true`
-}()
-
-func wslProbe(name string) *distro {
-	b, err := wslRun(30*time.Second, "-d", name, "-e", "sh", "-lc", wslProbeScript)
-	if err != nil {
-		return nil
-	}
-	d := parseProbe(name, string(b))
-	if d == nil {
-		return nil
-	}
-	if wslKept(*d) {
-		d.Root = wslRoot(name)
-	}
-	return d
-}
-
-// parseProbe reads wslProbeScript's output. A command on one of Windows'
-// drives — WSL puts Windows' PATH on its own, so Windows npm's pi is
-// /mnt/c/Users/me/AppData/Roaming/npm/pi there — is Windows', not the
-// distro's.
-func parseProbe(name, out string) *distro {
-	d := &distro{Name: name, Has: map[string]bool{}, Probe: wslProbeVersion}
-	var ns string
-	bins := map[string]string{}
-	var win []string
-	sc := bufio.NewScanner(strings.NewReader(out))
-	for sc.Scan() {
-		l := strings.TrimSpace(sc.Text())
-		switch k, v, _ := strings.Cut(l, ":"); k {
-		case "home":
-			d.Home = strings.TrimRight(v, "/")
-		case "dir":
-			d.Has[l] = true
-		case "ver":
-			id, said, _ := strings.Cut(v, " ")
-			if ver := parseVersion(said); ver != "" {
-				if d.Versions == nil {
-					d.Versions = map[string]string{}
-				}
-				d.Versions[id] = ver
-			}
-		case "bin":
-			bin, path, _ := strings.Cut(v, " ")
-			bins[bin] = strings.TrimSpace(path)
-		case "win":
-			if v = strings.TrimRight(v, "/"); strings.HasPrefix(v, "/") {
-				win = append(win, v+"/")
-			}
-		case "route":
-			// default via 172.20.0.1 dev eth0 …
-			if f := strings.Fields(v); len(f) >= 3 && f[1] == "via" && net.ParseIP(f[2]) != nil {
-				d.Gateway = f[2]
-			}
-		case "ns":
-			if f := strings.Fields(v); len(f) >= 2 && net.ParseIP(f[1]) != nil {
-				ns = f[1]
-			}
-		case "net":
-			// one word; anything else (an old wslinfo's usage) says nothing
-			if m := strings.ToLower(strings.TrimSpace(v)); m != "" && !strings.ContainsAny(m, " \t") {
-				d.Net = m
-			}
-		case "profile":
-			// profile:omp:<name>: a named omp profile the distro has
-			kind, name, _ := strings.Cut(v, ":")
-			if kind != "omp" || !ompProfileOK(name) {
-				continue
-			}
-			if !slices.Contains(d.OmpProfiles, name) {
-				d.OmpProfiles = append(d.OmpProfiles, name)
-			}
-		}
-	}
-	if !strings.HasPrefix(d.Home, "/") {
-		return nil
-	}
-	for bin, path := range bins {
-		if !onWindowsDrive(path, win) {
-			d.Has["bin:"+bin] = true
-		}
-	}
-	if d.Gateway == "" {
-		d.Gateway = ns
-	}
-	// the default route of a distro whose 127.0.0.1 is Windows' is
-	// Windows' own next hop (consomme: 198.18.0.2 under a TUN proxy,
-	// #1230), not Windows: an agent left on it is moved to 127.0.0.1
-	// (wslMovedFrom)
-	if wslrun.HostLoopback(d.Net) {
-		d.Gateway = ""
-	}
-	return d
-}
-
-// onWindowsDrive is whether path, inside a distro, is on one of Windows'
-// drives: under a mount win lists, or under /mnt/<letter>/ as WSL mounts
-// them unless told otherwise.
-func onWindowsDrive(path string, win []string) bool {
-	for _, w := range win {
-		if strings.HasPrefix(path, w) {
-			return true
-		}
-	}
-	rest, ok := strings.CutPrefix(path, "/mnt/")
-	return ok && len(rest) >= 2 && rest[1] == '/' &&
-		(rest[0] >= 'a' && rest[0] <= 'z' || rest[0] >= 'A' && rest[0] <= 'Z')
-}
 
 // parseDistros reads wsl.exe -l -q: UTF-16LE (with or without a BOM), or
 // UTF-8 under WSL_UTF8. Docker Desktop's own distros are left out.

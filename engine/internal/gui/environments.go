@@ -52,8 +52,10 @@ type envsJSON struct {
 	OthersOK      bool                       `json:"othersOK"`
 	// FirstRun is whether this magpie has no providers yet: the page
 	// offers to bring them in
-	FirstRun  bool                    `json:"firstRun"`
-	Probing   bool                    `json:"probing"`
+	FirstRun bool `json:"firstRun"`
+	Probing  bool `json:"probing"`
+	// ListError is why wsl.exe -l failed; last known distros stay listed.
+	ListError string                  `json:"listError,omitempty"`
 	WSLConfig *environments.WSLConfig `json:"wslconfig,omitempty"`
 }
 
@@ -74,6 +76,7 @@ func envState() envsJSON {
 	out.Others, out.OthersOK = environments.OtherMagpies()
 	envs, looked := agent.WSLEnvs()
 	out.Looked = looked
+	out.ListError = agent.WSLListError()
 	var targets []environments.Target
 	for _, e := range envs {
 		if e.Enabled && e.Running {
@@ -121,8 +124,10 @@ func environmentRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/environments", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, envState())
 	})
-	// probe every running distro again now, and answer once done
+	// rescan agent and executable caches, then probe reachability
 	mux.HandleFunc("POST /api/environments/reach/refresh", func(rw http.ResponseWriter, r *http.Request) {
+		agent.Rescan()
+		agent.WSLRefresh()
 		envs, _ := agent.WSLEnvs()
 		var targets []environments.Target
 		for _, e := range envs {

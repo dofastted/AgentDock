@@ -20,14 +20,12 @@ package agent
 
 import (
 	"path/filepath"
-
-	"github.com/yetone/magpie/internal/appdir"
 )
 
 func primeAgent(home string) *Agent { return primeAgentIn(here(home)) }
 
-// primeAgentIn is Prime Agent at a place: this machine's home, where its
-// variable moves it, or a WSL distro's, whose variables magpie can't read.
+// primeAgentIn is Prime Agent at a place: this machine's home, or a WSL
+// distro's, where PRIME_AGENT_CODING_AGENT_DIR as probed relocates it.
 func primeAgentIn(at place) *Agent {
 	return piLikeKeyed(at, "prime-agent", "Prime Agent", primeAgentDir(at),
 		func() string { return agentKeyAt("prime-agent", at.gw()) })
@@ -37,10 +35,8 @@ func primeAgentIn(at place) *Agent {
 // PRIME_AGENT_CODING_AGENT_DIR is its working directory's, which magpie
 // can't know, so it is not taken.
 func primeAgentDir(at place) string {
-	if at.spell == nil {
-		if d := homeDir(at.home, appdir.Getenv("PRIME_AGENT_CODING_AGENT_DIR")); d != "" {
-			return d
-		}
+	if d := homeDir(at.home, at.getenv("PRIME_AGENT_CODING_AGENT_DIR")); d != "" {
+		return d
 	}
 	return filepath.Join(at.home, ".prime", "agent")
 }

@@ -24,9 +24,14 @@ func gemini(home string) *Agent { return geminiIn(here(home)) }
 
 // geminiIn is Gemini CLI at a place: this machine's home, or a WSL
 // distro's (see wsl.go), whose .env names the gateway as the distro
-// reaches it, with the key it takes from there.
+// reaches it, with the key it takes from there. GEMINI_CLI_HOME, when
+// probed in a distro, is the home under which .gemini lives.
 func geminiIn(at place) *Agent {
-	dir := filepath.Join(at.home, ".gemini")
+	home := at.home
+	if d := strings.TrimSpace(at.getenv("GEMINI_CLI_HOME")); d != "" {
+		home = d
+	}
+	dir := filepath.Join(home, ".gemini")
 	path := filepath.Join(dir, "settings.json")
 	envPath := filepath.Join(dir, ".env")
 	auth := jsonGet(path, "security.auth.selectedType")

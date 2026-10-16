@@ -76,8 +76,20 @@ func TestParseProbe(t *testing.T) {
 }
 
 func TestProbeSkipsWindowsOwn(t *testing.T) {
-	if s := probeScript("claude"); !strings.Contains(s, `/mnt/*|"") continue`) {
-		t.Fatalf("probe takes a Windows claude under /mnt: %s", s)
+	s := probeScript("claude")
+	if !strings.Contains(s, "onwin") || !strings.Contains(s, "wslbin") {
+		t.Fatalf("probe doesn't skip Windows mounts or look in installer folders: %s", s)
+	}
+	if strings.Contains(s, `/mnt/*|""`) {
+		t.Fatalf("probe still hard-codes /mnt/* instead of actual mounts: %s", s)
+	}
+	// a Windows-mounted command is not the distro's, even when command -v finds it
+	if tool, ok := parseProbe("d", "bin:/mnt/c/Users/me/AppData/Roaming/npm/claude\nwin:/mnt/c\nmount:/mnt/c/\n"); ok {
+		t.Fatalf("took a Windows claude: %+v", tool)
+	}
+	tool, ok := parseProbe("d", "bin:/home/me/.nvm/versions/node/v20/bin/claude\nwinbin:/mnt/c/Users/me/AppData/Roaming/npm/claude\nwin:/mnt/c\n")
+	if !ok || tool.Path != "/home/me/.nvm/versions/node/v20/bin/claude" {
+		t.Fatalf("native behind Windows PATH: ok=%v %+v", ok, tool)
 	}
 }
 

@@ -12,15 +12,14 @@ package agent
 // Pi's, and a folder both share is Pi's row's to edit.
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 )
 
 func omo(home string) *Agent { return omoIn(here(home)) }
 
-// omoIn is OmO at a place: this machine's home, where its variables move
-// it, or a WSL distro's, whose variables magpie can't read.
+// omoIn is OmO at a place: this machine's home, or a WSL distro's, where
+// OMO_CODING_AGENT_DIR / SENPI_CODING_AGENT_DIR as probed relocate it.
 func omoIn(at place) *Agent {
 	a := piLike(at, "omo", "OmO", omoDir(at))
 	a.Aliases = []string{"oh-my-openagent", "omo-ai"}
@@ -29,11 +28,9 @@ func omoIn(at place) *Agent {
 
 // omoDir is OmO's agent folder at a place.
 func omoDir(at place) string {
-	if at.spell == nil {
-		for _, k := range []string{"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR"} {
-			if d := strings.TrimSpace(os.Getenv(k)); filepath.IsAbs(d) {
-				return filepath.Clean(d)
-			}
+	for _, k := range []string{"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR"} {
+		if d := strings.TrimSpace(at.getenv(k)); filepath.IsAbs(d) {
+			return filepath.Clean(d)
 		}
 	}
 	return filepath.Join(at.home, ".omo", "agent")

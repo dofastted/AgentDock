@@ -16,7 +16,7 @@ func FakeWSL(probes, roots map[string]string) func() {
 	on, run, root := wslOn, wslRun, wslRoot
 	reset := func() {
 		wsl.Lock()
-		wsl.seen, wsl.at, wsl.runAt, wsl.names, wsl.running, wsl.probed, wsl.failed, wsl.dirty = nil, time.Time{}, time.Time{}, nil, nil, nil, nil, false
+		wsl.seen, wsl.at, wsl.runAt, wsl.names, wsl.running, wsl.probed, wsl.failed, wsl.failErr, wsl.listErr, wsl.dirty = nil, time.Time{}, time.Time{}, nil, nil, nil, nil, nil, "", false
 		wsl.Unlock()
 	}
 	reset()
