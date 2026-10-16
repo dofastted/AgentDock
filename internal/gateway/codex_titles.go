@@ -408,7 +408,7 @@ func (s *Server) sentNowhere(w http.ResponseWriter, r *http.Request, body []byte
 		t.Tries[0].Done, t.Tries[0].Status, t.Tries[0].Millis, t.Tries[0].Error = true, 200, ms, why
 		t.Done, t.Status, t.Error, t.Millis = true, 200, why, ms
 	})
-	s.record(Call{Time: start, From: provider.Responses, To: provider.Responses, Model: model, Provider: "magpie",
+	s.record(Call{Route: tr.ID, Time: start, From: provider.Responses, To: provider.Responses, Model: model, Provider: "magpie",
 		Agent: agentOf(r), Kind: kind, Status: 200, Millis: ms, Error: why})
 	appendUsage(r, usage.Record{RouteID: tr.ID, Time: start, Agent: agentOf(r), Provider: "magpie", Model: model, Requested: model,
 		Millis: ms, Status: 200, Rejected: true, Error: why, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header),

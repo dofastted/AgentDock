@@ -634,7 +634,7 @@ func SetOptions(name string, opts map[string]any) error {
 	if i < 0 {
 		// a short name, as the community's READMEs write it: param-override
 		// for @magpie-community/middleware-param-override
-		i = slices.IndexFunc(l.Plugins, func(x Entry) bool { return ShortName(Name(x.Spec)) == name })
+		i = slices.IndexFunc(l.Plugins, func(x Entry) bool { return Called(Name(x.Spec), name) })
 	}
 	if i < 0 {
 		return fmt.Errorf("no plugin %q", name)
@@ -652,14 +652,34 @@ func SetOptions(name string, opts map[string]any) error {
 
 // ShortName is a package's name without its scope and the words every
 // package of its kind has: model-map for @magpie-community/middleware-model-map,
-// zed for @magpie-community/opencode-zed-auth. A plugin added from a folder
-// is named by its path, which on Windows ends after a backslash.
+// zed for @magpie-community/opencode-zed-auth, calc for
+// @magpie-community/tools-calc (so its tools are calc_eval, as from its
+// folder). A plugin added from a folder is named by its path, which on
+// Windows ends after a backslash.
 func ShortName(pkg string) string {
+	pkg = bareName(pkg)
+	for _, kind := range []string{"middleware-", "opencode-", "tools-", "page-", "agent-"} {
+		if strings.HasPrefix(pkg, kind) && len(pkg) > len(kind) {
+			pkg = pkg[len(kind):]
+			break
+		}
+	}
+	return strings.TrimSuffix(pkg, "-auth")
+}
+
+// bareName is a package's name without its scope, or a folder's last part.
+func bareName(pkg string) string {
 	if i := strings.LastIndexAny(pkg, `/\`); i >= 0 {
 		pkg = pkg[i+1:]
 	}
-	pkg = strings.TrimPrefix(strings.TrimPrefix(pkg, "middleware-"), "opencode-")
-	return strings.TrimSuffix(pkg, "-auth")
+	return pkg
+}
+
+// Called says whether a user's name for a plugin names this package: its
+// short name, or its name without the scope, which was its short name
+// before tools-, page- and agent- were taken off (agent-aider).
+func Called(pkg, name string) bool {
+	return name != "" && (ShortName(pkg) == name || bareName(pkg) == name)
 }
 
 // install puts an npm package into plugins/ with bun add, its scripts

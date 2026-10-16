@@ -307,10 +307,11 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 	q, ok := p, true
 	if keys := p.KeysOn(); len(keys) > 0 {
 		ok = false
+		serves := p.Serving(model)
 	pick:
 		for _, want := range []Protocol{proto, ""} {
 			for _, k := range keys {
-				if k.Protocol == want && p.Serves(k, model) {
+				if k.Protocol == want && serves(k) {
 					q, ok = p.WithKey(k), true
 					break pick
 				}

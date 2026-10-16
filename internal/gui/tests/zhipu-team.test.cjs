@@ -81,7 +81,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     };
     const edit = async (page, name) => {
       await page.locator(".row.provider", { hasText: name }).click();
-      await page.locator(".editor .proxy-mode").waitFor();
+      // drawn: the proxy is under Advanced, folded
+      await page.locator(".editor .proxy-mode").waitFor({ state: "attached" });
     };
     const org = (page) => page.locator(".editor .team-org");
     const proj = (page) => page.locator(".editor .team-project");

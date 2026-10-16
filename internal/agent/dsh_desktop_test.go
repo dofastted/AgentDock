@@ -51,6 +51,8 @@ const dshDesktopPatch = "# Your patch layer for this dsh profile, applied after 
 // installed the folder is no sign of an uninstall: its version is shown
 // instead, on macOS and Windows alike.
 func TestDshDesktopAppIsNoMissingCLI(t *testing.T) {
+	// the Mac app: on Windows ~\.dsh is never gone (#2300), whatever is here
+	judgeFor(t, "darwin")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -385,6 +387,8 @@ func TestDshDesktopRegisteredAnyHive(t *testing.T) {
 // and wherever Spotlight has its bundle id; a bundle of another id there
 // is still not dsh's, nor is an app inside another app's bundle.
 func TestDshDesktopAppInASubfolder(t *testing.T) {
+	// the Mac app: on Windows ~\.dsh is never gone (#2300), whatever is here
+	judgeFor(t, "darwin")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)

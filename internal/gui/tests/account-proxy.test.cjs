@@ -101,6 +101,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).first().click();
+      // Proxy is under Advanced, open already when one is set
+      { const adv = page.locator(".editor details.advanced"); await adv.waitFor({ state: "attached" }); if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click(); }
       await page.locator(wait).first().waitFor();
       return { page, errors, posts };
     };

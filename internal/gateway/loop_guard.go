@@ -33,6 +33,9 @@ type loopGuard struct {
 	pending []byte // what came of an event not yet whole
 	think   unitRun
 	text    unitRun
+	// spoke: the reply has said something the agent acts on, a text or a
+	// call, which a reply asked again would say twice
+	spoke bool
 }
 
 const (
@@ -120,6 +123,10 @@ func (g *loopGuard) feed(b []byte) (loopTrip, bool) {
 				t.reasoning = true
 				return t, true
 			}
+		}
+		if !g.spoke {
+			content, said, reasoning, _ := timingKind(ev)
+			g.spoke = said || content && !reasoning
 		}
 		if text != "" {
 			if t, ok := g.text.add(text); ok {

@@ -118,14 +118,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await on(), S.gemini);
       assert.equal(await ed.locator(".base-url").inputValue(), "", "the saved chat URL stays chat's");
       assert.equal(await detect.isVisible(), true);
-      await ed.locator("details.more > summary").click();
-      const labels = await ed.locator("details.more label").allTextContents();
+      await ed.locator("details.more:not(.advanced) > summary").click();
+      const labels = await ed.locator("details.more:not(.advanced) label").allTextContents();
       assert(!labels.includes(S.more), "the Base URL's API is not under More endpoints: " + labels);
       await ed.locator(".base-url").fill(G);
 
       // back on OpenAI compatible, the Gemini URL is one of More endpoints
       await ed.locator('.segs .opt[data-api="openai"]').click();
-      assert((await ed.locator("details.more label").allTextContents()).includes(S.more));
+      assert((await ed.locator("details.more:not(.advanced) label").allTextContents()).includes(S.more));
       await ed.locator('.segs .opt[data-api="gemini"]').click();
       assert.equal(await ed.locator(".base-url").inputValue(), G);
 

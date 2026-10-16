@@ -217,10 +217,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const v = page.locator("#view-settings");
         await v.hover();
         // down as far as the control is still in sight: to the foot, or the
-        // control at the view's top
+        // control just under the view's top, below the tabs held there
+        // (#2396) as they would cover it
         for (let i = 0; i < 400; i++) {
           if (await v.evaluate((v) => v.scrollTop >= v.scrollHeight - v.clientHeight - 1
-            || document.querySelector("#textSizeSegs").getBoundingClientRect().top < v.getBoundingClientRect().top + 60)) break;
+            || document.querySelector("#textSizeSegs").getBoundingClientRect().top < Math.max(v.getBoundingClientRect().top, v.querySelector(":scope > .set-head").getBoundingClientRect().bottom) + 60)) break;
           await page.mouse.wheel(0, 40);
           await page.waitForTimeout(20);
         }

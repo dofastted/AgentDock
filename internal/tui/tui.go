@@ -852,7 +852,17 @@ func (m model) viewList() string {
 	var b strings.Builder
 	b.WriteString(m.header())
 	b.WriteString("\n\n")
-	for i, a := range m.agents {
+	// the rows around the one picked, as many as fit — a machine with more
+	// agents than the terminal has rows would otherwise scroll the highlight
+	// off and freeze the page, as the library page did (#2220)
+	visible := max(3, m.h-7)
+	start := 0
+	if m.row >= visible {
+		start = m.row - visible + 1
+	}
+	end := min(len(m.agents), start+visible)
+	for i := start; i < end; i++ {
+		a := m.agents[i]
 		sel := i == m.row
 		marker := "  "
 		name := sName.Render(padRight(a.Name, nameW))

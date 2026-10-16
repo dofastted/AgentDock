@@ -39,6 +39,10 @@ func init() {
 	// after it was written (#2373).
 	plugin.OnChange(catalog.Touched)
 	plugin.OnListed(catalog.Touched)
+	// and what a request holds goes at once: a SyncCatalog running holds
+	// the plugins as they were before a sign-in, and a look at the
+	// accounts right after it was given those for a second (#2449)
+	plugin.OnChangeNow(dropHeld)
 }
 
 // heldFor is how long a held catalog is used before it is built again,
@@ -64,6 +68,12 @@ func Hold() (release func()) {
 // setting was written.
 func Changed() {
 	filememo.Forget()
+	dropHeld()
+}
+
+// dropHeld is Changed for what is built on the plugins alone, which
+// read their files afresh each time.
+func dropHeld() {
 	held.Lock()
 	held.gen++
 	held.built = nil

@@ -54,15 +54,18 @@ func TestCodexGroupByItsModelName(t *testing.T) {
 		if cx.Wired() {
 			t.Errorf("auth %q: wired on gpt-6.1-sol with no route to magpie", auth)
 		}
-		// another group's model is not what magpie set
-		os.WriteFile(path, []byte(strings.Replace(cfg, `model = "group/auto-gpt-6-1-sol"`, `model = "gpt-6.1"`, 1)), 0o644)
-		if d := cx.Drift(); d == nil || d.Kind != "replaced" || d.Now != "gpt-6.1" {
-			t.Errorf("auth %q: gpt-6.1, another group: %+v", auth, d)
-		}
-		// nor is one no group has
-		os.WriteFile(path, []byte(strings.Replace(cfg, `model = "group/auto-gpt-6-1-sol"`, `model = "gpt-5.5"`, 1)), 0o644)
-		if d := cx.Drift(); d == nil || d.Kind != "replaced" || d.Now != "gpt-5.5" {
-			t.Errorf("auth %q: gpt-5.5: %+v", auth, d)
+		// another group's model is not what magpie set, nor is one no group
+		// has; beside the ChatGPT sign-in either is a pick in Codex's /model
+		// that still goes through magpie, not a change from outside (#2424)
+		for _, m := range []string{"gpt-6.1", "gpt-5.5"} {
+			os.WriteFile(path, []byte(strings.Replace(cfg, `model = "group/auto-gpt-6-1-sol"`, `model = "`+m+`"`, 1)), 0o644)
+			d := cx.Drift()
+			if auth != "" && d != nil {
+				t.Errorf("auth %q: %s beside the sign-in: %+v", auth, m, d)
+			}
+			if auth == "" && (d == nil || d.Kind != "replaced" || d.Now != m) {
+				t.Errorf("no sign-in: %s: %+v", m, d)
+			}
 		}
 	}
 }

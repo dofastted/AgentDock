@@ -104,7 +104,10 @@ function routingPage(part) {
   const steps = el("ol", "rt-steps");
   // what the request's prompt held: its context window (context.js)
   const ctxBox = el("div", "rt-ctx");
-  log.append(logHead, steps, ctxBox);
+  // the request's own request and response, opened from its head
+  const bodies = el("div", "rt-bodies");
+  bodies.hidden = true;
+  log.append(logHead, steps, bodies, ctxBox);
   const off = el("div", "none rt-off");
   // over the stage while a replay plays: the time it is replaying, which
   // requests are in flight then, and where it is among them
@@ -864,6 +867,65 @@ function routingPage(part) {
       : tr.picked
       ? t("The turn's pick replaced the {asked} {agent} asked for.", { asked: r.effort, agent })
       : t("{level} is the model's nearest to the {asked} {agent} asked for.", { level: tr.effort, asked: r.effort, agent }));
+  }
+
+  // where a try's time went (gateway.TryNet, Discord Magic_zero: the
+  // gateway looked slow): magpie's own, the network's on the way out, and
+  // the vendor's, from the try's start to its end, the parts that took
+  // none left out. Only a try whose request magpie sent itself has it: one
+  // that went out some other way (a plugin's own fetch), or a trace from
+  // before magpie measured it, says nothing more than the time it took.
+  const ms1 = (n) => n < 10 ? t("{n} ms", { n: (Math.round(n * 10) / 10).toString() }) : took(Math.round(n));
+  function timeParts(tr) {
+    const n = tr.net, out = [], add = (who, label, v) => { if (v >= 0.1) out.push({ who, label, v }); };
+    if (!n) return out;
+    add("magpie", "Waiting for a slot", tr.queued || 0);
+    add("magpie", "In magpie", n.own || 0);
+    add("net", "Requests before it", n.before || 0);
+    // what's left of the pool's wait once a dial is out is a rounding
+    if ((n.pool || 0) >= 1) add("net", "Waiting for a connection", n.pool);
+    add("net", "DNS", n.dns || 0);
+    add("net", "Connecting", n.connect || 0);
+    add("net", "TLS", n.tls || 0);
+    add("net", "Sending", n.send || 0);
+    add("vendor", "Vendor (first byte)", n.wait || 0);
+    const head = n.head || 0;
+    if (tr.ttft > 0) {
+      add("vendor", "First token", tr.ttft - head);
+      add("vendor", "Streaming", (tr.ms || 0) - tr.ttft);
+    } else add("vendor", "Reading the reply", (tr.ms || 0) - head);
+    return out;
+  }
+  const WHO = { magpie: "magpie {ms}", net: "network {ms}", vendor: "vendor {ms}" };
+  function timeSaid(tr) {
+    const parts = timeParts(tr);
+    if (!parts.length) return "";
+    const sum = {};
+    for (const p of parts) sum[p.who] = (sum[p.who] || 0) + p.v;
+    const whose = Object.keys(WHO).filter((k) => sum[k] > 0).map((k) => t(WHO[k], { ms: ms1(sum[k]) }));
+    return [t("Where the time went"), whose.join(" · "), parts.map((p) => t(p.label) + " " + ms1(p.v)).join(" · ")].filter(Boolean).join(": ");
+  }
+  function timeElement(tr) {
+    const parts = timeParts(tr), total = parts.reduce((a, p) => a + p.v, 0) || 1;
+    const box = el("div", "rt-time");
+    const head = el("div", "rt-time-head", t("Where the time went"));
+    const sum = {};
+    for (const p of parts) sum[p.who] = (sum[p.who] || 0) + p.v;
+    for (const k of Object.keys(WHO)) if (sum[k] > 0) head.append(el("span", "rt-time-who " + k, t(WHO[k], { ms: ms1(sum[k]) })));
+    const bar = el("div", "rt-time-bar");
+    bar.setAttribute("aria-hidden", "true");
+    const list = el("ul", "rt-time-parts");
+    for (const p of parts) {
+      const seg = el("span", p.who);
+      seg.style.flexGrow = String(p.v / total);
+      seg.title = t(p.label) + " " + ms1(p.v);
+      bar.append(seg);
+      const li = el("li", p.who);
+      li.append(el("span", "k", t(p.label)), el("span", "v", ms1(p.v)));
+      list.append(li);
+    }
+    box.append(head, bar, list);
+    return box;
   }
 
   // what the gateway adds to WorkBuddy's "unapproved channel" refusal
@@ -1734,12 +1796,13 @@ function routingPage(part) {
   // the log is drawn again only when what it says changes: it is asked to
   // on every trace update (#308)
   let logR = null, headKey = "", stepsKey = "";
+  let bodiesFor = 0, bodiesKey = ""; // the request opened to its bodies (renderBodies)
   function renderLog() {
     const r = logR = pinned || cur;
     log.hidden = !r;
     if (!r) return;
     const on = () => listed().filter((x) => x.id >= logR.id);
-    const head = JSON.stringify([document.documentElement.lang, !!rp, pinned?.id, r.id, r.time, r.done, !!pinned && on().length > 1]);
+    const head = JSON.stringify([document.documentElement.lang, !!rp, pinned?.id, r.id, r.time, r.done, !!pinned && on().length > 1, bodiesFor === r.id]);
     if (headKey !== head) {
       headKey = head;
       logHead.replaceChildren(
@@ -1750,7 +1813,11 @@ function routingPage(part) {
         const usage = el("button", "text", t("View usage"));
         usage.dataset.feature = "usage"; // it opens on the Usage page
         usage.onclick = () => window.openUsageRoute(logR);
-        logHead.append(usage);
+        const open = bodiesFor === r.id;
+        const wire = el("button", "text rt-bodies-b", t(open ? "Hide request and response" : "Request and response"));
+        wire.setAttribute("aria-expanded", String(open));
+        wire.onclick = () => { bodiesFor = bodiesFor === logR.id ? 0 : logR.id; renderLog(); };
+        logHead.append(wire, usage);
         const again = el("button", "text", t("Replay"));
         again.onclick = () => replay([logR], pinned);
         logHead.append(again);
@@ -1769,7 +1836,68 @@ function routingPage(part) {
     }
     renderSteps(r);
     holdStory();
+    renderBodies(r);
     renderCtx(r);
+  }
+  // A request's request and response (Fate on Discord: a request on this
+  // page, a Codex prediction say, couldn't be opened to what was sent and
+  // what came back). The gateway's recent calls keep the last 40 calls'
+  // bodies, cut at 256 KB and in memory only, read when asked as the
+  // Gateway page's are (#1521); once they have let the request go, the
+  // request archive's copy, when it was on. Nothing more is recorded for
+  // it: without the archive an older request says how to keep them.
+  const bodiesGot = new Map(); // route id → { busy } | its bodies | { gone } | { error }
+  async function loadBodies(id) {
+    const pending = { busy: true };
+    bodiesGot.set(id, pending);
+    let got;
+    try {
+      const res = await fetch("/api/gateway/call?route=" + encodeURIComponent(id), { cache: "no-store" });
+      if (res.status === 404) got = { gone: true };
+      else if (!res.ok) got = { error: (await res.json().catch(() => null))?.error || res.statusText || String(res.status) };
+      else got = await res.json();
+    } catch (e) {
+      got = { error: e.message };
+    }
+    if (bodiesGot.get(id) !== pending) return;
+    bodiesGot.set(id, got);
+    bodiesKey = "";
+    if (logR) renderBodies(logR);
+  }
+  function renderBodies(r) {
+    const open = !rp && r.done && bodiesFor === r.id;
+    bodies.hidden = !open;
+    if (!open) {
+      if (bodiesKey) { bodiesKey = ""; bodies.replaceChildren(); }
+      return;
+    }
+    if (!bodiesGot.has(r.id)) loadBodies(r.id);
+    const got = bodiesGot.get(r.id);
+    const key = JSON.stringify([document.documentElement.lang, r.id, r.archive || "", got.busy ? "busy" : got.gone ? "gone" : got.error ? "error" : "in"]);
+    if (key === bodiesKey) return;
+    bodiesKey = key;
+    if (got.busy) { bodies.replaceChildren(el("div", "none", t("Fetching…"))); return; }
+    if (got.error) {
+      const again = el("button", "text", t("Try again"));
+      again.onclick = () => { bodiesGot.delete(r.id); bodiesKey = ""; renderBodies(logR); };
+      bodies.replaceChildren(el("div", "call-archive-err", t(got.error)), again);
+      return;
+    }
+    if (got.gone) {
+      if (r.archive) {
+        const draw = () => { if (bodiesFor === r.id) bodies.replaceChildren(archivePanel(r.archive, "rt|" + r.id, draw)); };
+        draw();
+        return;
+      }
+      bodies.replaceChildren(el("p", "rt-bodies-gone", t("magpie keeps the request and response of only the last 40 requests, until it quits. To keep every request's, turn on Request archive at the top of Usage › Requests.")));
+      return;
+    }
+    const grid = el("div", "call-details");
+    grid.append(
+      callBodyPanel("Request Body", got.requestBody, got.requestTruncated, undefined, "rt|" + r.id + "|req"),
+      callBodyPanel("Response Body", got.responseBody, got.responseTruncated, "rt|" + r.id),
+    );
+    bodies.replaceChildren(grid);
   }
   // holdStory keeps the story of the live request, its head and its lines,
   // as tall as it has been since the reader began following live, at this
@@ -1890,6 +2018,9 @@ function routingPage(part) {
     for (const a of asides(r)) items.push([a, "aside"]);
     r.tries.forEach((tr, i) => {
       items.push([tryWhy(r, i), tr.done ? (tryOk(tr) ? "ok" : "bad") : "wait"]);
+      // where its time went, once it is done
+      const when = tr.done && timeSaid(tr);
+      if (when) items.push([when, "aside time", tr]);
       // each model Copilot's Auto picked for it, where from, and whether
       // Copilot refused it, on which API and with Auto's session token or
       // without (#256)
@@ -1939,6 +2070,7 @@ function routingPage(part) {
       li.append(...(/^(why|ok|bad|wait|aside)$/.test(c) ? logoed(s, r) : [s]));
       if (c === "aside kind") li.prepend(kindTag(r), " ");
       if (c === "swap") li.prepend(swapTag(tr), " ");
+      if (c === "aside time") li.replaceChildren(timeElement(tr));
       return li;
     }));
     keptIcons = null;

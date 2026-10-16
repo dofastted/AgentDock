@@ -853,14 +853,18 @@ body.window .field.solo { grid-column: auto; }
 .quota-windows.stacked .quota-n { flex-basis: 100%; display: flex; flex-wrap: wrap; column-gap: 4px; white-space: normal; }
 .quota-windows.stacked .quota-n > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .quota-reset { display: flex; flex-wrap: wrap; column-gap: 4px; margin-top: 4px; font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums; }
-.quota-reset > span { white-space: nowrap; }
+/* each part of the reset line goes whole onto a line of its own when it
+   doesn't fit beside the others, and only one wider than the card breaks
+   between its words rather than running off it (#2443: German's
+   "Zurückgesetzt 19. Okt. 02:37 ·" at 560px) */
+.quota-reset > span { white-space: normal; min-width: 0; }
 /* a window's Pace number (fflake33): faint like its line, amber when more
    is used than an even pace would have */
 .quota-reset .quota-pace { font-variant-numeric: tabular-nums; }
 .quota-reset .quota-pace.over { color: var(--amber); }
 /* a window's whole (WindowHolds): a line of its own under the reset */
 .quota-reset .quota-holds { flex-basis: 100%; display: flex; flex-wrap: wrap; column-gap: 4px; min-width: 0; }
-.quota-reset .quota-holds > span { white-space: nowrap; }
+.quota-reset .quota-holds > span { white-space: normal; min-width: 0; }
 .quota-reset .quota-holds-why { flex-basis: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .75; cursor: help; }
 .quota-track { height: 4px; border-radius: 2px; background: var(--pill); overflow: hidden; }
 .quota-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
@@ -1631,10 +1635,14 @@ body.panel[data-ptab="agents"] :is(#panelQuota, #panelRouting, #panelUsage) { di
 /* ---- the panel's agents: one quiet line each, opened in place ------------ */
 /* icon · name · model · effort · chevron, the last three in columns of their
    own so the bars and chevrons line up down the list */
-body.panel .row.agent { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: 36px; align-items: center; column-gap: 10px; row-gap: 0; min-height: 36px; padding: 0 12px; cursor: default; }
+/* the name keeps its own width (up to 60%), the words beside it take what
+   is left and cut first, so a long model list never squeezes the name to
+   nothing (#2447) */
+body.panel .row.agent { display: grid; grid-template-columns: 20px fit-content(60%) minmax(0, 1fr); grid-template-rows: 36px; align-items: center; column-gap: 10px; row-gap: 0; min-height: 36px; padding: 0 12px; cursor: default; }
 body.panel .row.agent .ag-handle { width: 20px; height: 20px; margin: 0; }
 body.panel .row.agent .ic { width: 18px; height: 18px; }
 body.panel .row.agent .who { display: flex; align-items: center; gap: 6px; min-width: 0; }
+body.panel .row.agent > .ag-sum { justify-self: end; }
 body.panel .row.agent { transition: background-color .3s ease; }
 body.panel .row.agent.open { background: var(--card-2); }
 .ag-sum { display: grid; grid-template-columns: auto 12px 10px; align-items: center; gap: 10px; min-width: 0; max-width: 100%; font-size: 12px; color: var(--muted); }
@@ -2807,6 +2815,11 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .editor .plugin-option .segs { flex: none; }
 .editor .acct-proxy .who { font-size: 12px; font-weight: 500; color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor .acct-proxies > .hint { margin-top: 0; }
+/* past eight keys their lines fold behind All N keys, opened with a filter */
+.editor .acct-proxy-tools { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.editor .acct-proxy-tools .acct-proxy-filter { flex: 1 1 auto; min-width: 0; }
+.editor .acct-proxy-tools .text { flex: none; }
+.editor .acct-proxies > .acct-proxy-more { justify-self: start; }
 /* what a balance token's URL wants instead, and a balance checked in the form */
 .editor .bal-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; font-size: 12px; line-height: 1.45; color: var(--muted); }
 .editor .bal-fix:empty { display: none; }
@@ -2918,8 +2931,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .editor .more { grid-column: 1 / -1; }
 .editor .more summary { font-size: 12px; color: var(--muted); list-style: none; display: inline-flex; align-items: center; gap: 4px; padding: 2px 0; margin-left: 86px; }
 .editor .more summary::-webkit-details-marker { display: none; }
-.editor .more summary::before { content: "▸"; font-size: 10px; color: var(--faint); }
-.editor .more[open] summary::before { content: "▾"; }
+.editor .more summary::before { content: "▸"; font-size: 10px; color: var(--faint); display: inline-block; transition: transform .42s cubic-bezier(.32, .72, 0, 1); }
+.editor .more[open]:not(.closing) summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .editor .more summary::before { transition: none; } }
 .editor .more summary:hover { color: var(--fg); }
 /* its labels are longer (Anthropic 地址, Responses-URL): their column takes
    the longest, on one line, rather than wrap a last 址 under it (#875) */
@@ -2932,6 +2946,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .editor .bar .danger { margin-left: -7px; }
 .editor .editor-error { grid-column: 1 / -1; font-size: 12px; line-height: 1.45; color: var(--red); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .editor .editor-error.warn { color: var(--amber); }
+/* what a pasted curl command filled in (curlOf), said where an error is */
+.editor .editor-error.note { color: var(--fg-2); }
 .busy { opacity: .55; pointer-events: none; }
 .saving { opacity: 1; display: inline-flex; align-items: center; gap: 5px; }
 .saving svg { flex: none; }
@@ -3383,6 +3399,9 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 }
 /* opening and closing are animated from app.js (openModal, closeModal) */
 .modal.out { pointer-events: none; }
+/* open, it holds its place from a top app.js gives it (holdModal) */
+.modal.held { align-items: flex-start; }
+.modal .dialog { position: relative; }
 .modal .dialog {
   width: min(600px, 100%); min-width: 0; max-height: 100%; overflow-y: auto;
   border-radius: 14px; background: var(--card);
@@ -3901,6 +3920,9 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 .ag-st { flex: 0 0 100%; min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; color: var(--muted); }
 .ag-st .ag-st-t { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ag-st .ag-st-t b { font-weight: 600; color: var(--fg-2); }
+.ag-st.why { align-items: flex-start; }
+.ag-st.why .ag-st-t { white-space: normal; overflow-wrap: anywhere; }
+.ag-st.why .ag-dot { margin-top: 6px; }
 .ag-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--faint); }
 .ag-st.on .ag-dot { background: var(--green); }
 .ag-st.wait .ag-dot, .ag-warn .ag-dot { background: var(--amber); }

@@ -35,6 +35,17 @@ func dropTrayName() {
 		if conn.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, name).Store(&owner) == nil {
 			if _, err := conn.ReleaseName(name); err != nil {
 				log.Println("tray: release", name+":", err)
+				return
+			}
+			// A watcher that filed the item under the name it was given up
+			// by drops it with the name (noctalia, #2421): register again by
+			// the connection's own name, which one that filed it so already
+			// takes as the item it has.
+			if own := conn.Names(); len(own) > 0 {
+				w := conn.Object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher")
+				if c := w.Call("org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem", 0, own[0]); c.Err != nil {
+					log.Println("tray: register", own[0]+":", c.Err)
+				}
 			}
 			return
 		}

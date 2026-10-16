@@ -83,7 +83,11 @@ func isolate(t *testing.T) {
 	// whatever the system
 	oldCodexKeychain, oldCodexHere := codexKeychain, codexKeychainHere
 	codexKeychain = &fakeKeychain{}
-	forgetCodexKeychain()
+	resetCodexKeychain()
+	// a test's keychain answers at once: however loaded the machine, a
+	// read isn't taken for one waiting on a prompt
+	oldHold := keychainHold
+	keychainHold = time.Minute
 	// nor an account's allowance another test read, which LoginUsage and
 	// the Usage page share
 	loginUsageCache.Lock()
@@ -101,7 +105,8 @@ func isolate(t *testing.T) {
 		claudeKeychain, claudeBase, claudeExecutable = oldKeychain, oldBase, oldExe
 		cursorKeychain, DevinExecutable = oldCursor, oldDevin
 		codexKeychain, codexKeychainHere = oldCodexKeychain, oldCodexHere
-		forgetCodexKeychain()
+		keychainHold = oldHold
+		resetCodexKeychain()
 		forgetClaudeCredential()
 		forgetClaudeStatus()
 		forgetDevinStatus()

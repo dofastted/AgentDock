@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
@@ -78,7 +79,59 @@ var airOpenCode = func(home string) string {
 	if p := filepath.Join(home, ".opencode", "bin", name); isFile(p) {
 		return p
 	}
-	return ""
+	return acpOpenCode(home, name, runtime.GOOS)
+}
+
+// acpOpenCode is an OpenCode a JetBrains IDE or Zed installed from the ACP
+// registry, unpacked into the editor's own folder and on no PATH (#2423:
+// IDEA's at ~/Library/Caches/JetBrains/IntelliJIdea2026.2/acp-agents/
+// opencode/1.19.0/opencode); the newest when there are several, "" when
+// none.
+func acpOpenCode(home, name, goos string) string {
+	var globs []string
+	switch goos {
+	case "darwin":
+		globs = []string{
+			filepath.Join(home, "Library", "Caches", "JetBrains", "*", "acp-agents", "opencode", "*", name),
+			filepath.Join(home, "Library", "Application Support", "Zed", "external_agents", "registry", "opencode", "*", name),
+		}
+	case "windows":
+		local := appdir.Getenv("LOCALAPPDATA")
+		if local == "" {
+			local = filepath.Join(home, "AppData", "Local")
+		}
+		globs = []string{
+			filepath.Join(local, "JetBrains", "*", "acp-agents", "opencode", "*", name),
+			filepath.Join(local, "Zed", "external_agents", "registry", "opencode", "*", name),
+		}
+	default:
+		cache := appdir.Getenv("XDG_CACHE_HOME")
+		if cache == "" {
+			cache = filepath.Join(home, ".cache")
+		}
+		data := appdir.Getenv("XDG_DATA_HOME")
+		if data == "" {
+			data = filepath.Join(home, ".local", "share")
+		}
+		globs = []string{
+			filepath.Join(cache, "JetBrains", "*", "acp-agents", "opencode", "*", name),
+			filepath.Join(data, "zed", "external_agents", "registry", "opencode", "*", name),
+		}
+	}
+	best, at := "", time.Time{}
+	for _, g := range globs {
+		ps, _ := filepath.Glob(g)
+		for _, p := range ps {
+			fi, err := os.Stat(p)
+			if err != nil || !fi.Mode().IsRegular() {
+				continue
+			}
+			if best == "" || fi.ModTime().After(at) {
+				best, at = p, fi.ModTime()
+			}
+		}
+	}
+	return best
 }
 
 func air(home, cfg string) *Agent {

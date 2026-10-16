@@ -644,6 +644,54 @@ func cmdSubscription(ctx context.Context, a cmdAuth) (id, plan string, until *ti
 	return "", cmdNoPlan, nil, "", true
 }
 
+// cmdKeyWindows is a Command Code key's plan card (#2451): the plan's
+// 5-hour and weekly windows, and its month of credits as one more, as
+// the signed-in subscription's card has them. billing/credits leaves the
+// plan out, so it is the key's subscription's, read at most every ten
+// minutes (billing/subscriptions takes 15–20 seconds at times), and the
+// one read before while it can't be read. A key with no windows is a
+// pay-as-you-go key: no plan, and no card.
+func cmdKeyWindows(ctx context.Context, src planQuotaSource, key string) (string, []QuotaWindow, error) {
+	b, err := planBody(ctx, src, key)
+	if err != nil {
+		return "", nil, err
+	}
+	var c cmdCredits
+	if err := json.Unmarshal(b, &c); err != nil {
+		return "", nil, err
+	}
+	if len(cmdWindows(c)) == 0 {
+		return cmdPlanName(c.Credits.PlanID), []QuotaWindow{}, nil
+	}
+	if c.Credits.PlanID == "" {
+		c.Credits.PlanID = cmdKeyPlanID(ctx, key)
+	}
+	q := cmdQuotaOf(SubscriptionQuota{}, c)
+	return q.Plan, q.Windows, nil
+}
+
+var cmdKeyPlans = struct {
+	sync.Mutex
+	m map[string]cmdSeen // plan is the subscription's id here
+}{m: map[string]cmdSeen{}}
+
+func cmdKeyPlanID(ctx context.Context, key string) string {
+	cmdKeyPlans.Lock()
+	seen, had := cmdKeyPlans.m[key]
+	cmdKeyPlans.Unlock()
+	if had && time.Since(seen.at) < 10*time.Minute {
+		return seen.plan
+	}
+	id, _, _, _, ok := cmdSubscription(ctx, cmdAuth{APIKey: key})
+	if !ok {
+		return seen.plan
+	}
+	cmdKeyPlans.Lock()
+	cmdKeyPlans.m[key] = cmdSeen{id, time.Now()}
+	cmdKeyPlans.Unlock()
+	return id
+}
+
 func cmdLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	for _, c := range cmdLogins() {
 		if strings.EqualFold(c.User, l.User) {

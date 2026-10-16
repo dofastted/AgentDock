@@ -690,7 +690,7 @@ func wbQuota(ctx context.Context, a wbAccount) SubscriptionQuota {
 	if total > 0 {
 		w := QuotaWindow{Name: "Credits", Used: 100 * used / total, Display: fmt.Sprintf("%s / %s", compactNumber(used), compactNumber(total)),
 			Amount: used, Limit: total, Unit: "credits"}
-		q.Windows = append(q.Windows, w)
+		q.Windows = wbSpareFree(a.site.id, append(q.Windows, w))
 		return q
 	}
 	// an enterprise (team) account's summary has no packages: its credits
@@ -701,10 +701,39 @@ func wbQuota(ctx context.Context, a wbAccount) SubscriptionQuota {
 	if wbCall(ctx, http.MethodPost, a.site.api()+"/billing/meter/get-enterprise-user-usage", wbAuthHeaders(a.site, c), map[string]any{}, &ent) == nil {
 		if w, ok := ent.window(); ok {
 			q.Plan = firstNonEmpty(a.Plan, "Enterprise")
-			q.Windows = append(q.Windows, w)
+			q.Windows = wbSpareFree(a.site.id, append(q.Windows, w))
 		}
 	}
 	return q
+}
+
+// wbSpareFree has the credits windows ws not count the models WorkBuddy
+// serves at x0.00: such a model draws no credits, and with the credits used
+// up WorkBuddy still serves it (deepseek-v4.1-flash at 560 / 560,
+// magpie-community/plugins#138, hheei). Counted, the window at 100% put
+// the account last, behind every other, for its free models too. The free
+// models are the provider's last fetched list's (catalog.Live); with none
+// read, every model is counted, as before. The plugin does the same
+// (workbuddy 0.1.23's notModels).
+func wbSpareFree(provider string, ws []QuotaWindow) []QuotaWindow {
+	ms, _, ok := catalog.Live(provider)
+	if !ok {
+		return ws
+	}
+	var free []string
+	for _, m := range ms {
+		if m.Free {
+			free = append(free, m.ID)
+		}
+	}
+	set := idSetOf(free)
+	if set == nil {
+		return ws
+	}
+	for i := range ws {
+		ws[i].matches = func(model string) bool { return !set.has(model) }
+	}
+	return ws
 }
 
 // wbEnterpriseUsage is an enterprise account's credits for the cycle, flat:

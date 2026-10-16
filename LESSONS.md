@@ -603,6 +603,19 @@ each one.
   - A rerun's green hides the first try: a1f7b8c13's run is green on
     attempt 2, its attempt 1 red (#2390, fixed at its cause in
     4a6bf80f4). Read `attempt` before calling a run green.
+  - GUI tests in every file a change can reach: three changes ran the
+    GUI files they chose and left others red on main, which CI never
+    runs. 64b0f3a20 (10-15) had the sidebar ask /api/plugin-pages, and
+    menu-scroll's strict fixture threw on it, 24 of 24 red until
+    a61a6f954 the next day. 8f55c27ad (#2396) held Settings' tabs at the
+    top, and text-size's click landed under them, red ~5h until
+    d3ca90afc. 94942f9f3 ran only the i18n files, and
+    agent-connect-no-models went 8 of 16 red until cf21b71ff (#2435). A
+    new API call or a layout change runs the whole GUI suite.
+  - A Windows rule needs each test of that agent judged for the right
+    system: 6e2aa8e32 (#2300) made ~\.dsh never gone on Windows, and two
+    Mac-app dsh tests that didn't force goneOS went red on Windows CI,
+    which now runs the Dsh tests, until ce1251cc9.
 - **Done right on 10-14.** 86cc7ac56 (hhh2210) ran -race -count=20 and
   says its ordering was injected, not captured. f074996d9 named its load
   red's issue (#2066). bfef5d51b checked the reverted page's screenshots

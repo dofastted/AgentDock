@@ -99,6 +99,14 @@ type Route struct {
 	ReasoningHidden bool  `json:"reasoningHidden,omitempty"`
 	// Flow: the ms its content took to come (Call.Flow)
 	Flow int64 `json:"flow,omitempty"`
+	// Sent: ms from the request to its answering try's request written
+	// to the vendor, and of it Own magpie's, Retried the tries that
+	// failed first, Queued waiting for a slot, as the usage record has
+	// them (Record.Sent); the rest of Sent is connecting and sending
+	Sent    int64 `json:"sent,omitempty"`
+	Own     int64 `json:"own,omitempty"`
+	Retried int64 `json:"retried,omitempty"`
+	Queued  int64 `json:"queued,omitempty"`
 	// Served: the model the reply says answered, as the last try has it;
 	// Swapped: another than the one that try asked for; Routed: that try
 	// asked another magpie's routing group, and Served is its member
@@ -117,6 +125,10 @@ type Route struct {
 	// in (shortFolder), never the whole path; a request that says none
 	// takes its session's, as said last (#1068)
 	Folder string `json:"folder,omitempty"`
+	// Archive: "<date>/<id>", where the request archive keeps the call,
+	// when it was on (Call.Archive), for the page to read its bodies back
+	// once the recent calls have let them go
+	Archive string `json:"archive,omitempty"`
 }
 
 // RouteUsage is one billable attempt's pricing inputs, kept in routing history.
@@ -336,6 +348,8 @@ type Try struct {
 	// Queued: ms it waited for one of its key's or account's slots, the
 	// provider's MaxConcurrency out already (concurrency.go)
 	Queued int64 `json:"queued,omitempty"`
+	// Net: where its time went up to its reply's first byte (TryNet)
+	Net *TryNet `json:"net,omitempty"`
 	// Reset: its week used up and nobody else left, one of the account's
 	// Codex resets was spent by itself (the user's setting) — on Who, and
 	// what spending it did — and the request asked again

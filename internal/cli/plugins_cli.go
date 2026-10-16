@@ -302,7 +302,7 @@ func installedName(name string) string {
 		}
 	}
 	for _, x := range ps {
-		if plugin.ShortName(plugin.Name(x.Spec)) == name {
+		if plugin.Called(plugin.Name(x.Spec), name) {
 			return plugin.Name(x.Spec)
 		}
 	}
@@ -325,7 +325,7 @@ func pluginOptions(name string, set []string) error {
 	}
 	// a short name, as the community's READMEs write it
 	for i, x := range ps {
-		if e == nil && plugin.ShortName(plugin.Name(x.Spec)) == name {
+		if e == nil && plugin.Called(plugin.Name(x.Spec), name) {
 			e = &ps[i]
 		}
 	}

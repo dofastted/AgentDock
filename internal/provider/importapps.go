@@ -167,7 +167,7 @@ func ImportFromApps(picks []AppPick) ([]string, error) {
 			}
 			// a key joins a provider only at its own address: one taken
 			// to another host would be sent there
-			if h.Account != nil || !sameProvider(Provider{Key: p.Key, Chat: h.Chat, Responses: h.Responses, Anthropic: h.Anthropic, Headers: h.Headers}, p) {
+			if h.Account != nil || !sameProvider(Provider{Key: p.Key, Chat: h.Chat, Responses: h.Responses, Anthropic: h.Anthropic, Gemini: h.Gemini, Headers: h.Headers}, p) {
 				return added, errorf("%s: %s isn't at %s; add it as a provider of its own", p.Name, h.Name, hostOf(firstURL(p)))
 			}
 			if err := AddKey(it.KeyOf, p.Name, p.Key, ""); err != nil {
@@ -290,7 +290,7 @@ func settle(items []AppImport, have []Provider, used map[string]bool) []AppImpor
 				it.Status, it.Existing = "taken", h.Name
 			}
 			if it.KeyOf == "" && h.Key != "" && sameProvider(Provider{
-				Key: p.Key, Chat: h.Chat, Responses: h.Responses, Anthropic: h.Anthropic, Headers: h.Headers,
+				Key: p.Key, Chat: h.Chat, Responses: h.Responses, Anthropic: h.Anthropic, Gemini: h.Gemini, Headers: h.Headers,
 			}, *p) {
 				it.KeyOf = h.ID
 			}
@@ -332,12 +332,12 @@ func sameProvider(a, b Provider) bool {
 		return false
 	}
 	hosts := map[string]bool{}
-	for _, u := range []string{a.Chat, a.Responses, a.Anthropic, a.Decide} {
+	for _, u := range []string{a.Chat, a.Responses, a.Anthropic, a.Gemini, a.Decide} {
 		if h := hostOf(u); h != "" {
 			hosts[h] = true
 		}
 	}
-	for _, u := range []string{b.Chat, b.Responses, b.Anthropic} {
+	for _, u := range []string{b.Chat, b.Responses, b.Anthropic, b.Gemini} {
 		if hosts[hostOf(u)] {
 			return true
 		}
@@ -528,7 +528,16 @@ func readClaudeSettings(path string) ([]AppImport, error) {
 			if b, err := os.ReadFile(filepath.Join(filepath.Dir(Path()), "stash.json")); err == nil {
 				json.Unmarshal(b, &st)
 			}
+			// what routing put aside is what stepping out would put back:
+			// the endpoint, token and main model, and with them the
+			// models of the user's own the tiers and subagents ran on
+			// (claude.env.<VAR>, internal/agent/claude.go)
 			env = map[string]any{"ANTHROPIC_BASE_URL": st["claude.base_url"], "ANTHROPIC_AUTH_TOKEN": st["claude.auth_token"], "ANTHROPIC_MODEL": st["claude.model"]}
+			for k, v := range st {
+				if name, ok := strings.CutPrefix(k, "claude.env."); ok && v != "" {
+					env[name] = v
+				}
+			}
 		}
 	}
 	base, _ := env["ANTHROPIC_BASE_URL"].(string)

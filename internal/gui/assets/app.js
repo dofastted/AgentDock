@@ -67,6 +67,9 @@ let pick = null; // { agent, field, options, items, cursor, anchor }
 let editing = null; // provider id being edited; { preset } or { custom: true } for a new one
 let draft = null; // the editor's working copy
 let naming = null; // the provider whose models' names and levels are open in its editor
+let advanced = null; // { of, open }: the editor's Advanced as it was opened or closed by hand, kept by
+// what the editor edits (editing), not its draft: a move to the plugin or a
+// refresh made under it starts a new draft, and the fold stays as left
 let adding = false; // the preset sheet is open
 // the partners counted as shown since the sheet opened: once an opening,
 // however often it is drawn (countPartner)
@@ -125,7 +128,10 @@ async function api(path, body, heads, signal) {
     // reader's language
     if (data?.code === "no_models") err.message = t("Add a provider or subscription in magpie first, then connect {agent}", { agent: data.agent });
     // magpie has models, and none is left in the agent's model list (#1989)
-    if (data?.code === "all_hidden") err.message = t("None of magpie's models is left in {agent}'s model list: pick one under Model list → Pick, then connect {agent}", { agent: data.agent });
+    if (data?.code === "all_hidden") {
+      err.code = data.code;
+      err.message = t("None of magpie's models is left in {agent}'s model list: pick one under Model list → Pick, then connect {agent}", { agent: data.agent });
+    }
     if (data?.why) err.why = data.why; // a failed move's reason, said in the reader's language
     // an account the agent is signed in to, refused removal while it has
     // another: said in the reader's language
@@ -1098,6 +1104,8 @@ function connectSwitch(a) {
   s.setAttribute("aria-label", t("Connect {agent} to magpie", { agent: a.name }));
   s.title = a.wired ? t("Connected · switch off to put back what {agent} had before magpie", { agent: a.name }) : t("Switch on and {agent}'s model list gets magpie's models", { agent: a.name });
   s.append(el("i"));
+  // the list opened from a failed connect, drawn again while it is open
+  if (!a.wired) holdAgentModels(a, s);
   s.onclick = async (e) => {
     e.stopPropagation();
     if (a.wired) { askDisconnect(a); return; }
@@ -1114,6 +1122,15 @@ function connectSwitch(a) {
     } catch (err) {
       s.disabled = false;
       s.classList.remove("on");
+      // every model taken out of its list: the Pick that puts one back is
+      // in a connected agent's row only, so its list opens here (塔哥 on
+      // Discord: Grok Build, all hidden, then switched off, couldn't be
+      // connected again)
+      if (err.code === "all_hidden") {
+        status(t("None of magpie's models is left in {agent}'s model list: pick one, then connect {agent}", { agent: a.name }), "err");
+        openAgentModels(a, s, e);
+        return;
+      }
       status(t(err.message), "err");
     }
   };
@@ -1128,12 +1145,14 @@ function connectSwitch(a) {
 // lists, what a new session starts on, the files magpie changed, and the
 // way back.
 
-// agents with no way onto magpie: no switch, the reason instead
+// agents with no way onto magpie: no switch, the reason instead, and that
+// it is why (@G_Z_Y on X read "Only Cursor's own models" beside "Can't
+// connect" as two things, and looked for Cursor CLI elsewhere)
 const NATIVE_ONLY = {
-  cursor: "Only Cursor's own models",
-  copilot: "Only GitHub Copilot's own models",
-  goose: "Only Goose's own providers",
-  devin: "Only Devin's own models",
+  cursor: "Uses only Cursor's own models, so magpie can't connect it",
+  copilot: "Uses only GitHub Copilot's own models, so magpie can't connect it",
+  goose: "Uses only Goose's own providers, so magpie can't connect it",
+  devin: "Uses only Devin's own models, so magpie can't connect it",
 };
 // agents that pick no model once started: the one they start on stays in
 // the row
@@ -1265,7 +1284,8 @@ function connectLine(a, kind) {
   const words = el("span", "ag-st-t");
   line.append(dot, words);
   const say = (s, cls) => { words.textContent = s; if (cls) line.classList.add(cls); };
-  if (kind === "no") { say(t(NATIVE_ONLY[a.id])); return line; }
+  // the reason wraps, never cut short: it is the row's only words
+  if (kind === "no") { say(t(NATIVE_ONLY[a.id]), NATIVE_ONLY[a.id] ? "why" : ""); return line; }
   if (kind === "link") {
     if (a.added == null) say(t("Opens {name} to add magpie as a provider — confirm it there", { name: a.name }));
     else if (a.added) say(t("Added · magpie is a provider in {agent}", { agent: a.name }), "on");
@@ -1609,7 +1629,7 @@ function guideCard(g) {
       b.disabled = !ready || !!guideBusy;
       b.classList.toggle("busy", guideBusy === a.id);
       b.title = ready ? t("Switch on and {agent}'s model list gets magpie's models", { agent: a.name }) : t("Add a key or a subscription first; then there are models to connect");
-      b.onclick = (e) => { e.stopPropagation(); guideConnect(a); };
+      b.onclick = (e) => { e.stopPropagation(); guideConnect(a, e); };
       chips.append(b);
     }
     if (found.length > GUIDE_CHIPS) chips.append(el("span", "guide-more", t("+{n} more below", { n: found.length - GUIDE_CHIPS })));
@@ -1673,7 +1693,7 @@ function guideRedraw() {
   fit();
 }
 
-async function guideConnect(a) {
+async function guideConnect(a, ev) {
   if (guideBusy) return;
   guideBusy = a.id;
   guideRedraw();
@@ -1687,6 +1707,14 @@ async function guideConnect(a) {
   } catch (err) {
     guideBusy = "";
     guideRedraw();
+    // every model taken out of its list: its list opens at its chip, as
+    // at the row's switch (connectSwitch)
+    const chip = err.code === "all_hidden" && document.querySelector(`.guide-agent[data-id="${CSS.escape(a.id)}"]`);
+    if (chip) {
+      status(t("None of magpie's models is left in {agent}'s model list: pick one, then connect {agent}", { agent: a.name }), "err");
+      openAgentModels(a, chip, ev);
+      return;
+    }
     status(t(err.message), "err");
   }
 }
@@ -3556,7 +3584,7 @@ function openRowMenu(anchor, acts) {
     // the click goes along, so an item that opens something below can
     // bring it into view (scrollOnPurpose)
     b.onclick = (e) => { e.stopPropagation(); closeAgentMenu(); o.run(e); };
-    b.onmouseenter = () => b.focus({ preventScroll: true });
+    hoverFocus(b);
     box.append(b);
     if (!o.off) items.push(b);
   }
@@ -6018,11 +6046,19 @@ function renderExcluded() {
     }
     // an agent signed out here (a banned account logged out, say) lists
     // its saved accounts nowhere else, so this is where they are removed
+    // the keychain didn't give Codex's sign-in (#2367): read it once more,
+    // the refusal magpie kept dropped, rather than wait it out or restart
+    if (x.retry) {
+      const again = el("button", "link", t("Try again"));
+      again.title = t("Ask the macOS keychain for {agent}'s sign-in again", { agent: x.agentName });
+      again.onclick = () => providerAction("keychain-retry", {}, t("{agent}'s sign-in was read from the keychain", { agent: x.agentName }));
+      r.lastChild.append(" ", again);
+    }
     if (x.signedOut && x.users?.length) {
       const rm = el("button", "link", t("Remove"));
       rm.title = t("magpie forgets the accounts it saved; {agent}'s own files are left as they are", { agent: x.agentName });
       rm.onclick = () => askForgetSaved(x);
-      r.lastChild.append(" ", rm);
+      r.lastChild.append(x.retry ? " · " : " ", rm);
     }
     box.append(r);
   }
@@ -7591,8 +7627,87 @@ function priceRateOfDraft() {
   if (!(n >= 0 && n <= 1000) || Math.abs(n * 1000 - Math.round(n * 1000)) > 1e-6) return undefined;
   return n;
 }
+// shown opens every fold x sits in (the editor's Advanced), so a field a
+// Save names is there to see and type in; it gives x back
+function shown(x) {
+  for (let d = x?.closest("details"); d; d = d.parentElement?.closest("details")) d.open = true;
+  return x;
+}
+// An editor's fold (Advanced, Server address, More endpoints) opens and
+// closes as a disclosure does on iOS: its content grows out of the line
+// on a spring, its rows coming in one after another, and the dialog round
+// it grows or shrinks on the same curve — so the change shows even where
+// the fold is taller than the dialog and goes on out of sight below. Its
+// arrow turns. At once with Reduce motion, and for a fold a Save opens
+// (shown). A click while it moves turns it back from where it is.
+const foldMoves = new WeakMap();
+document.addEventListener("click", (e) => {
+  const sum = e.target.closest?.(".editor details.more > summary");
+  const d = sum?.parentElement, inner = d?.querySelector(":scope > .inner");
+  if (!inner) return;
+  const was = foldMoves.get(d);
+  const closing = was ? !was.closing : d.open;
+  // told now, not at the toggle a task later: a redraw in between would
+  // read it as it was
+  d.onfold?.(!closing);
+  if (calm()) return;
+  e.preventDefault();
+  const box = d.closest(".modal .dialog");
+  // where it is now, partway included; a shut fold's content still
+  // measures its whole height
+  const from = was || closing ? inner.getBoundingClientRect().height : 0;
+  const boxFrom = box?.getBoundingClientRect().height;
+  const fade = was ? +getComputedStyle(inner).opacity : 1;
+  for (const x of was?.anims || []) x.cancel();
+  // and where it ends, measured as it will be
+  inner.style.overflow = "";
+  d.open = !closing;
+  const to = closing ? 0 : inner.getBoundingClientRect().height;
+  const boxTo = box?.getBoundingClientRect().height;
+  d.open = true;
+  d.classList.toggle("closing", closing);
+  inner.style.overflow = "hidden";
+  const shape = closing ? { duration: 420, easing: IOS_EASE } : { duration: 570, easing: SPRING };
+  const pad = getComputedStyle(inner).paddingTop;
+  const grow = inner.animate([
+    { height: from + "px", paddingTop: from ? pad : "0px" },
+    { height: to + "px", paddingTop: closing ? "0px" : pad },
+  ], shape);
+  const anims = [grow];
+  if (box && Math.abs(boxTo - boxFrom) > 0.5) anims.push(box.animate([{ height: boxFrom + "px" }, { height: boxTo + "px" }], shape));
+  if (closing) anims.push(inner.animate([{ opacity: fade }, { opacity: 0, offset: 0.55 }, { opacity: 0 }], { duration: shape.duration, easing: "ease-out" }));
+  else {
+    if (fade < 1) anims.push(inner.animate([{ opacity: fade }, { opacity: 1 }], { duration: 200, easing: "ease-out" }));
+    // the rows come in from just above, one after another; those past
+    // the first dozen together
+    let i = 0;
+    for (const row of inner.children) {
+      if (row.style.display === "none" || row.hidden) continue;
+      anims.push(row.animate([{ opacity: 0, transform: "translateY(-6px)" }, { opacity: 1, transform: "none" }],
+        { duration: 420, delay: 40 + Math.min(i++, 12) * 16, easing: IOS_EASE, fill: "backwards" }));
+    }
+  }
+  const move = { anims, closing };
+  foldMoves.set(d, move);
+  grow.finished.then(() => {
+    if (foldMoves.get(d) !== move) return;
+    foldMoves.delete(d);
+    inner.style.overflow = "";
+    d.classList.remove("closing");
+    if (closing) d.open = false;
+  }, () => {});
+}, true); // before the editor, which keeps its clicks to itself
+// advancedSet says whether a setting under the editor's Advanced is set,
+// which opens it: none hides behind a fold
+function advancedSet(d, p) {
+  return (d.headers || []).some(([k]) => (k || "").trim()) || !!(d.extraBody || "").trim() ||
+    !!d.proxyMode || Object.values(d.accountProxies || {}).some((x) => x?.mode) ||
+    [d.concurrency, d.queueLimit, d.queueWait, d.maxRPM, d.priceRate, d.contexts, d.outputs, d.compacts].some((v) => String(v ?? "").trim()) ||
+    !!(d.searches || d.authHeader || d.passUserAgent || d.unredacted || d.pinUpstream || d.nativeCompaction || d.balanceToken) ||
+    !!d.fallback?.length || !!p?.balanceToken?.set;
+}
 function priceRateError(ed) {
-  ed.querySelector("input.price-rate")?.focus({ preventScroll: true });
+  shown(ed.querySelector("input.price-rate"))?.focus({ preventScroll: true });
   return editorError(t("Price rate: a number from 0 to 1000, at most three decimals"), "warn");
 }
 function concurrencyDraft(p) {
@@ -7615,10 +7730,10 @@ function queueOfDraft() {
 }
 function queueError(ed, bad) {
   if (bad === "maxRPM") {
-    ed.querySelector("input.rpm")?.focus({ preventScroll: true });
+    shown(ed.querySelector("input.rpm"))?.focus({ preventScroll: true });
     return editorError(t("Requests per minute: a whole number from 0 to 10000"), "warn");
   }
-  ed.querySelector(bad === "queueLimit" ? "input.queue-limit" : "input.queue-wait")?.focus({ preventScroll: true });
+  shown(ed.querySelector(bad === "queueLimit" ? "input.queue-limit" : "input.queue-wait"))?.focus({ preventScroll: true });
   return editorError(bad === "queueLimit" ? t("Queue size: a whole number from 0 to 10000") : t("Queue wait: a whole number of seconds from 0 to 3600"), "warn");
 }
 // concurrencyOfDraft is the draft's limit as it is saved — null for none
@@ -7630,7 +7745,7 @@ function concurrencyOfDraft() {
   return +v;
 }
 function concurrencyError(ed) {
-  ed.querySelector("input.concurrency")?.focus({ preventScroll: true });
+  shown(ed.querySelector("input.concurrency"))?.focus({ preventScroll: true });
   return editorError(t("Concurrency: a whole number from 0 to 1000"), "warn");
 }
 function proxyDraft(p) {
@@ -7691,36 +7806,85 @@ function accountProxyPicker(a) {
 // Accounts list names it. null for a provider with one key.
 const KEY_PROXY_HINT = "Each key can go through a proxy of its own; Provider's proxy is the one above";
 function keyProxyPicker(p) {
-  return proxyLines((p?.keyList || []).map((k) => ({ k: k.id, name: k.name || k.masked, key: k.id })), KEY_PROXY_HINT);
+  return proxyLines((p?.keyList || []).map((k) => ({ k: k.id, name: k.name || k.masked, key: k.id, info: k })), KEY_PROXY_HINT, true);
 }
-function proxyLines(items, hint) {
+// proxyLines: a line for each account or key. A provider's keys fold as
+// its Accounts list folds them (keyFold): past KEYS_FOLD, the first
+// KEYS_FIRST and those with a proxy of their own, or, opened, those the
+// filter matches, KEYS_PAGE at most. A line for each of a thousand keys
+// took the editor a minute to open, five thousand three (@NetRozee on X).
+// A key not drawn keeps the proxy it has: only a line picked in changes it.
+function proxyLines(items, hint, foldKeys) {
   if (items.length < 2) return null;
   draft.accountProxies = draft.accountProxies || {};
   const box = el("div", "acct-proxies");
-  for (const it of items) {
-    const k = it.k;
-    const cur = draft.accountProxies[k] || { mode: "", url: "" };
-    const line = el("div", "acct-proxy");
-    if (it.user) line.dataset.user = it.user;
-    if (it.key) line.dataset.key = it.key;
-    const who = el("span", "who", it.name);
-    who.title = it.name;
-    const addr = input(cur.url || "", "http://127.0.0.1:7890");
-    addr.className = "proxy-url";
-    addr.classList.toggle("off", cur.mode !== "custom");
-    addr.oninput = () => { draft.accountProxies[k] = { ...(draft.accountProxies[k] || { mode: "custom" }), url: addr.value }; };
-    const seg = segs([["", t("Provider's proxy")], ["direct", t("Direct")], ["custom", t("Custom")]], cur.mode || "", (v) => {
-      draft.accountProxies[k] = { ...(draft.accountProxies[k] || {}), mode: v };
-      addr.classList.toggle("off", v !== "custom");
-    });
-    seg.classList.add("proxy-mode");
-    const row = el("div", "proxy-row");
-    row.append(seg, addr);
-    line.append(who, row);
-    box.append(line);
+  const tail = el("div", "hint", t(hint));
+  if (!foldKeys || items.length <= KEYS_FOLD) {
+    for (const it of items) box.append(proxyLine(it));
+    box.append(tail);
+    return box;
   }
-  box.append(el("div", "hint", t(hint)));
+  let q = null; // the filter's text while the whole list is open
+  let tools = null;
+  const draw = () => {
+    for (const n of [...box.childNodes]) if (n !== tools && n !== tail) n.remove();
+    const add = (n) => box.insertBefore(n, tail);
+    if (q === null) {
+      const own = (it) => !!draft.accountProxies[it.k]?.mode;
+      for (const it of items.filter((it, i) => i < KEYS_FIRST || own(it)).slice(0, KEYS_PAGE)) add(proxyLine(it));
+      const more = el("button", "text acct-proxy-more", t("All {n} keys", { n: items.length }));
+      more.type = "button";
+      more.onclick = () => { q = ""; openTools(); draw(); tools.querySelector("input").focus({ preventScroll: true }); };
+      add(more);
+      return;
+    }
+    const matched = items.filter((it) => keyMatches(it.info, q));
+    for (const it of matched.slice(0, KEYS_PAGE)) add(proxyLine(it));
+    if (!matched.length) add(el("div", "hint acct-proxy-none", t("No key matches")));
+    else if (matched.length > KEYS_PAGE) add(el("div", "hint acct-proxy-rest", t("{n} more — type to narrow them down", { n: matched.length - KEYS_PAGE })));
+  };
+  const close = () => { q = null; tools?.remove(); tools = null; draw(); };
+  const openTools = () => {
+    tools = el("div", "acct-proxy-tools");
+    const f = input("", t("Filter {n} keys — name, key, off, resting…", { n: items.length }));
+    f.className = "acct-proxy-filter";
+    f.setAttribute("aria-label", f.placeholder);
+    // only the lines are drawn again: the filter stays in the page, so an
+    // IME's text never lands twice (#1055)
+    f.oninput = () => { q = f.value; draw(); };
+    f.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") { if (f.value) { f.value = ""; f.oninput(); } else close(); } };
+    const fewer = el("button", "text", t("Show fewer"));
+    fewer.type = "button";
+    fewer.onclick = close;
+    tools.append(f, fewer);
+    box.prepend(tools);
+  };
+  box.append(tail);
+  draw();
   return box;
+}
+// proxyLine: one account's or key's line of proxyLines
+function proxyLine(it) {
+  const k = it.k;
+  const cur = draft.accountProxies[k] || { mode: "", url: "" };
+  const line = el("div", "acct-proxy");
+  if (it.user) line.dataset.user = it.user;
+  if (it.key) line.dataset.key = it.key;
+  const who = el("span", "who", it.name);
+  who.title = it.name;
+  const addr = input(cur.url || "", "http://127.0.0.1:7890");
+  addr.className = "proxy-url";
+  addr.classList.toggle("off", cur.mode !== "custom");
+  addr.oninput = () => { draft.accountProxies[k] = { ...(draft.accountProxies[k] || { mode: "custom" }), url: addr.value }; };
+  const seg = segs([["", t("Provider's proxy")], ["direct", t("Direct")], ["custom", t("Custom")]], cur.mode || "", (v) => {
+    draft.accountProxies[k] = { ...(draft.accountProxies[k] || {}), mode: v };
+    addr.classList.toggle("off", v !== "custom");
+  });
+  seg.classList.add("proxy-mode");
+  const row = el("div", "proxy-row");
+  row.append(seg, addr);
+  line.append(who, row);
+  return line;
 }
 // accountProxiesOfDraft is each account's own proxy as it is saved — the
 // accounts that follow the provider's left out — or { missing: user } when
@@ -8128,6 +8292,89 @@ $("#modal").addEventListener("keydown", (e) => {
   e.preventDefault();
   (e.shiftKey ? last : first).focus();
 });
+// A dialog opens centred, then stays put while what it holds grows or
+// shrinks (a fold opening, an error line, a list filling): it holds the
+// place of whatever the reader last pressed or focused in it, and grows
+// and shrinks round that, down to the window's foot, where it stays and
+// its fields scroll as a full-height dialog's do. Where there is no
+// room left to move, its fields shorten over a pressed button below them,
+// so an error line over Remove doesn't push Remove down; a pressed field
+// goes with what grows above it, as nothing a click does scrolls. Centred all along, a dialog
+// shorter than the window moved by half of every change, the line just
+// clicked sliding from under the pointer. Its place is a relative top and
+// a cap on its height. A change made in the page is held before it is
+// drawn (a mutation's microtask); one that only resizes (an animation, the
+// window) a frame later, as an observer can't resize what it observes.
+const modalHold = { off: 0, at: null, y: 0, cap: null, capSet: "" };
+// how far down the dialog an element sits, to the fraction of a pixel,
+// what moves it in an animation (a row coming in) left out. An element
+// that scales (a Copy button's pop) is measured by what holds it, as its
+// top moves round its middle by more than the matrix says.
+function modalDepth(a, d) {
+  if (!a?.isConnected || !d.contains(a) || a === d || !a.offsetParent) return null;
+  if (getComputedStyle(d).transform === "none") {
+    const moves = [];
+    for (let x = a; x && x !== d; x = x.parentElement) {
+      const t = getComputedStyle(x).transform;
+      if (t === "none") continue;
+      const m = new DOMMatrixReadOnly(t);
+      if (m.m11 === 1 && m.m22 === 1 && !m.m12 && !m.m21) moves.push(m.m42);
+      else { a = x.parentElement; moves.length = 0; }
+    }
+    if (a === d) return null;
+    return moves.reduce((y, m) => y - m, a.getBoundingClientRect().top - d.getBoundingClientRect().top - d.clientTop);
+  }
+  // the dialog itself coming in: whole pixels, by offsets
+  let y = 0;
+  for (let x = a; x && x !== d; x = x.offsetParent) { if (!d.contains(x)) return null; y += x.offsetTop; }
+  for (let x = a.parentElement; x && x !== d; x = x.parentElement) y -= x.scrollTop;
+  return y;
+}
+function modalMark(a) {
+  const d = $("#modal").firstElementChild, y = modalDepth(a, d);
+  if (y == null) return;
+  // a new place to hold lets go of the last one's cap, at the next change
+  if (a !== modalHold.at) modalHold.cap = null;
+  modalHold.at = a; modalHold.y = y;
+}
+const modalCap = () => modalHold.cap == null ? `calc(100% - ${modalHold.off}px)` : `min(calc(100% - ${modalHold.off}px), ${modalHold.cap}px)`;
+function holdModal(later) {
+  const m = $("#modal"), d = m.firstElementChild;
+  if (m.hidden || !m.classList.contains("held")) return;
+  // what was pressed, or failing that what has the focus (a redraw swaps
+  // the pressed element for its copy, and gives that copy the focus)
+  let y = modalDepth(modalHold.at, d);
+  if (y == null && d.contains(document.activeElement)) { modalHold.at = document.activeElement; y = modalDepth(modalHold.at, d); }
+  const want = modalHold.off + (y == null ? 0 : modalHold.y - y);
+  const c = getComputedStyle(m), h = d.getBoundingClientRect().height;
+  const space = m.clientHeight - parseFloat(c.paddingTop) - parseFloat(c.paddingBottom);
+  // grown to the window's foot it stays, capped there, its fields scrolling;
+  // it moves up only for a window grown too short to show half of it
+  modalHold.off = Math.max(0, Math.min(want, Math.max(space - h, modalHold.off), space / 2));
+  if (y != null && want < -0.5) {
+    // no room above: the fields over a button below them give way
+    const body = d.querySelector(".ebody");
+    if (body && !body.contains(modalHold.at)) modalHold.cap = Math.max(0, h + want);
+  }
+  d.style.top = modalHold.off + "px";
+  const cap = () => {
+    if (!m.classList.contains("held") || modalCap() === modalHold.capSet) return;
+    d.style.maxHeight = modalHold.capSet = modalCap();
+  };
+  if (later) requestAnimationFrame(cap);
+  else cap();
+  if (y != null) modalHold.y = modalDepth(modalHold.at, d) ?? y;
+}
+{
+  const m = $("#modal"), d = m.firstElementChild, later = () => holdModal(true);
+  new ResizeObserver(later).observe(d);
+  new ResizeObserver(later).observe(m);
+  new MutationObserver(() => holdModal()).observe(d, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "open"] });
+  m.addEventListener("pointerdown", (e) => modalMark(e.target), true);
+  m.addEventListener("focusin", (e) => modalMark(e.target), true);
+  // a scroll moves the marked element, not the dialog
+  m.addEventListener("scroll", () => modalMark(modalHold.at), true);
+}
 function openModal(content) {
   const m = $("#modal"), d = m.firstElementChild;
   const fresh = m.hidden || m.classList.contains("out");
@@ -8165,6 +8412,16 @@ function openModal(content) {
   if (body) body.scrollTop = top; // a re-render keeps the place
   const nextNames = content.querySelector(".mnames:not([hidden])");
   if (namesAt && nextNames?.dataset.provider === namesAt.provider) nextNames.scrollTop = namesAt.top;
+  if (fresh) {
+    m.classList.remove("held");
+    d.style.top = d.style.maxHeight = "";
+    modalHold.off = d.offsetTop - parseFloat(getComputedStyle(m).paddingTop);
+    modalHold.at = modalHold.cap = null;
+    m.classList.add("held");
+    d.style.top = modalHold.off + "px";
+    d.style.maxHeight = modalHold.capSet = modalCap();
+  }
+  holdModal();
   if (!fresh) return;
   for (const a of [...m.getAnimations(), ...d.getAnimations()]) a.cancel();
   d.style.opacity = d.style.transform = m.style.opacity = "";
@@ -8211,6 +8468,8 @@ function closeModal() {
     if (modalDone !== done) return;
     modalDone = null;
     m.hidden = true;
+    m.classList.remove("held");
+    d.style.top = d.style.maxHeight = "";
     m.classList.remove("out");
     d.replaceChildren();
     modalFormBase = "";
@@ -8544,6 +8803,9 @@ function drawEditor(p, presetID) {
   };
   if (p && !p.account && !custom) idField();
   let fillEndpoints = () => {};
+  // what a pasted curl command fills beyond the key (curlOf): a custom
+  // provider's Base URL and its API, and a new one's models
+  let curlBase = null, curlModel = null;
   // a URL typed and not saved that a protocol switch carried to another
   // protocol: the protocol it was typed for, and the URL as typed
   let carried = null;
@@ -8635,6 +8897,12 @@ function drawEditor(p, presetID) {
       showApi(v || draft.api);
       draft.onModelPrefs?.(); // the APIs a model can be given follow the URLs
     };
+    curlBase = (api, base) => {
+      carried = null;
+      draft[apiField[api]] = base;
+      showApi(api);
+      draft.onModelPrefs?.();
+    };
     // Detect asks OpenAI's, Anthropic's and Gemini's APIs (#1346)
     urlWrap.append(detectAPIs(p, () => url.value, useDetected));
     ed.append(...field("Base URL", urlWrap));
@@ -8650,6 +8918,17 @@ function drawEditor(p, presetID) {
     pcb.onchange = () => { draft.pinUpstream = pcb.checked; };
     return field(t("Upstream"), ptk, t("Cline serves a model from any host its gateway picks; pinned, a request for a DeepSeek model goes only to DeepSeek, which keeps its prompt cache, and fails when DeepSeek can't take it"));
   };
+
+  // the settings few need — headers, proxy, limits, windows, fallback —
+  // folded under Advanced, out of the way of the key and the models: open
+  // when one of them is set, or as it was left in this editor
+  const adv = el("details", "more advanced");
+  adv.open = advanced && advanced.of === editing ? advanced.open : advancedSet(draft, p);
+  const of = editing;
+  adv.onfold = (open) => { advanced = { of, open }; };
+  adv.append(el("summary", "", t("Advanced")));
+  const advIn = el("div", "inner");
+  adv.append(advIn);
 
   if (p?.account) {
     // the sign-in belongs to the agent; magpie only borrows it
@@ -8670,24 +8949,25 @@ function drawEditor(p, presetID) {
     // a subscription's window too: Codex's backend says 272K for models
     // that take 872K (#120)
     const cx = input(draft.contexts || "", t("e.g. 128k · or gpt-6=1m, comma separated"));
-    ed.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
-    ed.append(...outputField());
-    ed.append(...compactField());
-    if (p.carriesCompaction) ed.append(...nativeCompactionField(() => true)[0]);
-    ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
+    advIn.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
+    advIn.append(...outputField());
+    advIn.append(...compactField());
+    if (p.carriesCompaction) advIn.append(...nativeCompactionField(() => true)[0]);
+    advIn.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
     const proxies = el("div", "stack");
     proxies.append(proxyPicker());
     const perAccount = subOf(a.agent) ? accountProxyPicker(a) : null;
     if (perAccount) proxies.append(perAccount);
-    ed.append(...field(t("Proxy"), proxies));
-    ed.append(...concurrencyField(p));
-    ed.append(...priceRateField());
-    if (p.cline) ed.append(...upstreamField());
+    advIn.append(...field(t("Proxy"), proxies));
+    advIn.append(...concurrencyField(p));
+    advIn.append(...priceRateField());
+    if (p.cline) advIn.append(...upstreamField());
     ed.append(...pluginOptionsField(subOf(a.agent)));
     // a plugin's provider is reached inside magpie: its plugin:// URLs go
     // nowhere to show or test
     const urls = [p.chat, p.responses, p.anthropic].filter(Boolean);
     if (urls.length && !urls.some((u) => u.startsWith("plugin://"))) ed.append(...field(t("Endpoints"), renderEndpoints(p, p)));
+    ed.append(adv);
     const bar = el("div", "bar");
     // removing only hides it from magpie; the agent stays signed in
     const del = el("button", "text danger", t("Remove"));
@@ -8699,17 +8979,17 @@ function drawEditor(p, presetID) {
     const saveBtn = el("button", "text primary", t("Save"));
     saveBtn.onclick = () => {
       const cx = parseContexts(draft.contexts || "");
-      if (cx.error) return editorError(t("Context window: {v} is not a length like 128k or 1m", { v: cx.error }), "warn");
+      if (cx.error) { shown(ed.querySelector("input.contexts"))?.focus({ preventScroll: true }); return editorError(t("Context window: {v} is not a length like 128k or 1m", { v: cx.error }), "warn"); }
       const ox = parseContexts(draft.outputs || "");
       if (ox.error) return outputError(ed, ox.error);
       const cpx = parseContexts(draft.compacts || "");
       if (cpx.error) return compactError(ed, cpx.error);
       const proxy = proxyOfDraft();
-      if (proxy === null) { ed.querySelector(".proxy-url")?.focus(); return editorError(t("Proxy: type its address, like http://127.0.0.1:7890"), "warn"); }
+      if (proxy === null) { shown(ed.querySelector(".proxy-url"))?.focus({ preventScroll: true }); return editorError(t("Proxy: type its address, like http://127.0.0.1:7890"), "warn"); }
       const own = accountProxiesOfDraft();
       if (own.missing) {
         const line = [...ed.querySelectorAll(".acct-proxy")].find((x) => x.dataset.user.toLowerCase() === own.missing);
-        line?.querySelector(".proxy-url")?.focus({ preventScroll: true });
+        shown(line?.querySelector(".proxy-url"))?.focus({ preventScroll: true });
         return editorError(t("Proxy of {user}: type its address, like http://127.0.0.1:7890", { user: line?.dataset.user || own.missing }), "warn");
       }
       const maxConcurrency = concurrencyOfDraft();
@@ -8790,7 +9070,29 @@ function drawEditor(p, presetID) {
     keyCount.title = n > 1 ? t("The first is tried first; the other {n} are added to its accounts", { n: n - 1 }) : "";
   };
   key.oninput = () => { draft.key = key.value; countKeys(); };
+  // a curl command from a vendor's docs pasted into the key or the Base URL
+  // fills the form (@mark_li21 on X), saying what it took; a key it only
+  // stands for is left out, and the key's box is where to paste one
+  const fromCurl = (e) => {
+    const c = curlOf(e.clipboardData?.getData("text") || "");
+    if (!c) return false;
+    e.preventDefault();
+    const took = [], notes = [];
+    if (curlBase && c.api) { curlBase(c.api, c.base); took.push(t("Base URL") + " (" + t(API_NAMES[c.api]) + ")"); }
+    if (c.key) { key.value = draft.key = c.key; countKeys(); took.push(t("API key")); }
+    if (curlModel && c.model) { curlModel(c.model); took.push(t("model {model}", { model: c.model })); }
+    if (took.length) notes.push(t("Filled in from the curl command: {what}.", { what: took.join(" · ") }));
+    if (curlBase && !c.api) notes.push(t("Its URL isn't an address ending in /chat/completions, /messages or /responses: type the base URL."));
+    if (curlBase && c.urlHole) notes.push(t("Replace {part} in the base URL.", { part: c.urlHole }));
+    if (c.placeholder) notes.push(t("Its key, {key}, only stands for one: paste your own API key.", { key: c.placeholder }));
+    if (!c.key) shown(key)?.focus({ preventScroll: true });
+    editorError(notes.join(" "), "note");
+    return true;
+  };
+  // not fromCurl itself: an on-handler giving back false cancels the paste
+  if (url) url.onpaste = (e) => { fromCurl(e); };
   key.onpaste = (e) => {
+    if (fromCurl(e)) return;
     const keys = splitKeys(e.clipboardData?.getData("text") || "");
     if (keys.length < 2) return;
     e.preventDefault();
@@ -8867,21 +9169,21 @@ function drawEditor(p, presetID) {
   // accounts returned above use the agent's own authentication headers.
   if (custom) {
     if (!draft.headers.length) draft.headers.push(["", ""]);
-    ed.append(...field(t("Headers"), headerEditor(), t("Extra HTTP headers sent to the vendor, applied after auth. For gateways that need a private scheme.")));
+    advIn.append(...field(t("Headers"), headerEditor(), t("Extra HTTP headers sent to the vendor, applied after auth. For gateways that need a private scheme.")));
   } else {
-    ed.append(...field(t("Headers"), headerEditor(pr?.headerHints || []), t("Optional headers sent with every request to {p}, applied after auth.", { p: pr?.name || p?.name })));
+    advIn.append(...field(t("Headers"), headerEditor(pr?.headerHints || []), t("Optional headers sent with every request to {p}, applied after auth.", { p: pr?.name || p?.name })));
   }
   // and JSON fields of the user's own for each request's body (#1604)
-  ed.append(...field(t("Extra body"), extraBodyEditor(), t("JSON fields added to the body of every request to the vendor. A field the request has already is kept; write \"!name\" to replace it. ${sessionId} is the conversation's id.")));
+  advIn.append(...field(t("Extra body"), extraBodyEditor(), t("JSON fields added to the body of every request to the vendor. A field the request has already is kept; write \"!name\" to replace it. ${sessionId} is the conversation's id.")));
   const proxies = el("div", "stack");
   proxies.append(proxyPicker());
   const perKey = keyProxyPicker(p);
   if (perKey) proxies.append(perKey);
-  ed.append(...field(t("Proxy"), proxies));
-  ed.append(...concurrencyField(p));
-  ed.append(...priceRateField());
+  advIn.append(...field(t("Proxy"), proxies));
+  advIn.append(...concurrencyField(p));
+  advIn.append(...priceRateField());
 
-  if (p?.cline || (isNew && pr?.id === "clinepass")) ed.append(...upstreamField());
+  if (p?.cline || (isNew && pr?.id === "clinepass")) advIn.append(...upstreamField());
 
   // a relay in front of Anthropic's or OpenAI's API searches the web as
   // they do, which magpie can't tell from its host (#359): a client's web
@@ -8893,7 +9195,7 @@ function drawEditor(p, presetID) {
     const row = field(t("Web search"), stk, t("For a relay in front of Anthropic's or OpenAI's own API: Claude Code's WebSearch and Codex's web_search go to it as they were sent, not through magpie's search. magpie doesn't automatically search with it for other models, but you can name it as the searcher."));
     showSearch = () => { for (const e of row) e.style.display = searchable() ? "" : "none"; };
     showSearch();
-    ed.append(...row);
+    advIn.append(...row);
   }
 
   // which header the key goes in on a third-party Anthropic API: both by
@@ -8916,7 +9218,7 @@ function drawEditor(p, presetID) {
     const row = field(t("Key header"), seg, t("Which header the API key goes in on the Anthropic API. Most services take both; pick one for a service that refuses the two together. magpie also switches to one by itself when a service says so."));
     showAuth = () => { for (const e of row) e.style.display = twoKeyHeaders() ? "" : "none"; };
     showAuth();
-    ed.append(...row);
+    advIn.append(...row);
   }
 
   // a coding plan that serves only agents it names knows them by their
@@ -8928,7 +9230,7 @@ function drawEditor(p, presetID) {
   if (uaPassable()) {
     const [utk, ucb] = tick(t("Send the agent's own User-Agent"), !!draft.passUserAgent);
     ucb.onchange = () => { draft.passUserAgent = ucb.checked; };
-    ed.append(...field(t("User-Agent"), utk, t("For a plan that serves only the coding agents it names: each request goes with the User-Agent the agent sent (pi, OpenCode, Claude Code…), not magpie's. Requests magpie makes itself, and ones the agent sent without one, still go as magpie. A User-Agent set in Headers above always wins.")));
+    advIn.append(...field(t("User-Agent"), utk, t("For a plan that serves only the coding agents it names: each request goes with the User-Agent the agent sent (pi, OpenCode, Claude Code…), not magpie's. Requests magpie makes itself, and ones the agent sent without one, still go as magpie. A User-Agent set in Headers above always wins.")));
   }
 
   // a model on this computer or the local network (Ollama, LM Studio, a
@@ -8943,7 +9245,7 @@ function drawEditor(p, presetID) {
     const row = field(t("Redaction"), ltk, t("For a model running on this computer or your local network: secrets, personal data and your masked words go to it as written. Leave it off for a local relay or proxy that passes requests on to a vendor."));
     showLocal = () => { for (const e of row) e.style.display = onLAN() ? "" : "none"; };
     showLocal();
-    ed.append(...row);
+    advIn.append(...row);
   }
 
   // a provider the user added whose server has a certificate nothing
@@ -8992,7 +9294,7 @@ function drawEditor(p, presetID) {
       // make it or unmake it
       ed.addEventListener("input", () => balFix.refresh());
     }
-    ed.append(label, wrap);
+    advIn.append(label, wrap);
   }
 
   // StepFun tells a Step Plan's 5-hour, weekly and credit windows only to
@@ -9108,20 +9410,25 @@ function drawEditor(p, presetID) {
     // the window agents are told a model has, over what the vendor or
     // models.dev says: one for all of them, and model=size for one
     const cx = input(draft.contexts || "", t("e.g. 128k · or gpt-6=1m, comma separated"));
-    if (!decideOnly(p || pr)) ed.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
-    if (!decideOnly(p || pr)) ed.append(...outputField());
+    if (!decideOnly(p || pr)) advIn.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
+    if (!decideOnly(p || pr)) advIn.append(...outputField());
     if (!decideOnly(p || pr)) {
-      ed.append(...compactField());
+      advIn.append(...compactField());
       const [row, refresh] = nativeCompactionField(carriesCompaction);
-      ed.append(...row);
+      advIn.append(...row);
       showCompaction = refresh;
     }
   }
-  if (p && !decideOnly(p)) ed.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
+  if (p && !decideOnly(p)) advIn.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
   else if (custom) {
     const ex = input(draft.extra.join(", "), t("model ids, comma separated · e.g. gpt-5.5, claude-sonnet-5"));
     const pick = addFormModels(ex);
     ex.oninput = () => { draft.extra = typedIds(ex.value); pick.draw(); };
+    curlModel = (id) => {
+      if (!draft.extra.includes(id)) draft.extra = [...draft.extra, id];
+      ex.value = draft.extra.join(", ");
+      pick.draw();
+    };
     ed.append(...field(t("Models"), pick.box, t("Optional: Fetch models to pick from the vendor's list, or type ids; none picked, magpie asks for the list after saving.")));
   }
 
@@ -9172,6 +9479,7 @@ function drawEditor(p, presetID) {
     refreshEndpoints();
     ed.append(...row);
   }
+  ed.append(adv);
 
   if (custom) {
     const more = el("details", "more");
@@ -9277,7 +9585,7 @@ function drawEditor(p, presetID) {
     const body = { id: p ? slug(draft.id) || p.id : draft.id, from: p?.id, name: draft.name, preset: draft.preset, key: draft.key || "", chat: draft.chat, responses: draft.responses, anthropic: draft.anthropic, gemini: (draft.gemini || "").trim(), catalog: draft.catalog, models: p ? chosenIds() : draft.extra, headers: headersOf(draft.headers), new: isNew };
     if (isNew && draft.copyOf) body.copyOf = draft.copyOf;
     const xb = extraBodyOf(draft.extraBody);
-    if (xb.error) { ed.querySelector(".extra-body textarea")?.focus({ preventScroll: true }); return editorError(t("Extra body: {why}", { why: xb.error }), "warn"); }
+    if (xb.error) { shown(ed.querySelector(".extra-body textarea"))?.focus({ preventScroll: true }); return editorError(t("Extra body: {why}", { why: xb.error }), "warn"); }
     body.extraBody = xb.value;
     if (decides || custom) body.decide = (custom && draft.api !== "decide" && !p?.decide ? "" : draft.decide || "").trim();
     if ((body.decide || "").includes(WORKSPACE)) { ed.querySelector(".workspace-id")?.focus({ preventScroll: true }); return editorError(t("Give the workspace ID your API key belongs to, or pick the Token Plan"), "warn"); }
@@ -9300,7 +9608,7 @@ function drawEditor(p, presetID) {
     if (!decideOnly(p || pr)) body.nativeCompaction = !!draft.nativeCompaction && carriesCompaction();
     body.passUserAgent = !!draft.passUserAgent && uaPassable();
     const cx = parseContexts(draft.contexts || "");
-    if (cx.error) return editorError(t("Context window: {v} is not a length like 128k or 1m", { v: cx.error }), "warn");
+    if (cx.error) { shown(ed.querySelector("input.contexts"))?.focus({ preventScroll: true }); return editorError(t("Context window: {v} is not a length like 128k or 1m", { v: cx.error }), "warn"); }
     body.contexts = cx.map;
     if (!decideOnly(p || pr)) {
       const ox = parseContexts(draft.outputs || "");
@@ -9311,12 +9619,12 @@ function drawEditor(p, presetID) {
       body.compacts = cpx.map;
     }
     body.proxy = proxyOfDraft();
-    if (body.proxy === null) { ed.querySelector(".proxy-url")?.focus(); return editorError(t("Proxy: type its address, like http://127.0.0.1:7890"), "warn"); }
+    if (body.proxy === null) { shown(ed.querySelector(".proxy-url"))?.focus({ preventScroll: true }); return editorError(t("Proxy: type its address, like http://127.0.0.1:7890"), "warn"); }
     if (perKey) {
       const own = accountProxiesOfDraft();
       if (own.missing) {
         const line = ed.querySelector(`.acct-proxy[data-key="${own.missing}"]`);
-        line?.querySelector(".proxy-url")?.focus({ preventScroll: true });
+        shown(line?.querySelector(".proxy-url"))?.focus({ preventScroll: true });
         return editorError(t("Proxy of {user}: type its address, like http://127.0.0.1:7890", { user: line?.querySelector(".who")?.textContent || own.missing }), "warn");
       }
       body.accountProxies = own.map;
@@ -9381,6 +9689,7 @@ function contextsText(cx) {
 // GPT-6: 272K said, 872K taken), their own most: sizes nobody remembers
 // (#120). The pick matching what is typed is lit.
 function contextPicks(p, cx) {
+  cx.classList.add("contexts");
   const size = (n) => contextsText({ "*": n });
   const picks = [128e3, 200e3, 256e3, 400e3, 512e3, 1e6].map((n) => ({ label: size(n).toUpperCase(), value: size(n) }));
   // above the window its vendor says, not the one set here: a model set to
@@ -9493,12 +9802,12 @@ function compactField() {
 }
 
 function compactError(ed, v) {
-  ed.querySelector("input.compacts")?.focus({ preventScroll: true });
+  shown(ed.querySelector("input.compacts"))?.focus({ preventScroll: true });
   return editorError(t("Compact at: {v} is not a number of tokens like 272k", { v }), "warn");
 }
 
 function outputError(ed, v) {
-  ed.querySelector("input.outputs")?.focus({ preventScroll: true });
+  shown(ed.querySelector("input.outputs"))?.focus({ preventScroll: true });
   return editorError(t("Max output: {v} is not a number of tokens like 32k", { v }), "warn");
 }
 
@@ -10504,11 +10813,15 @@ function renderModels(p) {
   // saved on its own, every one rewriting the agents' files, so picking a
   // model's levels lagged a click behind (ARNO on Discord).
   const drawNames = () => {
-    // drawn again, the list stays where it was scrolled to
-    const top = names.scrollTop;
+    // drawn again, the list stays where it was scrolled to, and as tall
+    // while its rows go back in: a row measured on the way (its API's
+    // slider) lays the editor out with the list empty, and WebKit pulls
+    // the editor's scroll up to fit, the button just clicked moving away
+    const top = names.scrollTop, tall = names.offsetHeight;
     names.replaceChildren();
     names.hidden = naming !== p.id;
     if (names.hidden) return;
+    names.style.minHeight = tall + "px";
     // its own quiet title and a Fold where it opened (Hu9956, #868: the
     // only way to close it was the button under the list, out of sight
     // once it was open, and the editor read as one long run of settings)
@@ -10831,6 +11144,7 @@ function renderModels(p) {
       drawReset();
       names.append(row);
     }
+    names.style.minHeight = "";
     names.scrollTop = top;
   };
   // what the provider serves, said in so many words (#1831, kchen0x: with
@@ -12764,8 +13078,8 @@ function balanceFix(p) {
           const field = ed?.querySelector(".bal-path");
           if (bal) bal.value = draft.balanceURL;
           if (field) { field.value = draft.balancePath; field.placeholder = balanceFieldOf(draft.balanceURL); }
-          const more = ed?.querySelector("details.more");
-          if (more) more.open = true;
+          // the Balance URL's own fold, not the first one in the editor
+          if (bal) shown(bal);
           box.refresh();
         };
         box.append(use);
@@ -13920,6 +14234,15 @@ function protoPicker(p, value, onChange) {
   return pill;
 }
 
+// hoverFocus: an item the pointer moves onto takes the focus. A list
+// redrawn under a still pointer (a search narrowing it) gets a mouseenter
+// too, which took the focus out of the search mid-word (#2439); one where
+// the last mousemove was is a redraw's (mouseenter comes before its move).
+let pointerAt = "";
+addEventListener("mousemove", (e) => { pointerAt = e.screenX + "," + e.screenY; }, true);
+function hoverFocus(b) {
+  b.onmouseenter = (e) => { if (e.screenX + "," + e.screenY !== pointerAt) b.focus({ preventScroll: true }); };
+}
 let protoMenu = null;
 function closeProtoMenu() {
   if (!protoMenu) return;
@@ -14018,7 +14341,7 @@ function openProtoMenu(anchor, opts, value, choose, head = "Protocol this key sp
         b.focus({ preventScroll: true });
       }
     };
-    b.onmouseenter = () => b.focus({ preventScroll: true });
+    hoverFocus(b);
     box.append(b);
     return b;
   });
@@ -14115,6 +14438,87 @@ function respellURL(u, api) {
   return /\/v\d+[a-z]*$/.test(u) || !/^https?:\/\/[^/]+$/.test(u) ? u : u + "/v1";
 }
 
+// curlOf reads a curl command pasted whole, as a vendor's docs show it
+// (@mark_li21 on X: 能支持通过curl例子直接导入provider不？), into what a
+// provider's editor takes: the API its URL's endpoint names (…/chat/
+// completions OpenAI's chat, …/messages Anthropic's, …/responses OpenAI's
+// Responses) and the base URL that API is asked at (respellURL), the key
+// from Authorization: Bearer, x-api-key or api-key, and the model of its
+// JSON body. Lines may be joined by \ (sh), ^ (cmd) or ` (PowerShell). A
+// key that stands for one ($OPENAI_API_KEY, %KEY%, <API_KEY>, YOUR_API_KEY)
+// is no key: it is given back as placeholder. null for text that isn't a
+// curl command.
+function curlOf(text) {
+  let s = String(text || "").trim();
+  const head = /^curl(?:\.exe)?(?=\s)/i.exec(s);
+  if (!head) return null;
+  const cmd = /\^[ \t]*\r?\n/.test(s), ps = /`[ \t]*\r?\n/.test(s) || /^curl\.exe/i.test(s);
+  s = s.slice(head[0].length).replace(/(?:\\|\^|`)[ \t]*\r?\n/g, " ");
+  // the words as the shell hands them to curl: quotes taken off, escapes read
+  const words = [];
+  let w = null;
+  for (let i = 0; i < s.length;) {
+    const c = s[i];
+    if (/\s/.test(c)) { if (w !== null) words.push(w); w = null; i++; continue; }
+    w ??= "";
+    if (c === "'") {
+      // PowerShell doubles a quote inside single quotes
+      let j = i + 1;
+      for (;;) {
+        const k = s.indexOf("'", j);
+        if (k < 0) { w += s.slice(j); i = s.length; break; }
+        if (ps && s[k + 1] === "'") { w += s.slice(j, k) + "'"; j = k + 2; continue; }
+        w += s.slice(j, k); i = k + 1; break;
+      }
+    } else if (c === '"') {
+      for (i++; i < s.length && s[i] !== '"'; i++) {
+        const esc = (s[i] === "\\" && /["\\$`]/.test(s[i + 1] || "")) || (ps && s[i] === "`");
+        if (esc) i++;
+        w += s[i] ?? "";
+      }
+      i++;
+    } else if ((c === "\\" && !cmd && !ps) || (c === "^" && cmd)) { w += s[i + 1] ?? ""; i += 2; }
+    else { w += c; i++; }
+  }
+  if (w !== null) words.push(w);
+  // the options curl reads a value after; the others stand alone
+  const valued = /^(-[HdXuoAeFbcmT]|--(header|data|data-raw|data-binary|data-ascii|data-urlencode|json|request|url|user|output|user-agent|referer|form|cookie|max-time|connect-timeout|proxy|upload-file|retry|cert|key|cacert))$/;
+  let url = "", body = "";
+  const headers = [];
+  for (let i = 0; i < words.length; i++) {
+    const x = words[i];
+    let opt = x, val = null;
+    if (/^-[Hd]./.test(x)) { opt = x.slice(0, 2); val = x.slice(2); }
+    else if (valued.test(x)) val = words[++i] ?? "";
+    else if (x.startsWith("-")) continue;
+    else { if (!url) url = x; continue; }
+    if (opt === "-H" || opt === "--header") headers.push(val);
+    else if (opt === "--url") url = val;
+    else if (/^(-d|--data(-raw|-binary|-ascii)?|--json)$/.test(opt) && !val.startsWith("@")) body = val;
+  }
+  const out = { url, api: "", base: "", urlHole: "", key: "", placeholder: "", model: "" };
+  const at = /^(https?:\/\/[^?#]*?)\/*(\/chat\/completions|\/messages|\/responses)\/*(?:[?#].*)?$/i.exec(url);
+  if (at) {
+    out.api = { "/chat/completions": "openai", "/messages": "anthropic", "/responses": "responses" }[at[2].toLowerCase()];
+    out.base = respellURL(at[1], out.api);
+    out.urlHole = (/\{[^}]*\}|<[^>]*>|\$\{?\w+\}?|%\w+%/.exec(out.base) || [""])[0];
+  }
+  for (const h of headers) {
+    const m = /^\s*(authorization|x-api-key|api-key)\s*:\s*(.*?)\s*$/i.exec(h);
+    if (!m) continue;
+    const v = m[1].toLowerCase() === "authorization" ? m[2].replace(/^bearer\s+/i, "") : m[2];
+    if (!v) continue;
+    if (/^\$|^%\w+%$|^<.*>$|^\{\{.*\}\}$|^\[.*\]$|your[_-]?|api[_-]?key|x{6,}|\.\.\.|…/i.test(v)) out.placeholder = v;
+    else out.key = v;
+    break;
+  }
+  // a body for PowerShell 5 often escapes its quotes for curl.exe: '{\"model\": …}'
+  for (const b of [body, body.replace(/\\"/g, '"')]) {
+    try { const j = JSON.parse(b); if (typeof j?.model === "string") out.model = j.model.trim(); break; } catch {}
+  }
+  return out;
+}
+
 // renderMove: a built-in subscription a community plugin can run — which
 // of the two runs it, and the way to the other. Accounts, models and the
 // agents on them stay as they are either way.
@@ -14138,6 +14542,10 @@ function moveWhy(m, p) {
 // community plugin, and the move between them. The editor stays open
 // through it: the button says what it is doing, a failure is said under
 // it, and on success the field turns over where the reader is.
+// moveSaid keeps both through a redraw mid-move (an allowance landing):
+// drawn from the provider alone, the button took presses again and the
+// failure was said into a field drawn over.
+const moveSaid = {}; // provider id → { busy } or { why }
 function renderMove(p) {
   const m = p.move;
   const box = el("div", "stack move");
@@ -14149,15 +14557,21 @@ function renderMove(p) {
   const why = el("div", "move-why");
   why.setAttribute("role", "alert");
   const say = (text) => { why.textContent = text; why.hidden = !text; };
-  const failed = m.state === "failed" && (m.why || m.error);
-  say(failed ? t("It stays built-in: {error}", { error: moveWhy(m, p) }) : "");
+  // a failure said stands only while the move's state is the one it failed
+  // from: once a move lands another way (the hourly hand-over), it's gone
+  if (moveSaid[p.id]?.why && moveSaid[p.id].state !== m.state) delete moveSaid[p.id];
+  const going = moveSaid[p.id];
+  const failed = going?.why || m.state === "failed" && (m.why || m.error) && t("It stays built-in: {error}", { error: moveWhy(m, p) });
+  say(failed || "");
   const idle = () => onPlugin ? t("Use the built-in again") : failed ? t("Try again") : t("Move to the plugin");
-  const b = el("button", "text action", idle()); // a button, not a line of text: it changes what runs the subscription
+  const b = el("button", "text action", going?.busy || idle()); // a button, not a line of text: it changes what runs the subscription
+  b.disabled = b.classList.toggle("busy", !!going?.busy);
   b.onclick = async () => {
     b.classList.add("busy");
     b.disabled = true;
     say("");
     b.textContent = onPlugin ? t("Moving back…") : t("Installing the plugin and checking each account…");
+    moveSaid[p.id] = { busy: b.textContent };
     try {
       // the models as the editor shows them picked, when changed and not
       // saved: the reason a move fails says to untick one there (noting_ever)
@@ -14165,6 +14579,7 @@ function renderMove(p) {
       const was = pickedOf(p);
       const changed = picks && (picks.length !== was.length || picks.some((id) => !was.includes(id)));
       providers = await api("provider/" + (onPlugin ? "moveback" : "move"), changed ? { id: p.id, models: picks } : { id: p.id });
+      delete moveSaid[p.id];
       draft = null; // the provider changed under it
       renderProviders(); // the editor stays open, turned over, where it was
       const now = providers.providers.find((x) => x.id === p.id);
@@ -14178,7 +14593,9 @@ function renderMove(p) {
       state = await api("state");
       renderAgents();
     } catch (e) {
-      say(onPlugin ? e.message : t("It stays built-in: {error}", { error: moveWhy({ why: e.why, error: e.message }, p) }));
+      moveSaid[p.id] = { state: m.state, why: onPlugin ? e.message : t("It stays built-in: {error}", { error: moveWhy({ why: e.why, error: e.message }, p) }) };
+      if (!box.isConnected) return renderProviders();
+      say(moveSaid[p.id].why);
       b.classList.remove("busy");
       b.disabled = false;
       b.textContent = onPlugin ? t("Use the built-in again") : t("Try again");
@@ -17825,7 +18242,7 @@ function openSessCombo(anchor, all, opts, value, choose, head) {
     b.title = o.v;
     b.append(tick, words);
     b.onclick = (e) => { e.stopPropagation(); closeProtoMenu(); choose(o.v); };
-    b.onmouseenter = () => b.focus({ preventScroll: true });
+    hoverFocus(b);
     return b;
   };
   const draw = () => {
@@ -18279,8 +18696,8 @@ function setSetTab(tab, remember) {
   tabKeys(tabs, "button[data-set]");
   // the tabs held at the top (app.css, #2396): a hairline under them once
   // the page has scrolled beneath, as the Library's
-  const sv = $("#view-settings");
-  sv.addEventListener("scroll", () => sv.querySelector(":scope > .set-head").classList.toggle("stuck", sv.scrollTop > 0), { passive: true });
+  const sv = $("#view-settings"), head = sv.querySelector(":scope > .set-head");
+  sv.addEventListener("scroll", () => head.classList.toggle("stuck", sv.scrollTop > 0), { passive: true });
   // opened on a part (a reload, a link): that part, and remembered
   if (mode === "window" && params.get("view") === "settings" && SET_TABS.includes(params.get("tab"))) {
     setTab = params.get("tab");

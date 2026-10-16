@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -381,36 +384,139 @@ func TestShortenedIDGoesUnsigned(t *testing.T) {
 	}
 }
 
-// The reporter's case through the gateway: Gemini's call comes back to the
-// client with its signature in the id, the client keeps 40 characters of
-// it, and Gemini is sent skip_thought_signature_validator for the call.
+// The reporter's case through the gateway: a client keeps 40 characters
+// of a call's id (#1536). Gemini's call id with a reference to its
+// signature fits in 40 now (#2411), so Gemini gets the signature back;
+// cut shorter, the call is sent with skip_thought_signature_validator.
 func TestFortyCharacterIDThroughGateway(t *testing.T) {
 	sig := sigFixtures()[1].sig
-	up, bodies := geminiSigUpstream(t, sig, true)
-	s := geminiSigProvider(t, up.URL)
-	first := sigPost(t, s, "/v1/chat/completions", `{"model":"google/gemini-3.8-flash","stream":true,"messages":[{"role":"user","content":"list files"}],
+	for _, c := range []struct {
+		keep int
+		want string
+	}{{40, sig}, {30, skipSignature}} {
+		up, bodies := geminiSigUpstream(t, sig, true)
+		s := geminiSigProvider(t, up.URL)
+		first := sigPost(t, s, "/v1/chat/completions", `{"model":"google/gemini-3.8-flash","stream":true,"messages":[{"role":"user","content":"list files"}],
 		"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}`)
-	i := strings.Index(first, `"id":"function-call-7`)
-	if i < 0 {
-		t.Fatalf("no call in the reply:\n%s", first)
-	}
-	id := first[i+len(`"id":"`):]
-	id = id[:strings.IndexByte(id, '"')]
-	if len(id) <= 40 {
-		t.Fatalf("the id %q has no signature to cut", id)
-	}
-	id = id[:40]
-	out := sigPost(t, s, "/v1/chat/completions", `{"model":"google/gemini-3.8-flash","stream":true,"messages":[
+		i := strings.Index(first, `"id":"function-call-7`)
+		if i < 0 {
+			t.Fatalf("no call in the reply:\n%s", first)
+		}
+		id := first[i+len(`"id":"`):]
+		id = id[:strings.IndexByte(id, '"')]
+		if len(id) > 40 || len(id) <= c.keep-10 {
+			t.Fatalf("the id %q is %d characters", id, len(id))
+		}
+		id = id[:min(len(id), c.keep)]
+		out := sigPost(t, s, "/v1/chat/completions", `{"model":"google/gemini-3.8-flash","stream":true,"messages":[
 		{"role":"user","content":"list files"},
 		{"role":"assistant","content":null,"tool_calls":[{"id":"`+id+`","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},
 		{"role":"tool","tool_call_id":"`+id+`","content":"a.txt"}],
 		"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}`)
-	if !strings.Contains(out, "done") {
-		t.Fatalf("the second turn: %s", out)
+		if !strings.Contains(out, "done") {
+			t.Fatalf("kept %d, the second turn: %s", c.keep, out)
+		}
+		msgs := (*bodies)[len(*bodies)-1]["messages"].([]any)
+		call := msgs[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+		if got := call["extra_content"].(map[string]any)["google"].(map[string]any)["thought_signature"]; got != c.want {
+			t.Fatalf("kept %d: Gemini was sent the call %v", c.keep, call)
+		}
 	}
-	msgs := (*bodies)[len(*bodies)-1]["messages"].([]any)
-	call := msgs[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
-	if got := call["extra_content"].(map[string]any)["google"].(map[string]any)["thought_signature"]; got != skipSignature {
-		t.Fatalf("Gemini was sent the call %v", call)
+}
+
+// #2411 (liangxyz): a signature of several KB made a call's id as long,
+// and LobeHub's PostgreSQL index (2704 bytes) turned the row away. The id
+// now refers to the signature magpie keeps: 6.4KB, the size in the
+// report, gives an id of 64 characters at most, and the signature comes
+// back whole.
+func TestLongSignatureGivesShortID(t *testing.T) {
+	long := make([]byte, 4800)
+	for i := range long {
+		long[i] = byte(i*131 + 7)
+	}
+	sig := base64.StdEncoding.EncodeToString(long)
+	for _, own := range []string{"function-call-7", "call_811277", ""} {
+		id := signedID(own, sig)
+		if len(id) > 64 {
+			t.Fatalf("signedID(%q, %d bytes) is %d characters: %q", own, len(sig), len(id), id)
+		}
+		got, back := unsignedID(id)
+		if back != sig || (own != "" && got != own) {
+			t.Fatalf("%q came back as %q with %d bytes of signature", id, got, len(back))
+		}
+	}
+}
+
+// A reference magpie no longer has (pruned, or a folder from another
+// computer) or whose file was changed reads as no signature, so the call
+// goes to Gemini unsigned rather than with someone else's signature.
+func TestKeptSignatureGoneOrChanged(t *testing.T) {
+	sig := sigFixtures()[1].sig
+	id := signedID("function-call-7", sig)
+	if !strings.Contains(id, sigMark+sigKept) {
+		t.Fatalf("the signature wasn't kept: %q", id)
+	}
+	key := id[strings.LastIndex(id, sigEnd)+len(sigEnd):]
+	path := filepath.Join(sigDir(), key)
+	if err := os.WriteFile(path, []byte(sigFixtures()[0].sig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, back := unsignedID(id); got != id || back != "" {
+		t.Fatalf("a changed file read as %q, %d bytes", got, len(back))
+	}
+	os.Remove(path)
+	if got, back := unsignedID(id); got != id || back != "" {
+		t.Fatalf("a gone file read as %q, %d bytes", got, len(back))
+	}
+	body := []byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"` + id + `","type":"function","function":{"name":"bash","arguments":"{}"}}]}]}`)
+	if out := string(chatCallSignatures(body, true)); !strings.Contains(out, `"thought_signature":"`+skipSignature+`"`) {
+		t.Fatalf("relayed as %s", out)
+	}
+	// written again, it is read again
+	if again := signedID("function-call-7", sig); again != id {
+		t.Fatalf("the same signature has a new id %q", again)
+	}
+	if _, back := unsignedID(id); back != sig {
+		t.Fatalf("a signature written again read as %d bytes", len(back))
+	}
+}
+
+// Where magpie can't keep a signature (its folder can't be written), the
+// id carries the signature itself, as before #2411.
+func TestUnkeptSignatureRidesInTheID(t *testing.T) {
+	dir := sigDir
+	t.Cleanup(func() { sigDir = dir })
+	blocked := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(blocked, nil, 0o600)
+	sigDir = func() string { return filepath.Join(blocked, "gemini-signatures") }
+	sig := sigFixtures()[1].sig
+	id := signedID("function-call-7", sig)
+	if strings.Contains(id, sigMark+sigKept) {
+		t.Fatalf("kept in a folder that can't be written: %q", id)
+	}
+	if got, back := unsignedID(id); got != "function-call-7" || back != sig {
+		t.Fatalf("%q came back as %q, %d bytes", id, got, len(back))
+	}
+}
+
+// A signature not read for sigKeep goes when the folder is next pruned; one
+// read lately stays.
+func TestOldSignaturesPruned(t *testing.T) {
+	tick, dir := sigPruneTick, sigDir
+	t.Cleanup(func() { sigPruneTick, sigDir = tick, dir })
+	folder := t.TempDir()
+	sigPruneTick, sigDir = 0, func() string { return folder }
+	oldID, keptID := signedID("a", sigFixtures()[0].sig), signedID("b", sigFixtures()[1].sig)
+	key := func(id string) string { return filepath.Join(sigDir(), id[strings.LastIndex(id, sigEnd)+len(sigEnd):]) }
+	past := time.Now().Add(-sigKeep - time.Hour)
+	os.Chtimes(key(oldID), past, past)
+	os.Chtimes(key(keptID), past, past)
+	unsignedID(keptID)                // read: kept another sigKeep
+	signedID("c", "c2lnbmF0dXJlLWM=") // a new signature written: the folder is pruned
+	if _, err := os.Stat(key(oldID)); !os.IsNotExist(err) {
+		t.Fatalf("an unread signature stayed: %v", err)
+	}
+	if _, back := unsignedID(keptID); back != sigFixtures()[1].sig {
+		t.Fatal("a signature read lately was pruned")
 	}
 }

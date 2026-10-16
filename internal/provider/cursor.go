@@ -73,7 +73,7 @@ func cursorIdentity() (user, plan string, ok bool) {
 func forgetCursorStatus() {
 	cursorStatus.forget()
 	cursorTok.Lock()
-	cursorTok.at = time.Time{}
+	cursorTok.at, cursorTok.ask = time.Time{}, time.Time{}
 	cursorTok.Unlock()
 }
 
@@ -334,11 +334,14 @@ func cursorAuthFile() string {
 
 // cursorTok is the token cursor-agent keeps in the Keychain as last read,
 // and when: every look at whether Cursor is signed in ran `security`, a
-// plugin's accounts for each build of the providers (#746).
+// plugin's accounts for each build of the providers (#746). ask is when a
+// read could have shown the user a dialog: one the user answered no to is
+// not asked again inside keychainDeniedTTL (#2408).
 var cursorTok struct {
 	sync.Mutex
 	tok string
 	at  time.Time
+	ask time.Time
 }
 
 // cursorTokenTTL is how long a token read from the Keychain is taken as
@@ -354,13 +357,23 @@ func cursorKeychainToken(fresh bool) string {
 	}
 	cursorTok.Lock()
 	defer cursorTok.Unlock()
-	if !fresh && time.Since(cursorTok.at) < cursorTokenTTL {
+	ttl := cursorTokenTTL
+	if cursorTok.tok == "" && time.Since(cursorTok.ask) < keychainDeniedTTL {
+		ttl = keychainDeniedTTL
+	}
+	if !fresh && time.Since(cursorTok.at) < ttl {
 		return cursorTok.tok
 	}
 	out, err := proc.Command("security", "find-generic-password", "-s", "cursor-access-token", "-a", "cursor-user", "-w").Output()
 	cursorTok.tok, cursorTok.at = "", time.Now()
-	if err == nil {
+	switch {
+	case err == nil:
 		cursorTok.tok = strings.TrimSpace(string(out))
+		cursorTok.ask = time.Time{}
+	case keychainDenied(err):
+		cursorTok.ask = cursorTok.at
+	default:
+		cursorTok.ask = time.Time{}
 	}
 	return cursorTok.tok
 }

@@ -12,6 +12,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 const relay = {
   id: "relay", name: "Relay", icon: "generic", chat: "https://relay.example.com/v1", responses: "", anthropic: "", catalog: "",
   models: [{ id: "model-a", name: "Model A", on: true }], agents: [], fallback: [], headers: {},
@@ -77,6 +84,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).click();
+      await unfold(page);
       await page.locator(".editor input.concurrency").waitFor();
       await page.waitForTimeout(300); // the editor drawn again as what it asked for comes in
       return { page, errors, posts };
@@ -123,6 +131,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // emptied again: none set
       await page.locator(".row.provider", { hasText: "Relay" }).click();
+      await unfold(page);
       await box(page).fill("");
       saved = await save(page, posts);
       assert(Object.hasOwn(saved.body, "maxConcurrency"), "an empty field is saved as none, not left out");
@@ -180,6 +189,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       let saved = await save(page, posts);
       assert.equal(saved.body.maxConcurrency, null, "empty follows the plugin");
       await page.locator(".row.provider", { hasText: "Lemon" }).click();
+      await unfold(page);
       await box(page).fill("8");
       saved = await save(page, posts);
       assert.equal(saved.body.maxConcurrency, 8);

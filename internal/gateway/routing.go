@@ -238,6 +238,11 @@ const (
 // (#1359), told apart from what vendors call their errors.
 const loopErrType = usage.LoopErrType
 
+// reloopedError is a try's error once its reasoning was found stuck in a
+// loop before it said anything, and it was let go for the request to ask
+// again (#2436).
+const reloopedError = "the model's reasoning was stuck in a loop before it said anything; asked again"
+
 // proxyDown is the error Go gives when the proxy itself can't be reached,
 // over HTTP (proxyconnect) or SOCKS (socks connect).
 var proxyDown = regexp.MustCompile(`proxyconnect |socks connect `)

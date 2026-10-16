@@ -554,6 +554,8 @@ var (
 	// onChange are told a sign-in or the plugins changed.
 	onChange   []func()
 	onChangeMu sync.Mutex
+	// onChangeNow are run before changed or listed returns (OnChangeNow)
+	onChangeNow []func()
 )
 
 // telling counts the hooks told of a change or of a sign-in (OnChange,
@@ -572,6 +574,19 @@ func init() { telling.Cond = sync.NewCond(&telling.Mutex) }
 func OnChange(f func()) {
 	onChangeMu.Lock()
 	onChange = append(onChange, f)
+	onChangeMu.Unlock()
+}
+
+// OnChangeNow registers f to be run at once when a plugin sign-in, the
+// plugins or their listing change, before anything after it is answered:
+// an "auth" event is read before the reply to the sign-in that saved it,
+// so a look made once the sign-in returns doesn't get what was built
+// before it (#2449). OnChange's are told in the background, where a busy
+// machine may run them after that look. f must be quick: the host's
+// replies wait for it.
+func OnChangeNow(f func()) {
+	onChangeMu.Lock()
+	onChangeNow = append(onChangeNow, f)
 	onChangeMu.Unlock()
 }
 
@@ -605,6 +620,7 @@ func OnListed(f func()) {
 }
 
 func listed() {
+	changedNow()
 	onListedMu.Lock()
 	fs := append([]func(){}, onListed...)
 	onListedMu.Unlock()
@@ -615,11 +631,21 @@ func listed() {
 
 func changed() {
 	forgetProviders()
+	changedNow()
 	onChangeMu.Lock()
 	fs := append([]func(){}, onChange...)
 	onChangeMu.Unlock()
 	for _, f := range fs {
 		tell(f)
+	}
+}
+
+func changedNow() {
+	onChangeMu.Lock()
+	fs := append([]func(){}, onChangeNow...)
+	onChangeMu.Unlock()
+	for _, f := range fs {
+		f()
 	}
 }
 

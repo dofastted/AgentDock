@@ -43,10 +43,15 @@ import (
 const codexKeychainService = "Codex Auth"
 
 // keychain is the system keychain as magpie reaches an item in it. Find
-// gives fs.ErrNotExist for no item; Remove, nil. Tests put a fake in
-// codexKeychain: no test reaches the user's own keychain.
+// gives fs.ErrNotExist for no item; Remove, nil. Stat gives the item's
+// modification date, or fs.ErrNotExist: it reads only attributes, which
+// macOS gives without asking the user (only the secret is behind the
+// item's access list), so a kept read is checked with it instead of read
+// again. Tests put a fake in codexKeychain: no test reaches the user's own
+// keychain.
 type keychain interface {
 	Find(service, account string) ([]byte, error)
+	Stat(service, account string) (string, error)
 	Put(service, account string, secret []byte) error
 	Remove(service, account string) error
 }
@@ -61,11 +66,26 @@ var (
 	secretAuthStorageDefault = runtime.GOOS == "windows"
 )
 
-// keychainWait bounds one `security` run: one waiting on a keychain
-// prompt nobody answers would hold whoever asked.
+// keychainWait bounds a `security` run that puts up no prompt: a Stat, a
+// write, a removal.
 var keychainWait = 10 * time.Second
 
-var errKeychainUnread = errors.New("the keychain didn't give it to magpie (refused, or no answer)")
+// keychainAsk bounds reading the secret, which may put macOS' prompts in
+// front of the user, one after the other: the login keychain's password,
+// then whether `security` may have the item. The user reads and types in
+// that time; under 10s an Allow that took 11–16s failed (#2367,
+// Dony2050). Nobody waits on it all that time (findCodexKeychain).
+var keychainAsk = 2 * time.Minute
+
+var (
+	// errKeychainRefused: `security` exits with errSecAuthFailed (-25293,
+	// exit 51) for Deny or a wrong password, errSecUserCanceled (-128,
+	// exit 128) for Cancel (Security.framework's SecBase.h)
+	errKeychainRefused  = errors.New("macOS's keychain prompt was denied or cancelled")
+	errKeychainNoAnswer = errors.New("macOS's keychain prompt got no answer in time")
+	errKeychainWaiting  = errors.New("magpie is waiting for an answer to macOS's keychain prompt")
+	errKeychainUnread   = errors.New("the keychain didn't give it to magpie")
+)
 
 // securityKeychain is macOS' `security`, as readClaudeKeychainItem and
 // writeClaudeCredential run it. Neither its output nor its arguments go
@@ -73,17 +93,39 @@ var errKeychainUnread = errors.New("the keychain didn't give it to magpie (refus
 type securityKeychain struct{}
 
 func (securityKeychain) Find(service, account string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), keychainWait)
+	ctx, cancel := context.WithTimeout(context.Background(), keychainAsk)
 	defer cancel()
 	out, err := proc.CommandContext(ctx, "security", "find-generic-password", "-s", service, "-a", account, "-w").Output()
 	if err != nil {
-		if keychainItemMissing(err) {
-			return nil, fs.ErrNotExist
-		}
-		return nil, errKeychainUnread
+		return nil, keychainError(ctx, err)
 	}
 	b, _ := keychainText(bytes.TrimSpace(out))
 	return b, nil
+}
+
+// Stat reads the item without -w: its attributes, never its secret, so
+// macOS doesn't ask. Its "mdat" line is the modification date, to the
+// second.
+func (securityKeychain) Stat(service, account string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), keychainWait)
+	defer cancel()
+	out, err := proc.CommandContext(ctx, "security", "find-generic-password", "-s", service, "-a", account).Output()
+	if err != nil {
+		return "", keychainError(ctx, err)
+	}
+	return keychainMdat(out)
+}
+
+// keychainMdat is the "mdat" attribute of `security`'s listing of an item.
+func keychainMdat(out []byte) (string, error) {
+	for line := range bytes.Lines(out) {
+		if _, v, ok := bytes.Cut(line, []byte(`"mdat"<timedate>=`)); ok {
+			if v = bytes.TrimSpace(v); len(v) > 0 {
+				return string(v), nil
+			}
+		}
+	}
+	return "", errors.New("the keychain item has no modification date")
 }
 
 func (securityKeychain) Put(service, account string, secret []byte) error {
@@ -104,7 +146,23 @@ func (securityKeychain) Remove(service, account string) error {
 	return nil
 }
 
-// keychainItemMissing: `security` exits 44 for errSecItemNotFound.
+// keychainError says what a failed `security` read was: no item, the
+// prompt refused, no answer in time, or something else.
+func keychainError(ctx context.Context, err error) error {
+	var exit *exec.ExitError
+	switch {
+	case keychainItemMissing(err):
+		return fs.ErrNotExist
+	case ctx.Err() != nil:
+		return errKeychainNoAnswer
+	case errors.As(err, &exit) && (exit.ExitCode() == 51 || exit.ExitCode() == 128):
+		return errKeychainRefused
+	}
+	return errKeychainUnread
+}
+
+// keychainItemMissing: `security` exits 44 for errSecItemNotFound
+// (-25300; it exits with the status' low byte).
 func keychainItemMissing(err error) bool {
 	var exit *exec.ExitError
 	return errors.As(err, &exit) && exit.ExitCode() == 44
@@ -210,65 +268,244 @@ type codexStore struct {
 
 func (s codexStore) file() string { return filepath.Join(s.home, "auth.json") }
 
-// codexKeychainCache keeps what the keychain gave for a home: each read is
-// a `security` run, which may put a prompt in front of the user, and
-// every request and page reads the sign-in. A refusal or no answer is
-// kept longer, so that a prompt isn't put up again at once (as Copilot's,
-// copilotSecret). codexKeychainMu has one `security` ask at a time: two
-// readers at once would put up two prompts.
+// codexKeychainCache keeps what the keychain gave for a home: reading the
+// secret may put a prompt in front of the user, and every request and
+// page reads the sign-in. A read is kept while the item is unchanged:
+// after codexKeychainCheck its modification date is looked at again
+// (Stat, no prompt), and the secret is read again only when that moved,
+// so an Allow given once isn't asked for again at the next poll (#2367).
+// A refusal, or a prompt with no answer, is kept 10 minutes, so that a
+// prompt isn't put up again at once (as Copilot's, copilotSecret), or
+// until Try again (RetryCodexKeychain).
+//
+// codexKeychainMu guards the maps only; no `security` runs under it. One
+// read of the secret at a time per item (codexKeychainAsks): two at once
+// would put up two prompts. A reader waits keychainHold for it at most;
+// the read goes on while the user answers, and what it gets is kept.
 var (
 	codexKeychainMu    sync.Mutex
 	codexKeychainCache = map[string]codexKeychainRead{}
+	codexKeychainAsks  = map[string]*codexKeychainAsk{}
+	// codexKeychainGen: a read begun before resetCodexKeychain isn't kept
+	codexKeychainGen uint64
 )
 
 type codexKeychainRead struct {
-	b   []byte
-	err error
-	at  time.Time
+	b       []byte
+	err     error
+	mdat    string    // the item's modification date when b was read; "" not known
+	at      time.Time // when it was read
+	checked time.Time // when the item was last seen unchanged
+}
+
+// codexKeychainAsk is a read of the secret in flight; b and err are set
+// before done closes.
+type codexKeychainAsk struct {
+	done  chan struct{}
+	start time.Time
+	b     []byte
+	err   error
 }
 
 const (
-	codexKeychainTTL     = 10 * time.Second
+	codexKeychainCheck   = 10 * time.Second
 	codexKeychainRefused = 10 * time.Minute
 )
 
-// findCodexKeychain reads the item for home; fresh asks the keychain
-// whatever was kept, for a read whose tokens will be spent or saved.
+// keychainHold is how long a reader waits on a read of the secret in
+// flight, counted from when the read began: one with no prompt is done
+// well within it, and a reader that comes while a prompt is up is told so
+// at once (errKeychainWaiting) instead of waiting on the user.
+var keychainHold = 5 * time.Second
+
+// findCodexKeychain reads the item for home; fresh looks at the item now,
+// for a read whose tokens will be spent or saved, and asks again after a
+// refusal.
 func findCodexKeychain(home string, fresh bool) ([]byte, error) {
 	account := codexKeychainAccount(home)
+	now := time.Now()
+	codexKeychainMu.Lock()
+	r, kept := codexKeychainCache[account]
+	switch {
+	case !kept:
+	case r.err == nil:
+		if !fresh && now.Sub(r.checked) < codexKeychainCheck {
+			codexKeychainMu.Unlock()
+			return r.b, nil
+		}
+		if !fresh {
+			// others go by it while this reader looks
+			r.checked = now
+			codexKeychainCache[account] = r
+		}
+	case errors.Is(r.err, fs.ErrNotExist):
+		if !fresh && now.Sub(r.at) < codexKeychainCheck {
+			codexKeychainMu.Unlock()
+			return nil, r.err
+		}
+		kept = false
+	default:
+		if !fresh && now.Sub(r.at) < codexKeychainRefused {
+			codexKeychainMu.Unlock()
+			return nil, r.err
+		}
+		kept = false
+	}
+	gen := codexKeychainGen
+	codexKeychainMu.Unlock()
+	if kept {
+		mdat, err := codexKeychain.Stat(codexKeychainService, account)
+		switch {
+		case err == nil && r.mdat != "" && mdat == r.mdat:
+			keepCodexKeychainRead(account, gen, r.at, codexKeychainRead{b: r.b, mdat: r.mdat, at: r.at, checked: time.Now()})
+			return r.b, nil
+		case errors.Is(err, fs.ErrNotExist):
+			keepCodexKeychainRead(account, gen, r.at, codexKeychainRead{err: err, at: time.Now()})
+			return nil, err
+		case err != nil && !fresh:
+			// not known whether it changed: the last read stands
+			return r.b, nil
+		}
+		// changed, or not known for a read that will be spent
+	}
+	return askCodexKeychain(account)
+}
+
+// keepCodexKeychainRead keeps r for account unless the keychain was reset,
+// or a newer read kept, since the one it replaces (read at was).
+func keepCodexKeychainRead(account string, gen uint64, was time.Time, r codexKeychainRead) {
 	codexKeychainMu.Lock()
 	defer codexKeychainMu.Unlock()
-	if r, ok := codexKeychainCache[account]; ok && !fresh {
-		ttl := codexKeychainTTL
-		if r.err != nil && !errors.Is(r.err, fs.ErrNotExist) {
-			ttl = codexKeychainRefused
-		}
-		if time.Since(r.at) < ttl {
-			return r.b, r.err
-		}
+	if cur, ok := codexKeychainCache[account]; gen != codexKeychainGen || ok && cur.at.After(was) {
+		return
 	}
-	b, err := codexKeychain.Find(codexKeychainService, account)
-	if err == nil {
-		var obj map[string]json.RawMessage
-		if json.Unmarshal(b, &obj) != nil || obj == nil {
-			b, err = nil, errors.New("the keychain item isn't a Codex sign-in magpie can read")
-		}
-	}
-	codexKeychainCache[account] = codexKeychainRead{b: b, err: err, at: time.Now()}
-	return b, err
+	codexKeychainCache[account] = r
 }
 
-func keepCodexKeychain(home string, b []byte) {
+// askCodexKeychain reads the secret, or joins the read in flight.
+func askCodexKeychain(account string) ([]byte, error) {
 	codexKeychainMu.Lock()
-	codexKeychainCache[codexKeychainAccount(home)] = codexKeychainRead{b: b, at: time.Now()}
+	a := codexKeychainAsks[account]
+	if a == nil {
+		a = &codexKeychainAsk{done: make(chan struct{}), start: time.Now()}
+		codexKeychainAsks[account] = a
+		go a.run(account, codexKeychain, codexKeychainGen)
+	}
+	codexKeychainMu.Unlock()
+	hold := time.NewTimer(max(0, keychainHold-time.Since(a.start)))
+	defer hold.Stop()
+	select {
+	case <-a.done:
+		return a.b, a.err
+	case <-hold.C:
+	}
+	select {
+	case <-a.done:
+		return a.b, a.err
+	default:
+		return nil, errKeychainWaiting
+	}
+}
+
+func (a *codexKeychainAsk) run(account string, k keychain, gen uint64) {
+	// the date before the secret: an item changed while the prompt was up
+	// reads as changed at the next look
+	mdat, err := k.Stat(codexKeychainService, account)
+	var b []byte
+	if !errors.Is(err, fs.ErrNotExist) {
+		if err != nil {
+			mdat = ""
+		}
+		b, err = k.Find(codexKeychainService, account)
+		if err == nil {
+			var obj map[string]json.RawMessage
+			if json.Unmarshal(b, &obj) != nil || obj == nil {
+				b, err = nil, errors.New("the keychain item isn't a Codex sign-in magpie can read")
+			}
+		}
+	}
+	now := time.Now()
+	codexKeychainMu.Lock()
+	if cur, ok := codexKeychainCache[account]; gen == codexKeychainGen && (!ok || !cur.at.After(a.start)) {
+		codexKeychainCache[account] = codexKeychainRead{b: b, err: err, mdat: mdat, at: now, checked: now}
+	}
+	if codexKeychainAsks[account] == a {
+		delete(codexKeychainAsks, account)
+	}
+	a.b, a.err = b, err
+	codexKeychainMu.Unlock()
+	close(a.done)
+}
+
+// keepCodexKeychain keeps what magpie itself just wrote to the item for
+// home, at the item's date now.
+func keepCodexKeychain(home string, b []byte) {
+	account := codexKeychainAccount(home)
+	mdat, err := codexKeychain.Stat(codexKeychainService, account)
+	if err != nil {
+		mdat = ""
+	}
+	now := time.Now()
+	codexKeychainMu.Lock()
+	codexKeychainCache[account] = codexKeychainRead{b: b, mdat: mdat, at: now, checked: now}
 	codexKeychainMu.Unlock()
 }
 
-// forgetCodexKeychain has the next read ask the keychain.
+// forgetCodexKeychain has the next read look at the item again: a kept
+// read is used while the item's date is unchanged, no item is looked for
+// again. A refusal stands (RetryCodexKeychain clears it): asking again
+// would put the prompt up again.
 func forgetCodexKeychain() {
 	codexKeychainMu.Lock()
+	defer codexKeychainMu.Unlock()
+	for account, r := range codexKeychainCache {
+		switch {
+		case r.err == nil:
+			r.checked = time.Time{}
+			codexKeychainCache[account] = r
+		case errors.Is(r.err, fs.ErrNotExist):
+			delete(codexKeychainCache, account)
+		}
+	}
+}
+
+// resetCodexKeychain drops everything kept, and has a read in flight
+// kept nowhere: a test's keychain is another.
+func resetCodexKeychain() {
+	codexKeychainMu.Lock()
 	clear(codexKeychainCache)
+	clear(codexKeychainAsks)
+	codexKeychainGen++
 	codexKeychainMu.Unlock()
+}
+
+// RetryCodexKeychain is Try again beside a sign-in the keychain didn't
+// give (#2367): Codex's item is read once, now, past a refusal or a
+// prompt with no answer kept (a fresh read), and what it gets is kept in
+// their place. It gives what that read gave: errKeychainWaiting while the
+// prompt is up (joining it, never a second one), its answer kept when it
+// comes.
+func RetryCodexKeychain() error {
+	defer ForgetAccounts()
+	_, _, err := readCodexLogin(codexHome(), true)
+	var se *codexStoreError
+	if errors.As(err, &se) && se.Cause != nil {
+		return se.Cause
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return errors.New("there is no Codex sign-in in the keychain")
+	}
+	return err
+}
+
+// codexKeychainUnread: Codex's sign-in is kept in the keychain item, and
+// the keychain didn't give it (refused, no answer, waiting): Try again
+// can help.
+func codexKeychainUnread(err error) bool {
+	var se *codexStoreError
+	return errors.As(err, &se) && se.Setting.keychainItem() &&
+		(errors.Is(se.Cause, errKeychainRefused) || errors.Is(se.Cause, errKeychainNoAnswer) ||
+			errors.Is(se.Cause, errKeychainWaiting) || errors.Is(se.Cause, errKeychainUnread))
 }
 
 // readCodexLogin is Codex's sign-in under home as Codex would load it,
@@ -441,16 +678,27 @@ func CodexSignIn(dir string) (b []byte, ok bool) {
 func CodexKeychainForTest(find func(service, account string) ([]byte, error)) (restore func()) {
 	old, oldHere := codexKeychain, codexKeychainHere
 	codexKeychain, codexKeychainHere = findOnly(find), true
-	forgetCodexKeychain()
+	resetCodexKeychain()
 	return func() {
 		codexKeychain, codexKeychainHere = old, oldHere
-		forgetCodexKeychain()
+		resetCodexKeychain()
 	}
 }
 
 type findOnly func(service, account string) ([]byte, error)
 
 func (f findOnly) Find(service, account string) ([]byte, error) { return f(service, account) }
+
+// Stat dates the item by what find gives: it moves when the item
+// changes, as macOS' modification date does.
+func (f findOnly) Stat(service, account string) (string, error) {
+	b, err := f(service, account)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8]), nil
+}
 func (findOnly) Put(string, string, []byte) error {
 	return errors.New("this test's keychain takes nothing")
 }

@@ -12,6 +12,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 const relay = {
   id: "relay", name: "Relay", icon: "generic", chat: "https://relay.example.com/v1", responses: "", anthropic: "", catalog: "",
   models: [{ id: "model-a", name: "Model A", on: true }], agents: [], fallback: [], headers: {},
@@ -71,6 +78,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).click();
+      await unfold(page);
       await page.locator(".editor .proxy-mode").waitFor();
       return { page, errors, posts };
     };
@@ -116,11 +124,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // Direct, then the global one again
       await page.locator(".row.provider", { hasText: "Relay" }).click();
+      await unfold(page);
       await pick(page, w.direct);
       assert(await addr(page).isHidden());
       saved = await save(page, posts);
       assert.equal(saved.body.proxy, "direct");
       await page.locator(".row.provider", { hasText: "Relay" }).click();
+      await unfold(page);
       await pick(page, w.direct);
       await pick(page, w.global);
       saved = await save(page, posts);

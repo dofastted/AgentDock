@@ -8,12 +8,14 @@ package provider
 // else that talks to the vendor reads it as before.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,11 +60,34 @@ type KeyRest struct {
 
 // RestKey is what the gateway rests the key k of a provider by: the
 // provider's id while it has one key on, else the id and the key's.
-func (p Provider) RestKey(k KeyInfo) string {
-	if len(p.KeysOn()) > 1 {
-		return p.ID + "#" + k.ID
+func (p Provider) RestKey(k KeyInfo) string { return p.RestKeys()(k) }
+
+// RestKeys is RestKey for each of a provider's keys in turn, whether it
+// has more than one on found once: found again for every key, a list of
+// a thousand keys was read a thousand times over, and the Providers page
+// took seconds to draw it, minutes for five thousand (@NetRozee on X).
+func (p Provider) RestKeys() func(KeyInfo) string {
+	several := p.severalOn()
+	return func(k KeyInfo) string {
+		if several {
+			return p.ID + "#" + k.ID
+		}
+		return p.ID
 	}
-	return p.ID
+}
+
+// severalOn is len(p.KeysOn()) > 1 without listing them: a key on after
+// the first that isn't the first again.
+func (p Provider) severalOn() bool {
+	if p.Key == "" {
+		return false
+	}
+	for _, k := range p.Keys {
+		if !k.Off && k.Key != "" && k.Key != p.Key {
+			return true
+		}
+	}
+	return false
 }
 
 func keyID(key string) string {
@@ -89,17 +114,32 @@ func (p Provider) KeyList() []KeyInfo {
 // saved one that's on. A key listed twice — providers.json's "keys"
 // naming the first key again, as #1772's did — is one key, asked once.
 func (p Provider) KeysOn() []KeyAccount {
+	keysListed.Add(1)
 	if p.Key == "" {
 		return nil
 	}
 	out := []KeyAccount{p.first()}
+	// a set, not a look along the list for each key: the gateway asks
+	// this for every request, and a thousand keys made it half a million
+	// looks (@NetRozee on X)
+	seen := make(map[string]bool, len(p.Keys)+1)
+	seen[p.Key] = true
 	for _, k := range p.Keys {
-		if !k.Off && k.Key != "" && !slices.ContainsFunc(out, func(o KeyAccount) bool { return o.Key == k.Key }) {
+		if !k.Off && k.Key != "" && !seen[k.Key] {
+			seen[k.Key] = true
 			out = append(out, k)
 		}
 	}
 	return out
 }
+
+// keysListed counts KeysOn's lists (KeysListed).
+var keysListed atomic.Int64
+
+// KeysListed is how many times a provider's keys on have been listed in
+// this process: a test counts them, not the time a page or request took,
+// to say they are listed once and not once a key (@NetRozee on X).
+func KeysListed() int64 { return keysListed.Load() }
 
 // AddKey saves one more key for a provider, on: it takes requests after
 // the ones before it. It becomes the first when the provider has none.
@@ -219,6 +259,39 @@ func AddKeys(id string, keys []string, proto Protocol) (added, had int, err erro
 		return 0, 0, errors.New("paste the keys to add")
 	}
 	return added, had, Save(*p)
+}
+
+// keyReadsAtOnce is how many of one provider's keys have their balance,
+// plan or limits read from the vendor at once. Every key at once was a
+// thousand requests to one relay together for a provider of a thousand
+// keys (@NetRozee on X); other providers' keys are read beside them.
+const keyReadsAtOnce = 8
+
+// keySlots is one read's slots, keyReadsAtOnce for each provider.
+type keySlots struct {
+	sync.Mutex
+	m map[string]chan struct{}
+}
+
+// take waits for a slot of the provider id's, and gives what frees it. A
+// read given up on (ctx done) goes on without one, to fail at once.
+func (s *keySlots) take(ctx context.Context, id string) (release func()) {
+	s.Lock()
+	if s.m == nil {
+		s.m = map[string]chan struct{}{}
+	}
+	c := s.m[id]
+	if c == nil {
+		c = make(chan struct{}, keyReadsAtOnce)
+		s.m[id] = c
+	}
+	s.Unlock()
+	select {
+	case c <- struct{}{}:
+		return func() { <-c }
+	case <-ctx.Done():
+		return func() {}
+	}
 }
 
 // first is the first key as a KeyAccount, and setFirst makes k the first.

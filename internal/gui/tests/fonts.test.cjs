@@ -185,6 +185,38 @@ for (const [engine, runtime] of engines) {
     } finally { await browser.close(); }
   });
 
+  // #2439: the pointer resting on the menu while a search narrows it got a
+  // mouseenter from the redraw, which took the focus out of the field, so
+  // Enter chose "Refresh fonts" (the item now under the pointer).
+  test(`${engine}: a search narrowing the menu under a still pointer keeps the typing in its field`, async () => {
+    const browser = await runtime.launch();
+    try {
+      const { page, api, errors } = await open(browser, "zh", { viewport: { width: 560, height: 620 } });
+      await page.locator("#uiFontRow .font-family").click();
+      const second = await page.locator(".font-menu .pm-item").nth(1).boundingBox();
+      await page.mouse.move(second.x + second.width / 2, second.y + second.height / 2);
+      await page.locator(".font-menu .sc-q").fill("HarmonyOS");
+      // the item now under the pointer is Refresh fonts. The redraw's
+      // mouseenter comes on the engine's own hover timer (WebKit's is
+      // later than a frame), and what is checked is that nothing came, so
+      // there is no state to wait for: 300ms is past both engines' timers.
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => document.activeElement.className), "sc-q", "the search field keeps the focus");
+      const reads = api.reads;
+      await page.keyboard.press("Enter");
+      await settled(page);
+      assert.equal(await page.locator("#uiFontRow .font-family span").textContent(), "HarmonyOS Sans SC");
+      assert.equal(api.reads, reads, "Enter didn't refresh the font list");
+      // a pointer that moves still takes an item's focus
+      await page.locator("#uiFontRow .font-family").click();
+      const item = page.locator(".font-menu .pm-item").nth(2);
+      const box = await item.boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 1);
+      assert.equal(await item.evaluate(e => e === document.activeElement), true, "a moved pointer focuses the item it's on");
+      assert.deepEqual(errors, []);
+    } finally { await browser.close(); }
+  });
+
   test(`${engine}: font menu search and keys fit narrow windows without scrolling the page`, async () => {
     const browser = await runtime.launch();
     try {

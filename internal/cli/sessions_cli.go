@@ -193,7 +193,7 @@ func resolve(kind, typed string, have []string) (string, error) {
 func agentNames() map[string]string {
 	names := map[string]string{}
 	for _, a := range agent.All() {
-		names[a.ID] = a.Name
+		names[a.ID] = a.SharedName()
 	}
 	return names
 }

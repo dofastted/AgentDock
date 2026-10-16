@@ -286,6 +286,19 @@ remain in the list, preserves them across summary refreshes, and offers a
 retry after a failed read. See `TestRecentCallBodiesOnDemand` and
 `recent-call-bodies.test.cjs`.
 
+A request on the Routing page opens to the same bodies (Fate on Discord):
+its story's head has "Request and response", which fetches
+`GET /api/gateway/call?route=…` (`Server.RouteCall`) only when pressed.
+A call carries the Routing request it was (`Call.Route`, the trace's
+`Route.ID`, set where `serve`, the Codex backend and a refused title
+record it); a route id is not a call id. When the ring no longer has it,
+the story shows the request archive's copy through `archivePanel` if the
+route names one (`Route.Archive`, `call.archiveName()`, set only when the
+archive was on for that request), and otherwise says how to turn the
+archive on. Nothing more is captured than before. See
+`TestRoutingRequestOpensItsBodies`, `TestArchiveWholeBodies` and
+`routing-bodies.test.cjs`.
+
 ### Plugin check-in switches
 
 A plugin's Usage-card Auto check-in button reads the persisted

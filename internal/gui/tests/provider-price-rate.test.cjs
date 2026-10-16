@@ -11,6 +11,13 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
+// the editor folds what few need under Advanced, this field among them:
+// opened as a reader would, unless something set in it opened it already
+const unfold = async (page) => {
+  const adv = page.locator(".editor details.advanced");
+  await adv.waitFor({ state: "attached" });
+  if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click();
+};
 const relay = {
   id: "relay", name: "Relay", icon: "generic", chat: "https://relay.example.com/v1", responses: "", anthropic: "", catalog: "",
   models: [{ id: "model-a", name: "Model A", on: true }], agents: [], fallback: [], headers: {},
@@ -64,6 +71,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).click();
+      await unfold(page);
       await page.locator(".editor input.price-rate").waitFor();
       await page.waitForTimeout(300);
       return { page, errors, posts };
@@ -104,6 +112,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(saved.body.priceRate, 0.85);
 
       await page.locator(".row.provider", { hasText: "Relay" }).click();
+      await unfold(page);
       await box(page).fill("");
       saved = await save(page, posts);
       assert(Object.hasOwn(saved.body, "priceRate"), "an empty field is saved as none, not left out");

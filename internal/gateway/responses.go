@@ -1502,6 +1502,15 @@ type responsesEncoder struct {
 	// collector's last part isn't it once a hidden thinking block (signed
 	// with no text, or redacted) has come after the call (#1786)
 	call Part
+	// a message's output_item.done, and the events after it, wait here
+	// until its phase is known (phase.go, #2437)
+	heldMsg map[string]any
+	held    []heldEvent
+}
+
+type heldEvent struct {
+	typ    string
+	fields map[string]any
 }
 
 // callTo names the tool a function_call item is to as the client knows it:
@@ -1549,10 +1558,37 @@ func itemPrefix(item map[string]any) string {
 }
 
 func (e *responsesEncoder) send(typ string, fields map[string]any) {
+	if e.heldMsg != nil {
+		e.held = append(e.held, heldEvent{typ, fields})
+		if len(e.held) > heldMost {
+			e.release("")
+		}
+		return
+	}
+	e.write(typ, fields)
+}
+
+func (e *responsesEncoder) write(typ string, fields map[string]any) {
 	fields["type"] = typ
 	fields["sequence_number"] = e.seq
 	e.seq++
 	e.w.event(typ, fields)
+}
+
+// release sends the waiting message's events, the message given phase
+// (or none, for "").
+func (e *responsesEncoder) release(phase string) {
+	if e.heldMsg == nil {
+		return
+	}
+	if phase != "" {
+		e.heldMsg["phase"] = phase
+	}
+	held := e.held
+	e.heldMsg, e.held = nil, nil
+	for _, h := range held {
+		e.write(h.typ, h.fields)
+	}
 }
 
 func (e *responsesEncoder) response(status string, extra map[string]any) map[string]any {
@@ -1606,7 +1642,10 @@ func (e *responsesEncoder) closeAs(sealed json.RawMessage) {
 		e.send("response.output_text.done", map[string]any{"item_id": e.itemID, "output_index": e.item, "content_index": 0, "text": t, "logprobs": []any{}})
 		part := map[string]any{"type": "output_text", "text": t, "annotations": []any{}, "logprobs": []any{}}
 		e.send("response.content_part.done", map[string]any{"item_id": e.itemID, "output_index": e.item, "content_index": 0, "part": part})
-		item = map[string]any{"id": e.itemID, "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{part}}
+		m := map[string]any{"id": e.itemID, "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{part}}
+		// its done waits for what comes next to say its phase
+		e.release(phaseCommentary)
+		item, e.heldMsg = m, m
 	case Thinking:
 		t := e.text.String()
 		e.send("response.reasoning_summary_text.done", map[string]any{"item_id": e.itemID, "output_index": e.item, "summary_index": 0, "text": t})
@@ -1634,6 +1673,9 @@ func (e *responsesEncoder) closeAs(sealed json.RawMessage) {
 
 func (e *responsesEncoder) openItem(k Kind, prefix string, item map[string]any) {
 	e.closeItem()
+	if k != Thinking {
+		e.release(phaseCommentary)
+	}
 	e.item++
 	e.open, e.itemID = k, prefix+newID()
 	if k == Thinking && e.thinkID != "" {
@@ -1701,6 +1743,7 @@ func (e *responsesEncoder) event(ev Event) {
 		// and sources, as Anthropic's encoder does, without inventing
 		// earlier in-progress events or citation offsets in the answer.
 		e.closeItem()
+		e.release(phaseCommentary)
 		e.item++
 		item := responsesSearchItem(ev.Text, ev.Hits)
 		e.send("response.output_item.added", map[string]any{"output_index": e.item, "item": item})
@@ -1729,6 +1772,7 @@ func (e *responsesEncoder) event(ev Event) {
 		}
 	case KError:
 		e.closeItem()
+		e.release("")
 		code := "server_error"
 		if ev.Code != "" {
 			code = ev.Code
@@ -1747,7 +1791,8 @@ func (e *responsesEncoder) keepalive() {
 		e.start(Event{}) // response.created and response.in_progress
 		return
 	}
-	e.send("response.in_progress", map[string]any{"response": e.response("in_progress", nil)})
+	// past what's waiting: a keepalive held back keeps nothing alive
+	e.write("response.in_progress", map[string]any{"response": e.response("in_progress", nil)})
 }
 
 func (e *responsesEncoder) finish() {
@@ -1766,6 +1811,10 @@ func (e *responsesEncoder) finish() {
 		}
 		extra["incomplete_details"] = map[string]any{"reason": reason}
 	}
+	if status == "completed" {
+		e.release(phaseFinal)
+	}
+	e.release("")
 	e.send(typ, map[string]any{"response": e.response(status, extra)})
 }
 
@@ -1838,6 +1887,7 @@ func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 		// as the stream says it (#248)
 		status, incomplete = "incomplete", map[string]any{"reason": "content_filter"}
 	}
+	phaseOutput(output, status == "completed")
 	b, _ := json.Marshal(map[string]any{"id": id, "object": "response", "created_at": time.Now().Unix(), "status": status,
 		"model": model, "output": output, "usage": res.Usage.responses(), "incomplete_details": incomplete,
 		"parallel_tool_calls": true, "tool_choice": "auto", "tools": []any{}, "error": nil})

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // securityKeychain reads `security` as macOS answers: exit 44 is no item,
@@ -32,9 +34,9 @@ delete-generic-password) exit 44 ;;
 esac
 exit 2
 `
-	if err := os.WriteFile(filepath.Join(bin, "security"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// a program macOS has let run already: a new one's first exec waits for
+	// its check, past the keychain's wait under a full run's load
+	testenv.Program(t, filepath.Join(bin, "security"), script)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	k := securityKeychain{}
 	if _, err := k.Find(codexKeychainService, "cli|none"); !errors.Is(err, fs.ErrNotExist) {

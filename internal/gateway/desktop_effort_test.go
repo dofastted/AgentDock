@@ -104,6 +104,9 @@ func TestClaudeDesktopEffortIDs(t *testing.T) {
 	}
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("x-api-key", Token+"-claude-desktop")
+	// a build that has the mythos word (#2426); one without is listed the
+	// plain alias instead (TestClaudeDesktopOldBuildModels)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Claude/2.7032.0 Chrome/140.0.0.0 Electron/37.2.0 Safari/537.36")
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, req)
 	var list struct {

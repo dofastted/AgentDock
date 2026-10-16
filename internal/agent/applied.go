@@ -182,8 +182,11 @@ func (a *Agent) Drift() *Drift {
 	}
 	rec := appliedOf(a.ID)
 	// still joined, a model off magpie is one picked in the agent, beside
-	// magpie's in its list (dsh's /model), not a change from outside
+	// magpie's in its list (dsh's /model), not a change from outside; so is
+	// one Codex picks beside its ChatGPT sign-in, which still goes through
+	// magpie (#2424: the row went red with Reconnect)
 	joined := a.Joined != nil && a.Joined()
+	picked := joined || a.Beside != nil && a.Beside()
 	for _, f := range a.Fields {
 		want, ok := rec.Fields[f.Key]
 		// a field that reads empty while it follows another (Claude Code's
@@ -195,7 +198,7 @@ func (a *Agent) Drift() *Drift {
 		if now == "" && f.Follows != "" {
 			now = vals[f.Follows]
 		}
-		if !ok || joined || now == want || !magpieValue(a, f, want, vals) || magpieValue(a, f, now, vals) || sameGroup(want, now) {
+		if !ok || picked || now == want || !magpieValue(a, f, want, vals) || magpieValue(a, f, now, vals) || sameGroup(want, now) {
 			continue
 		}
 		return &Drift{Kind: "replaced", Field: f.Key, Now: vals[f.Key], Want: want,

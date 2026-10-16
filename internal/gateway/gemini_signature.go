@@ -33,6 +33,13 @@ import (
 // id a client shortened — goes to Gemini with the value Google documents
 // for history it didn't sign, skip_thought_signature_validator, as the
 // Code Assist path sends every call.
+//
+// A signature grows with the step's thinking, to several KB, and an id
+// that long broke a client that indexes ids (#2411, liangxyz: LobeHub's
+// PostgreSQL index takes 2704 bytes). So the signature itself is kept in
+// magpie's folder (sigStore) and the id carries a short reference to it,
+// <id>__tsk16__<key>. A reference magpie no longer has reads as no
+// signature, as a shortened id does.
 
 const (
 	// sigMark begins the signature in an id: __ts<n>__ for the signature's
@@ -41,6 +48,7 @@ const (
 	// still read, with nothing to check them by.
 	sigMark = "__ts"
 	sigRaw  = "r"
+	sigKept = "k"
 	sigEnd  = "__"
 )
 
@@ -51,6 +59,9 @@ func signedID(id, sig string) string {
 	}
 	if id == "" {
 		id = "call_" + newID()
+	}
+	if key := keepSignature(sig); key != "" {
+		return id + sigMark + sigKept + strconv.Itoa(len(key)) + sigEnd + key
 	}
 	kind, enc := sigRaw, base64.RawURLEncoding.EncodeToString([]byte(sig))
 	if b, err := base64.StdEncoding.DecodeString(sig); err == nil && base64.StdEncoding.EncodeToString(b) == sig {
@@ -75,6 +86,10 @@ func unsignedID(id string) (string, string) {
 		if raw {
 			rest = rest[len(sigRaw):]
 		}
+		kept := !raw && strings.HasPrefix(rest, sigKept)
+		if kept {
+			rest = rest[len(sigKept):]
+		}
 		d := 0
 		for d < len(rest) && rest[d] >= '0' && rest[d] <= '9' {
 			d++
@@ -83,8 +98,17 @@ func unsignedID(id string) (string, string) {
 		if !ok {
 			continue // not a mark: part of the call's own id
 		}
+		if kept && d == 0 {
+			continue // a kept signature's mark always has its length
+		}
 		// the first mark decides: a signature cut short is none
 		if d > 0 && rest[:d] != strconv.Itoa(len(enc)) {
+			return id, ""
+		}
+		if kept {
+			if sig := keptSignature(enc); sig != "" {
+				return id[:i], sig
+			}
 			return id, ""
 		}
 		b, err := base64.RawURLEncoding.DecodeString(enc)

@@ -136,9 +136,9 @@ func readZhipuPlan(b []byte) (string, []QuotaWindow, error) {
 }
 
 // readCommandCodePlan reads a Command Code key's /alpha/billing/credits
-// (see cmdCredits) for its plan's 5-hour and weekly windows. The dollars
-// left are the key's balance card's (readCommandCode), so not a window
-// here as on the signed-in subscription's card.
+// (see cmdCredits) for its plan's 5-hour and weekly windows. The key's
+// card is cmdKeyWindows, which adds the month's credits once it knows the
+// plan.
 func readCommandCodePlan(b []byte) (string, []QuotaWindow, error) {
 	var c cmdCredits
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -487,9 +487,23 @@ func readKimiCode(b []byte) (string, []QuotaWindow, error) {
 
 // planWindows asks the vendor for the plan key is on and its windows.
 func planWindows(ctx context.Context, src planQuotaSource, key string) (plan string, ws []QuotaWindow, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.url, nil)
+	b, err := planBody(ctx, src, key)
 	if err != nil {
 		return "", nil, err
+	}
+	plan, ws, err = src.read(b)
+	if r, ok := err.(zhipuKeyRefusal); ok {
+		err = zhipuRefused(src.url, r)
+	}
+	return plan, ws, err
+}
+
+// planBody is the vendor's reply to a key asking for its plan's windows,
+// or what it said when it refused.
+func planBody(ctx context.Context, src planQuotaSource, key string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.url, nil)
+	if err != nil {
+		return nil, err
 	}
 	if src.bearer {
 		req.Header.Set("Authorization", "Bearer "+key)
@@ -503,7 +517,7 @@ func planWindows(ctx context.Context, src planQuotaSource, key string) (plan str
 	OpenCodeSession(req.Header, src.url)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -514,19 +528,15 @@ func planWindows(ctx context.Context, src planQuotaSource, key string) (plan str
 		// they subscribed in, and asks for it by the key's own member and
 		// workspace (zen/go/v1/usage.ts in sst/opencode): a key another
 		// member made, or one from another workspace, has none
-		return "", nil, fmt.Errorf("this key has no OpenCode Go subscription: Go belongs to the member who subscribed, in that workspace, so use a key that member made there (opencode.ai, the workspace's API Keys)")
+		return nil, fmt.Errorf("this key has no OpenCode Go subscription: Go belongs to the member who subscribed, in that workspace, so use a key that member made there (opencode.ai, the workspace's API Keys)")
 	case res.StatusCode == http.StatusUnauthorized && openCode:
-		return "", nil, fmt.Errorf("OpenCode didn't take this key (%s): it was deleted, or is mistyped", vendorSaid(b, res.Status))
+		return nil, fmt.Errorf("OpenCode didn't take this key (%s): it was deleted, or is mistyped", vendorSaid(b, res.Status))
 	case res.StatusCode == http.StatusUnauthorized && zhipuHost(hostOf(src.url)):
-		return "", nil, zhipuRefused(src.url, zhipuKeyRefusal{vendorSaid(b, res.Status)})
+		return nil, zhipuRefused(src.url, zhipuKeyRefusal{vendorSaid(b, res.Status)})
 	case res.StatusCode >= 300:
-		return "", nil, fmt.Errorf("%s", vendorSaid(b, res.Status))
+		return nil, fmt.Errorf("%s", vendorSaid(b, res.Status))
 	}
-	plan, ws, err = src.read(b)
-	if r, ok := err.(zhipuKeyRefusal); ok {
-		err = zhipuRefused(src.url, r)
-	}
-	return plan, ws, err
+	return b, nil
 }
 
 // zhipuKeyRefusal is Zhipu or Z.ai refusing a key itself (codes
@@ -593,6 +603,10 @@ func vendorSaid(b []byte, status string) string {
 // a Zhipu or Z.ai key with no plan of its own is a team's, whose windows
 // are asked with type=2 (zcode_team.go), and team says so.
 func planKeyWindows(ctx context.Context, p Provider, src planQuotaSource, key string) (plan string, ws []QuotaWindow, team bool, err error) {
+	if hostOf(src.url) == "api.commandcode.ai" {
+		plan, ws, err = cmdKeyWindows(ctx, src, key)
+		return plan, ws, false, err
+	}
 	plan, ws, err = planWindows(ctx, src, key)
 	// a key refused is refused as a team's too
 	if zhipu := strings.HasSuffix(src.url, "/api/monitor/usage/quota/limit"); zhipu && (err != nil || len(ws) == 0) && !zhipuKeyRefusedErr(err) {
@@ -664,10 +678,12 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	}
 	got := make([]*SubscriptionQuota, len(jobs))
 	var wg sync.WaitGroup
+	var slots keySlots
 	for i, j := range jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer slots.take(ctx, j.p.ID)()
 			q := SubscriptionQuota{Provider: j.p.ID, Name: j.p.Name, Icon: j.p.Icon, User: j.user, Windows: []QuotaWindow{}}
 			plan, ws, team, err := planKeyWindows(j.p.Via(ctx), j.p, j.src, j.key)
 			// a vendor failing a while (Command Code answers billing/credits

@@ -49,7 +49,7 @@ func TestSavedButSignedOut(t *testing.T) {
 	// magpie looks, and the reason says how to put it there.
 	os.MkdirAll(filepath.Join(home, ".codex"), 0o700)
 	excluded := func() *Exclusion {
-		forgetCodexKeychain()
+		resetCodexKeychain()
 		for _, x := range Excluded() {
 			if x.Agent == "codex" && x.SignedOut {
 				return &x
@@ -67,14 +67,18 @@ func TestSavedButSignedOut(t *testing.T) {
 			!strings.Contains(codex.Why, `keychain item "Codex Auth"`) {
 			t.Fatalf("%s, no item: %+v", store, codex)
 		}
-		codexKeychain = &fakeKeychain{findErr: errKeychainUnread}
-		if codex = excluded(); codex == nil || strings.Contains(codex.Why, "isn't signed in here") ||
+		if codex.Retry {
+			t.Fatalf("%s, no item: Try again offered", store)
+		}
+		// an item there, which the keychain won't give
+		codexKeychain = &fakeKeychain{findErr: errKeychainUnread, items: map[string][]byte{codexKeychainAccount(filepath.Join(home, ".codex")): []byte(`{}`)}}
+		if codex = excluded(); codex == nil || strings.Contains(codex.Why, "isn't signed in here") || !codex.Retry ||
 			!strings.Contains(codex.Why, "Allow magpie") || !strings.Contains(codex.Why, `cli_auth_credentials_store = "file"`) {
 			t.Fatalf("%s, item not read: %+v", store, codex)
 		}
 
 		codexKeychainHere = false
-		if codex = excluded(); codex == nil || len(codex.Users) != 2 || strings.Contains(codex.Why, "isn't signed in here") ||
+		if codex = excluded(); codex == nil || codex.Retry || len(codex.Users) != 2 || strings.Contains(codex.Why, "isn't signed in here") ||
 			!strings.Contains(codex.Why, `cli_auth_credentials_store = "`+store+`"`) || !strings.Contains(codex.Why, `cli_auth_credentials_store = "file"`) ||
 			!strings.Contains(codex.Why, "doesn't read") {
 			t.Fatalf("%s, keychain not read here: %+v", store, codex)

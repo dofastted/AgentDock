@@ -42,7 +42,7 @@ type Listing struct {
 	Providers []string          `json:"providers,omitempty"` // OpenCode's ids of those it signs in to
 	Community bool              `json:"community,omitempty"` // written by magpie's community
 	Replaces  string            `json:"replaces,omitempty"`  // the built-in subscription it does the work of
-	Kind      string            `json:"kind,omitempty"`      // "middleware" for gateway middleware, "agent" for an agent; none for a provider
+	Kind      string            `json:"kind,omitempty"`      // "middleware" for gateway middleware, "agent" for an agent, "tools" for tools alone, "page" for a page alone; none for a provider
 	Summary   map[string]string `json:"summary,omitempty"`   // by language: en, zh
 }
 

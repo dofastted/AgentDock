@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseImportPreset(t *testing.T) {
@@ -245,5 +246,22 @@ func TestParseImportForms(t *testing.T) {
 		if _, err := ParseImport(link); err != nil {
 			t.Errorf("%s: %v", link, err)
 		}
+	}
+}
+
+// A long name in Chinese is cut to 80 bytes where a character begins, not
+// through one: half a character is invalid UTF-8 the GUI shows as � (#2416).
+func TestParseImportNameCutKeepsCharactersWhole(t *testing.T) {
+	q := url.Values{
+		"name": {strings.Repeat("鱼", 30) + "-relay"},
+		"chat": {"https://relay.example/v1"},
+		"key":  {"sk-relay"},
+	}
+	p, err := ParseImport("magpie://import?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(p.Name) || len(p.Name) > 80 || p.Name != strings.Repeat("鱼", 26) {
+		t.Fatalf("name %q (%d bytes)", p.Name, len(p.Name))
 	}
 }

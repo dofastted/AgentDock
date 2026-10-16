@@ -124,10 +124,12 @@ func remoteKeyCards(ctx context.Context, p Provider, fresh bool, only string) []
 	names, keys := remoteKeys(p)
 	out := make([]SubscriptionQuota, len(keys))
 	var wg sync.WaitGroup
+	var slots keySlots
 	for i := range keys {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer slots.take(ctx, p.ID)()
 			out[i] = remoteKeyCardOf(ctx, p, names[i], keys[i], fresh && (only == "" || only == names[i]))
 		}()
 	}

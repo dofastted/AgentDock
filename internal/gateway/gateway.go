@@ -305,7 +305,10 @@ func Taken() bool {
 type Call struct {
 	// ID numbers the call in the Recent-calls ring, from 1, for the page
 	// to ask for its bodies by (the ring's summary leaves them out, #1521)
-	ID    uint64    `json:"id,omitempty"`
+	ID uint64 `json:"id,omitempty"`
+	// Route: the Routing page's request (Route.ID) this call is, for it
+	// to ask for the call's bodies by while the ring still has them
+	Route int64     `json:"route,omitempty"`
 	Time  time.Time `json:"time"`
 	Agent string    `json:"agent"`         // who called, from the client's User-Agent
 	Via   string    `json:"via,omitempty"` // the computer a remote magpie's request came from (AgentHeader)
@@ -418,6 +421,19 @@ func (s *Server) Recent() []Call {
 		out[len(s.recent)-1-i] = c
 	}
 	return out
+}
+
+// RouteCall is the call the Routing page's request route was, while it is
+// still in the ring.
+func (s *Server) RouteCall(route int64) (Call, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.recent) - 1; i >= 0; i-- {
+		if route != 0 && s.recent[i].Route == route {
+			return s.recent[i], true
+		}
+	}
+	return Call{}, false
 }
 
 // RecentCall is the call numbered id while it is still in the ring.
@@ -970,7 +986,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	data := []map[string]any{}
 	shown := catalogFor(r)
 	if agent := agentOf(r); agent == "claude-desktop" {
-		data = desktopModels(shown)
+		data = desktopModels(shown, desktopKnowsMythos(r.Header.Get("User-Agent")))
 	} else if agent == ScienceID {
 		data = scienceModels(shown)
 	} else {
@@ -2201,6 +2217,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	rounds := 0            // the rounds they were asked again in
 	var waitFrom time.Time // when every member had first failed so
 	refusals := 0          // the tries the safety filter refused so
+	// a reply passed through whose reasoning looped before it said a word,
+	// asked again (loopReasks); reasked, the times a translated one was
+	// asked again in place, tries the route doesn't list (#2436)
+	reloops, reasked := 0, 0
 	// ended is when the last try's reply ended: the request's ms end there,
 	// not after what magpie writes down of it once it has (#1939: sticks
 	// and the provider's last answer, saved to disk, took seconds on a busy
@@ -2264,6 +2284,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// a reply stuck in a loop is ended, not let run to its limit
 			// (#1359)
 			hw.loop = &loopGuard{}
+			hw.reloop = reloops < loopReasks
 		}
 		// a member of a group in the group is timed by the innermost
 		// group that sets a FirstToken (#2246), else by the group asked for
@@ -2290,6 +2311,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// when the request that last went out began to (GetConn), and
 		// when its body was written
 		var asking, asked, wrote atomic.Int64
+		var nt netTrace // where the try's time went (TryNet)
 		attemptBody := body
 		if from == provider.Responses {
 			// reasoning another sealed, which this one refused earlier in
@@ -2496,13 +2518,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// when the request last went out to the vendor, its body
 			// written: what came after is the vendor's (Record.Sent).
 			// Before it, from when it began to go out, is connecting and
-			// sending the body, and before that magpie's (#1532)
-			ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-				GetConn: func(string) { asking.Store(time.Now().UnixNano()) },
-				WroteRequest: func(httptrace.WroteRequestInfo) {
-					asked.Store(asking.Load())
-					wrote.Store(time.Now().UnixNano())
-				}})
+			// sending the body, and before that magpie's (#1532); and each
+			// step of its way out, for the Routing page to say whose time
+			// a slow turn was (TryNet)
+			ctx = httptrace.WithClientTrace(ctx, nt.hooks(&asking, &asked, &wrote))
 			// a key or account with a MaxConcurrency is asked once one of
 			// its slots is free, in turn; the agent gone while it waits,
 			// nothing is sent (the 499 below)
@@ -2577,6 +2596,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			break
 		}
 		hw.settle()
+		reasked += hw.reasked
 		if hw.passing {
 			clientResponseID = call.Usage.ResponseID
 		}
@@ -2624,7 +2644,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		wentTier = at.tier
 		ended = time.Now()
 		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: ended.Sub(began).Milliseconds(), Error: call.Error, Queued: queued,
-			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Tier: wentTier, TierServed: call.Usage.Tier, Auto: autoPicked()}
+			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Tier: wentTier, TierServed: call.Usage.Tier, Auto: autoPicked(),
+			Net: nt.timing(began, queued)}
 		if resetFirst != nil {
 			// the reset spent for it before it was asked
 			try.Reset, resetFirst = resetFirst, nil
@@ -2670,6 +2691,26 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				other = &Try{Status: call.Status, Error: call.Error}
 			}
 			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
+		}
+		if hw.relooped {
+			// its reasoning ran into a loop before it said a word (#1359),
+			// and it was let go: asked again, once, of the same one, as a
+			// translated reply is in place; asked again, it mostly doesn't
+			// loop. The agent keeps what it has, and the next try's stream
+			// follows it. Nobody rests: the model looped, not the account
+			// (#2436: pi's Chat to WorkBuddy was ended at once)
+			reloops++
+			call.Error = c.p.Name + ": " + reloopedError
+			try.Status, try.Error, try.Fail = call.Status, call.Error, failLoop
+			call.TTFT, call.FirstText, call.Flow, call.FirstReasoning = 0, 0, 0, 0
+			watched.attempt(call, try, c.p.ID, sent, hw, capture)
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			select {
+			case <-time.After(retryPause):
+			case <-r.Context().Done():
+			}
+			i--
 			continue
 		}
 		watched.attempt(call, try, c.p.ID, sent, hw, capture)
@@ -3243,7 +3284,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	tries := 0 // the request's tries, as its route lists them
 	s.trace.update(tr, func(t *Route) {
 		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
-		tries = len(t.Tries)
+		tries = len(t.Tries) + reasked
 		if t.TitleLink != nil && isTitleKind(t.Kind) && call.Status < 400 && call.Error == "" && !call.ResponseTruncated {
 			link := *t.TitleLink
 			link.Reply = replyDigest
@@ -3255,6 +3296,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
 		t.FirstReasoning, t.ReasoningHidden = call.FirstReasoning, call.ReasoningHidden
 		t.Output, t.Reasoning, t.TTFT, t.FirstText, t.Flow = call.Usage.Output, call.Usage.Reasoning, call.TTFT, call.FirstText, call.Flow
+		t.Sent, t.Own, t.Retried, t.Queued = sentMs, ownMs, retriedMs, queuedMs
 		if prompt != nil {
 			t.Prompt = prompt.calibrated(promptCounted(t.Usage), window)
 		}
@@ -3262,7 +3304,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			t.Served, t.Swapped, t.Routed = t.Tries[n-1].Served, t.Tries[n-1].Swapped, t.Tries[n-1].Routed
 			t.Upstream = t.Tries[n-1].Upstream
 		}
+		t.Archive = call.archiveName()
 	})
+	call.Route = tr.ID
 	s.record(call)
 	if call.To != "" {
 		rec := usage.Record{RouteID: tr.ID, Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: model,
@@ -4350,8 +4394,42 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if (proto == provider.Responses || proto == provider.Chat || proto == provider.Anthropic) && (grokModel(model) || grokModel(upstream)) {
 		ints = &intTidy{proto: proto, sse: sse}
 	}
+	// a message the upstream gave no phase gets one, as OpenAI's own
+	// models' do (phase.go, #2437); it goes last, as it holds events back
+	var phases *phaseTidy
+	if proto == provider.Responses {
+		phases = &phaseTidy{sse: sse}
+	}
+	// out is what a filter let through, through phases
+	out := func(b []byte) []byte {
+		if phases != nil {
+			return phases.write(b)
+		}
+		return b
+	}
 	buf := make([]byte, 32<<10)
 	var rerr error
+	// atLine says whether what the client has ends a line, so what is
+	// appended below begins one of its own: appended after a line still
+	// pending, an event's name lands inside that line's data, and the
+	// client reads one event it can't parse where the protocol's error was
+	// meant (TestPassthroughStreamCutMidLine)
+	atLine := true
+	write := func(b []byte) (int, error) {
+		if len(b) > 0 {
+			atLine = b[len(b)-1] == '\n'
+		}
+		return w.Write(b)
+	}
+	// apart is what goes before an event magpie appends: a blank line,
+	// after the line still pending if the upstream's last write stopped
+	// inside one
+	apart := func() []byte {
+		if atLine {
+			return []byte("\n")
+		}
+		return []byte("\n\n")
+	}
 	for {
 		n, err := rd.Read(buf)
 		if n > 0 {
@@ -4378,7 +4456,10 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if sigs != nil {
 				out = sigs.write(out)
 			}
-			if _, werr := w.Write(out); werr != nil {
+			if phases != nil {
+				out = phases.write(out)
+			}
+			if _, werr := write(out); werr != nil {
 				return res.StatusCode, "", true
 			}
 			if f != nil {
@@ -4392,50 +4473,53 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	}
 	// what's held at the end goes through the filters after the one
 	// that held it
-	sign := func(out []byte) []byte {
+	sign := func(b []byte) []byte {
 		if ints != nil {
-			out = ints.write(out)
+			b = ints.write(b)
 		}
 		if sigs != nil {
-			return sigs.write(out)
+			b = sigs.write(b)
 		}
-		return out
+		return out(b)
 	}
 	if tidy != nil {
 		out := tidy.flush()
 		if written != nil {
 			out = append(written.write(out), written.flush()...)
 		}
-		w.Write(sign(out))
+		write(sign(out))
 	} else if written != nil {
-		w.Write(sign(written.flush()))
+		write(sign(written.flush()))
 	}
 	if whole != nil {
 		out := whole.flush()
 		if spaces != nil {
 			out = spaces.write(out)
 		}
-		w.Write(sign(out))
+		write(sign(out))
 	}
 	if search != nil {
 		out := search.flush()
 		if spaces != nil {
 			out = spaces.write(out)
 		}
-		w.Write(sign(out))
+		write(sign(out))
 	}
 	if spaces != nil {
-		w.Write(sign(spaces.flush()))
+		write(sign(spaces.flush()))
 	}
 	if ints != nil {
-		out := ints.flush()
+		b := ints.flush()
 		if sigs != nil {
-			out = sigs.write(out)
+			b = sigs.write(b)
 		}
-		w.Write(out)
+		write(out(b))
 	}
 	if sigs != nil {
-		w.Write(sigs.flush())
+		write(out(sigs.flush()))
+	}
+	if phases != nil {
+		write(phases.flush())
 	}
 	if sse {
 		sniff.drain()
@@ -4448,23 +4532,41 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		status, msg := gather.finish(client, p, sse, cut, sniff.failed)
 		return status, msg, true
 	}
-	if sse && r.Context().Err() == nil && !sniff.whole() {
+	// a Chat stream of Gemini's OpenAI-compatible API is whole only with
+	// its finish_reason, [DONE] or not (saysItsEnd)
+	unfinished := proto == provider.Chat && sniff.failed == "" && sniff.u.Stop == "" && saysItsEnd(p, proto, upstream)
+	if fin := sniff.tail.finish(); sse && unfinished && fin != "" && (rerr == nil || rerr == io.EOF) && r.Context().Err() == nil {
+		// only the finish_reason was lost, after the generation was done
+		// (chatTail): the client gets it, and the reply is whole
+		w.Write(append(apart(), "data: "+string(finishChunk(fin))+"\n\n"...))
+		if !sniff.ended {
+			w.Write([]byte("data: [DONE]\n\n"))
+		}
+		if f != nil {
+			f.Flush()
+		}
+		sniff.u.Stop, unfinished = fin, false
+	}
+	if sse && r.Context().Err() == nil && (!sniff.whole() || unfinished) {
 		// the upstream died mid-reply, or ended it short of its last
 		// event: say so in the stream rather than end it as if whole,
 		// which a client reads as a reply cut off for no reason (#370:
 		// dsh's "stream ended before message_stop", not retried). A Chat
 		// stream may end without [DONE] and be whole, so only a read that
-		// failed counts there; a Gemini one ends on a candidate's
-		// finishReason (#1644).
+		// failed counts there, Gemini's own aside; a Gemini one ends on a
+		// candidate's finishReason (#1644).
 		var failed string
 		switch {
 		case rerr != nil && rerr != io.EOF:
 			failed = cutMidReply(p.Name, rerr)
-		case proto == provider.Anthropic || proto == provider.Responses || proto == provider.Gemini:
-			failed = p.Name + ": the reply ended before it was complete"
+		case proto == provider.Anthropic || proto == provider.Responses || proto == provider.Gemini || unfinished:
+			failed = p.Name + ": " + errEndedShort.Error()
 		}
 		if failed != "" {
-			w.Write(streamFailure(proto, failed))
+			// what is appended begins after a blank line: the event still
+			// pending is left to stand, and the failure is read as an
+			// event of its own (TestPassthroughStreamEndsOnLineEnd)
+			w.Write(append(apart(), streamFailure(proto, failed)...))
 			if f != nil {
 				f.Flush()
 			}
@@ -5371,12 +5473,19 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	var col collector
 	ended := false // the upstream said its reply ended
+	var tail chatTail
 	see, held := written(zenSee(zen, col.add))
 	err = readSSE(rd, func(_, data string) error {
+		tail.see([]byte(data))
 		u.add(Usage{Upstream: upstreamOf([]byte(data)), Tier: upstreamTier([]byte(data))})
 		ended = ended || replyEnds(actual, data, upstreamStop([]byte(data)))
 		return dec(data, see)
 	})
+	if fin := tail.finish(); err == nil && !ended && actual == provider.Chat && fin != "" && saysItsEnd(p, actual, model) {
+		// Gemini's OpenAI-compatible API lost only the finish_reason
+		// after its generation was done (chatTail)
+		ended, err = true, dec(string(finishChunk(fin)), see)
+	}
 	held()
 	if err != nil {
 		// a partial answer is not an answer
@@ -5394,7 +5503,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		// the vendor failing
 		return writeVendorError(w, from, cmp.Or(col.errStatus, 502), p.Name+": "+said, col.errSaid), said
 	}
-	if col.err == "" && !ended && (actual == provider.Anthropic || actual == provider.Responses || geminiKin(actual)) && r.Context().Err() == nil {
+	if col.err == "" && !ended && saysItsEnd(p, actual, model) && r.Context().Err() == nil {
 		// an Anthropic stream that just stopped — no stop_reason, no
 		// message_stop — or a Responses one with no response.completed is
 		// a reply cut short, not a finished one, as a streaming client is
@@ -6320,7 +6429,10 @@ func writeErrorSaid(w http.ResponseWriter, proto provider.Protocol, status int, 
 		typ = "permission_error"
 	case status == 404:
 		typ = "not_found_error"
-	case status == 413 && proto == provider.Anthropic:
+	case status == 413:
+		// Anthropic's own type, in every shape: pi (overflow.ts) compacts
+		// and tries once more on it, and an OpenAI-shaped api_error left
+		// it stopped (@wilsonxuuuu on X)
 		typ = "request_too_large"
 	case status == 429:
 		typ = "rate_limit_error"
@@ -6373,9 +6485,11 @@ func writeErrorSaid(w http.ResponseWriter, proto provider.Protocol, status int, 
 // Kimi's "exceeded model token limit", DS4's "configured context size",
 // z.ai's "Prompt too long" / "Prompt exceeds max length" and
 // model_context_window_exceeded, Ollama's "exceeded max context length",
-// DashScope's "Range of input length should be", "token limit exceeded".
+// DashScope's "Range of input length should be", "token limit exceeded",
+// a relay's own cap on one request's input, "Input token exceed the limit"
+// (#2445: B.ai, under the model's window, which another member holds).
 var tooLongRe = regexp.MustCompile(`(?i)context_length_exceeded|prompt is too long|input is too long|(exceeds?|exceeded|over|beyond)( the)?( model'?s?)?( maximum)? context|context (length|limit|window) (exceeded|is exceeded)|maximum context length|too many (input |prompt )?tokens|上下文(长度)?(超|过长)|超(过|出)(了)?(模型)?(的)?(最大)?上下文` +
-	`|input token count.*exceeds the maximum|maximum prompt length is \d|reduce the length of the messages|maximum allowed input length|longer than the model'?s context length|available context size|greater than the context length|prompt token count of [\d,]+ exceeds the limit|context window exceeds limit|exceeded model token limit|configured context size|prompt too long|prompt exceeds max length|context_window_exceeded|exceeded (max |maximum )?context length|range of input length should be|token limit exceeded`)
+	`|input token count.*exceeds the maximum|maximum prompt length is \d|reduce the length of the messages|maximum allowed input length|longer than the model'?s context length|available context size|greater than the context length|prompt token count of [\d,]+ exceeds the limit|context window exceeds limit|exceeded model token limit|configured context size|prompt too long|prompt exceeds max length|context_window_exceeded|exceeded (max |maximum )?context length|range of input length should be|token limit exceeded|input tokens? (count )?(exceeds?|exceeded) (the )?(max(imum)? )?limit`)
 
 // overflowed says a refused request was too long for the model — a
 // request error (400, 413, 422) whose words say so.

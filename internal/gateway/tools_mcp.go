@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/gwtool"
@@ -83,6 +84,18 @@ func servedTools(ctx context.Context) ([]mcpTool, error) {
 	return namedTools(pts), nil
 }
 
+// cutName is s cut to n bytes at most, where a character begins: a
+// plugin's or tool's name may not be ASCII (#2416).
+func cutName(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // namedTools are pts' tools, each named <plugin>_<tool> (64 characters at
 // most, the limit of some clients), a name two would share told apart by
 // a number.
@@ -93,17 +106,10 @@ func namedTools(pts []plugin.PluginTools) []mcpTool {
 		pre := toolPrefix(pt.Spec)
 		for _, t := range pt.Tools {
 			base := pre + "_" + t.Name
-			name := base
-			if len(name) > 64 {
-				name = name[:64]
-			}
+			name := cutName(base, 64)
 			for i := 2; seen[name]; i++ {
 				suf := "_" + strconv.Itoa(i)
-				b := base
-				if len(b)+len(suf) > 64 {
-					b = b[:64-len(suf)]
-				}
-				name = b + suf
+				name = cutName(base, 64-len(suf)) + suf
 			}
 			seen[name] = true
 			out = append(out, mcpTool{spec: pt.Spec, Tool: t, name: name})
