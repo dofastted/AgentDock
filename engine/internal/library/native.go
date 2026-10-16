@@ -38,6 +38,7 @@ type NativeRoot struct {
 	Kind        string `json:"kind"`
 	Path        string `json:"path"`
 	Error       string `json:"error,omitempty"`
+	Total       int    `json:"total,omitempty"`
 	directory   bool
 	distro      string
 	mcp         *mcpFile
@@ -60,6 +61,16 @@ type NativeInventory struct {
 	Roots    []NativeRoot `json:"roots"`
 	Items    []NativeItem `json:"items"`
 	Problems []Problem    `json:"problems"`
+	Page     *NativePage  `json:"page,omitempty"`
+}
+
+// NativePage is one root's file window. Offset is into that root's ordered files.
+type NativePage struct {
+	Root   string `json:"root,omitempty"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
+	Total  int    `json:"total"`
+	More   bool   `json:"more"`
 }
 
 type NativeDocument struct {
@@ -274,13 +285,13 @@ func ReadNative() NativeInventory {
 			v.Roots[i].Error = got[i].err.Error()
 			v.Problems = append(v.Problems, Problem{Agent: r.Agent, What: r.Kind, Error: got[i].err.Error()})
 		}
-		names := nativePrefer(got[i].names)
+		names := nativePageNames(r, got[i].names)
+		v.Roots[i].Total = len(names)
 		if len(names) > nativeMaxPerRoot {
 			names = names[:nativeMaxPerRoot]
-			v.Problems = append(v.Problems, Problem{Agent: r.Agent, What: r.Kind, Error: "this location has more native files than the inventory shows; open its path for the rest"})
 		}
 		if len(names) > 0 {
-			buckets = append(buckets, bucket{root: r, names: names})
+			buckets = append(buckets, bucket{root: v.Roots[i], names: names})
 		}
 	}
 	// One file from each location before deeper files, so one large Windows
@@ -321,6 +332,51 @@ func ReadNative() NativeInventory {
 		return a.Name < b.Name
 	})
 	return v
+}
+
+func nativePageNames(r NativeRoot, names []string) []string {
+	var valid []string
+	for _, name := range names {
+		if _, err := nativeName(r, name); err == nil {
+			valid = append(valid, name)
+		}
+	}
+	return nativePrefer(valid)
+}
+
+// ReadNativeRoot returns a later window of one root's files. ReadNative is the first window of every root.
+func ReadNativeRoot(id string, offset, limit int) (NativeInventory, error) {
+	if limit <= 0 || limit > nativeMaxPerRoot {
+		limit = nativeMaxPerRoot
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	r, err := nativeRootByID(id)
+	if err != nil {
+		return NativeInventory{}, err
+	}
+	listed, err := nativeList(r)
+	if err != nil {
+		r.Error = err.Error()
+	}
+	names := nativePageNames(r, listed)
+	r.Total = len(names)
+	end := offset + limit
+	if end > len(names) {
+		end = len(names)
+	}
+	var items []NativeItem
+	if offset < len(names) {
+		for _, name := range names[offset:end] {
+			items = append(items, nativeItem(r, name))
+		}
+	}
+	return NativeInventory{
+		Roots: []NativeRoot{r},
+		Items: items,
+		Page:  &NativePage{Root: id, Offset: offset, Limit: limit, Total: r.Total, More: end < len(names)},
+	}, nil
 }
 func nativeSkipEntry(name string) bool {
 	switch name {

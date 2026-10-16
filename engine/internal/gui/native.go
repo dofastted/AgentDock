@@ -3,6 +3,7 @@ package gui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 
@@ -35,6 +36,18 @@ func nativeDecode(rw http.ResponseWriter, r *http.Request, in any) bool {
 
 func nativeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/native", func(rw http.ResponseWriter, r *http.Request) {
+		if root := r.URL.Query().Get("root"); root != "" {
+			offset, limit := 0, 0
+			fmt.Sscan(r.URL.Query().Get("offset"), &offset)
+			fmt.Sscan(r.URL.Query().Get("limit"), &limit)
+			page, err := library.ReadNativeRoot(root, offset, limit)
+			if err != nil {
+				nativeError(rw, err)
+				return
+			}
+			writeJSON(rw, page)
+			return
+		}
 		writeJSON(rw, library.ReadNative())
 	})
 	mux.HandleFunc("GET /api/native/file", func(rw http.ResponseWriter, r *http.Request) {
