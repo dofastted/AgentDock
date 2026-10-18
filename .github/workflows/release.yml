@@ -108,8 +108,9 @@ jobs:
           Copy-Item README.md $PORTABLE_DIR\
           Copy-Item LICENSES $PORTABLE_DIR\ -Recurse
           
-          # Create portable marker
+          # Create portable marker and data directory
           "portable" | Out-File -FilePath "$PORTABLE_DIR\.portable" -Encoding ASCII
+          New-Item -ItemType Directory -Force -Path "$PORTABLE_DIR\data" | Out-Null
           
           # Compress
           Compress-Archive -Path $PORTABLE_DIR -DestinationPath "${PORTABLE_DIR}.zip" -Force

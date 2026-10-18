@@ -18,12 +18,21 @@ pub struct ShellSettings {
 }
 
 pub fn app_dir() -> PathBuf {
+    // Check if running in portable mode (.portable marker in exe directory)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let portable_marker = exe_dir.join(".portable");
+            if portable_marker.exists() {
+                return exe_dir.join("data");
+            }
+        }
+    }
+    
+    // Standard installation: use AppData
     if let Ok(appdata) = std::env::var("APPDATA") {
         return PathBuf::from(appdata).join("AgentDock");
     }
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("AgentDock")
+    PathBuf::from(".").join("AgentDock")
 }
 
 pub fn settings_path() -> PathBuf {
