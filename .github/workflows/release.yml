@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.0.0 — no v prefix)'
+        required: true
+        type: string
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install pnpm
+        run: npm install -g pnpm
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shell/src-tauri
+      
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+      
+      - name: Update version in package.json
+        shell: bash
+        working-directory: shell
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          cat package.json
+      
+      - name: Update version in tauri.conf.json
+        shell: bash
+        working-directory: shell/src-tauri
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          jq --arg v "$VERSION" '.version = $v' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+          cat tauri.conf.json | grep version
+      
+      - name: Build engine
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\build-engine.ps1
+          if (!(Test-Path "shell\src-tauri\binaries\agentdock-engine-x86_64-pc-windows-msvc.exe")) {
+            throw "Engine build failed"
+          }
+      
+      
+      - name: Install shell dependencies
+        working-directory: shell
+        run: pnpm install
+      
+      - name: Build Tauri app (NSIS installer)
+        working-directory: shell
+        run: pnpm tauri build
+      
+      - name: Build portable version
+        shell: pwsh
+        run: |
+          $VERSION = "${{ steps.version.outputs.version }}"
+          $PORTABLE_DIR = "AgentDock-${VERSION}-portable"
+          $RELEASE_DIR = "shell\src-tauri\target\release"
+          
+          # Create portable structure
+          New-Item -ItemType Directory -Force -Path $PORTABLE_DIR
+          Copy-Item "$RELEASE_DIR\AgentDock.exe" $PORTABLE_DIR\
+          Copy-Item shell\src-tauri\binaries\agentdock-engine-x86_64-pc-windows-msvc.exe $PORTABLE_DIR\agentdock-engine.exe
+          Copy-Item README.md $PORTABLE_DIR\
+          Copy-Item LICENSES $PORTABLE_DIR\ -Recurse
+          
+          # Create portable marker
+          "portable" | Out-File -FilePath "$PORTABLE_DIR\.portable" -Encoding ASCII
+          
+          # Compress
+          Compress-Archive -Path $PORTABLE_DIR -DestinationPath "${PORTABLE_DIR}.zip" -Force
+          
+          # Verify
+          if (!(Test-Path "${PORTABLE_DIR}.zip")) {
+            throw "Portable zip creation failed"
+          }
+          
+          Write-Host "Portable version created: ${PORTABLE_DIR}.zip"
+          Get-Item "${PORTABLE_DIR}.zip" | Select-Object Name, Length
+      
+      - name: List build artifacts
+        shell: pwsh
+        run: |
+          Write-Host "=== NSIS Installer ==="
+          Get-ChildItem shell\src-tauri\target\release\bundle\nsis\*.exe | Select-Object Name, Length
+          
+          Write-Host "`n=== Portable Version ==="
+          Get-ChildItem *.zip | Select-Object Name, Length
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: AgentDock v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            shell/src-tauri/target/release/bundle/nsis/*.exe
+            AgentDock-*-portable.zip
+          body: |
+            ## AgentDock v${{ steps.version.outputs.version }}
+            
+            ### Downloads
+            
+            - **Windows Installer (NSIS)**: `AgentDock_${{ steps.version.outputs.version }}_x64_en-US.exe`
+            - **Windows Portable**: `AgentDock-${{ steps.version.outputs.version }}-portable.zip`
+            
+            ### Installation
+            
+            **Installer**: Run the `.exe` file. AgentDock will be installed to `%LOCALAPPDATA%\AgentDock`.
+            
+            **Portable**: Extract the zip anywhere and run `AgentDock.exe`.
+            
+            ### What's New
+            
+            See commit history: https://github.com/${{ github.repository }}/compare/v${{ steps.version.outputs.version }}...HEAD
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
