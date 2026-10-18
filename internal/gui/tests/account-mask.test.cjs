@@ -122,9 +122,23 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await panel.waitForFunction(() => [...document.querySelectorAll("#panelQuota .pq-user .pii")].some((e) => e.dataset.raw === "李雷"));
       const pq = await panel.evaluate(() => [...document.querySelectorAll("#panelQuota .pq-card")].map((c) => ({ text: c.querySelector(".pq-user").textContent, title: c.title })));
       for (const c of pq) assert.ok(!/李雷|138\*|dev\.one|Lee\b/.test(c.text + c.title), JSON.stringify(c));
+      // and its model picker, which sits outside the panel's view: a Codex
+      // account's address beside its model (PaulT on Discord)
+      await panel.evaluate(() => {
+        const li = document.createElement("li");
+        li.id = "pickRow";
+        li.textContent = "GPT-6-Astra via magpie dev.one@example.com";
+        li.title = "dev.one@example.com";
+        document.querySelector("#pop #list").append(li);
+      });
+      await panel.waitForFunction(() => document.querySelector("#pickRow .pii")?.dataset.raw === "dev.one@example.com");
+      const row = await panel.evaluate(() => ({ text: document.querySelector("#pickRow").textContent, title: document.querySelector("#pickRow").title }));
+      assert.ok(!/dev\.one/.test(row.text + row.title), JSON.stringify(row));
       await btn.click();
       assert.equal((await btn.textContent()).trim(), w.hide);
       await panel.waitForFunction(() => !document.querySelector("#panelQuota .pii"));
+      await panel.waitForFunction(() => !document.querySelector("#pickRow .pii"));
+      assert.equal(await panel.locator("#pickRow").textContent(), "GPT-6-Astra via magpie dev.one@example.com");
       assert.ok(await panel.evaluate(() => [...document.querySelectorAll("#panelQuota .pq-user")].some((e) => e.textContent === "李雷")));
       // and back as they were in the window
       assert.equal(await page.locator("#sample").textContent(), "李雷 checked in · Sleeper Lee · ZCode");

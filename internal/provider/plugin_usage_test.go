@@ -159,6 +159,13 @@ func TestPluginUsage(t *testing.T) {
 	if q := LoginUsage(ctx, agent)["full@fake"]; q.Resets == nil || !q.Resets.ByWindow || q.Resets.FiveHour != 2 || q.Resets.Weekly != 1 || q.Resets.Count != 3 || q.User != "Full@Fake.example" {
 		t.Fatalf("full@fake = %+v, resets %+v", q, q.Resets)
 	}
+	// a team plan's resets, and each one's end, soonest first, as the
+	// built-in ZCode's are shown (zcode_team.go)
+	if r := LoginUsage(ctx, agent)["full@fake"].Resets; !r.Team || len(r.Each) != 3 ||
+		r.Each[0].Until == nil || r.Each[0].Until.Day() != 1 || r.Each[1].Until.Day() != 2 ||
+		r.Each[2].Until != nil || r.Each[2].Window != "weekly" {
+		t.Fatalf("full@fake's resets %+v, each %+v", r, r.Each)
+	}
 	full := allowanceOf(LoginUsage(ctx, agent)["full@fake"].Windows, time.Now())
 	if used, _ := full.For("fake-claude", time.Now()); used != 100 {
 		t.Fatalf("fake-claude on full@fake: used %v, want 100", used)

@@ -26,6 +26,7 @@
 // plugin's getAuth, client.auth.set and loader see that account alone.
 
 import { AsyncLocalStorage } from "node:async_hooks"
+import { randomUUID } from "node:crypto"
 import dns from "node:dns"
 import fs from "node:fs"
 import http2 from "node:http2"
@@ -281,6 +282,7 @@ let prefer = {}
 // provider id → key → true/false (settings.json's pluginOptions, #2038)
 let chosen = {}
 const hooks = [] // {spec, hooks}
+const gatewayHooks = [] // {spec, options, onRequest}
 const loaded = [] // {spec, id, error}
 const loaders = new Map() // account → options the auth loader returned
 const sessions = new Map() // oauth sign-in in progress → its authorize result
@@ -1162,18 +1164,33 @@ async function loadPlugins(list) {
     }
   }
   for (const p of list) {
-    if (pis.includes(p)) continue
+    const isPi = pis.includes(p)
+    if (isPi && !p.gateway) continue
     try {
+      let gateway
+      if (p.gateway) {
+        gateway = await import(pathToFileURL(p.gateway).href)
+        if (typeof gateway.onRequest !== "function") throw new Error("magpie.hooks exports no onRequest")
+      }
       let fns = []
-      for (const file of entries(p.target)) {
+      // A gateway-only package needs no OpenCode entry. Mixed packages
+      // still load their provider hooks through the usual entry rules.
+      const pkg = readJSON(path.join(p.target, "package.json"))
+      const onlyGateway = isPi || (p.gateway && (p.gateway === p.target || (!pkg?.main && !pkg?.exports && !INDEX_FILES.some((f) => fs.existsSync(path.join(p.target, f))))))
+      for (const file of onlyGateway ? [] : entries(p.target)) {
         fns = servers(await import(pathToFileURL(file).href))
         if (fns.length) break
       }
-      if (fns.length === 0) throw new Error("exports no OpenCode plugin function")
+      if (fns.length === 0 && !gateway) throw new Error("exports no OpenCode plugin function")
       for (const fn of fns) hooks.push({ spec: p.spec, target: p.target, hooks: (await fn(input, p.options)) ?? {} })
-      loaded.push({ spec: p.spec })
+      if (gateway) gatewayHooks.push({ spec: p.spec, options: p.options ?? {}, onRequest: gateway.onRequest,
+        onResponse: gateway.onResponse,
+        state: { calls: 0, failures: 0, totalMillis: 0, lastOutcome: "idle", lastBytes: 0 } })
+      if (!isPi) loaded.push({ spec: p.spec })
     } catch (e) {
-      loaded.push({ spec: p.spec, error: e?.plain ? e.message : String(e?.stack ?? e) })
+      const error = e?.plain ? e.message : String(e?.stack ?? e)
+      if (isPi) loaded.find((r) => r.spec === p.spec).error = error
+      else loaded.push({ spec: p.spec, error })
     }
   }
   config = { provider: {}, ...structuredClone(userConfig) }
@@ -1185,6 +1202,139 @@ async function loadPlugins(list) {
       send({ event: "log", level: "error", message: `${h.spec}: config hook: ${e?.message ?? e}` })
     }
   }
+}
+
+// A bounded await detaches its listener even when the plugin ignores the
+// signal. The rejected promise is observed, so late failures cannot escape.
+function bounded(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const finish = (fn, value) => { signal.removeEventListener("abort", abort); fn(value) }
+    const abort = () => finish(reject, new DOMException("Aborted", "AbortError"))
+    // Observe the task even if cancellation won before the await began.
+    Promise.resolve(promise).then((value) => finish(resolve, value), (error) => finish(reject, error))
+    if (signal.aborted) abort()
+    else signal.addEventListener("abort", abort, { once: true })
+  })
+}
+
+// A run owns the private state of its participating plugins. Its token prevents
+// a stale or malformed RPC from selecting another request's tool handlers.
+const gatewayRuns = new Map()
+const GATEWAY_RUN_LIMIT = 128
+const GATEWAY_RUN_TTL = 15 * 60 * 1000
+const gatewayTimeout = (h) => Number.isInteger(h.options.gatewayTimeoutMs) && h.options.gatewayTimeoutMs >= 100 && h.options.gatewayTimeoutMs <= 10000 ? h.options.gatewayTimeoutMs : 1000
+const gatewayBudget = () => Math.min(10000, Math.max(2000, gatewayHooks.reduce((n, h) => n + gatewayTimeout(h), 0)))
+
+function closeGateway(run) {
+  if (!run || run.closed) return
+  run.closed = true
+  gatewayRuns.delete(run.id)
+  clearTimeout(run.timer)
+  run.controller.abort()
+  run.plugins.length = 0
+}
+
+async function gatewayBegin(p, signal) {
+  if (gatewayRuns.size >= GATEWAY_RUN_LIMIT) return null
+  const run = { id: randomUUID(), token: randomUUID(), plugins: [], controller: new AbortController(), closed: false, finished: false }
+  gatewayRuns.set(run.id, run)
+  run.timer = setTimeout(() => closeGateway(run), GATEWAY_RUN_TTL)
+  run.timer.unref()
+  let body = p.body
+  // The total budget bounds many installed hooks as well as one slow hook.
+  const total = AbortSignal.any([signal, run.controller.signal, AbortSignal.timeout(gatewayBudget())])
+  for (const h of gatewayHooks) {
+    if (total.aborted) break
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), gatewayTimeout(h))
+    const ownSignal = AbortSignal.any([total, ctl.signal])
+    const started = performance.now()
+    let outcome = "skipped", bytes = 0
+    try {
+      // Diagnostics accept fixed codes and byte counts only. Never retain
+      // exception messages, queries, scope IDs, credentials or recalled text.
+      const report = (code, count = 0) => {
+        if (ownSignal.aborted || !["ready", "empty", "unbound", "unauthorized", "unavailable", "invalid", "skipped"].includes(code)) return
+        outcome = code
+        bytes = Number.isSafeInteger(count) && count >= 0 && count <= 32768 ? count : 0
+      }
+      const ctx = { ...p.context, options: structuredClone(h.options), state: {}, signal: ownSignal, report }
+      const result = await bounded(Promise.resolve().then(() => h.onRequest(structuredClone(body), ctx)), ownSignal)
+      let next = body
+      if (result !== undefined) {
+        if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("invalid body")
+        // Validate serialization before accepting a plugin's result.
+        next = JSON.parse(JSON.stringify(result))
+        if (!next || typeof next !== "object" || Array.isArray(next)) throw new Error("invalid serialized body")
+        if (outcome === "skipped") outcome = "ready"
+      }
+      // Context hooks cannot register or change client tools or tool choice,
+      // nor the model or streaming: the gateway checked the caller's key
+      // against the model, and the client reads the reply it asked for.
+      for (const key of ["tools", "tool_choice", "function_call", "functions", "toolConfig", "model", "stream"]) {
+        if (JSON.stringify(next[key]) !== JSON.stringify(body[key])) throw new Error("context hook changed client tools, model or streaming")
+      }
+      if (JSON.stringify(next.config?.tools) !== JSON.stringify(body.config?.tools) || JSON.stringify(next.config?.toolConfig) !== JSON.stringify(body.config?.toolConfig)) throw new Error("context hook changed client tools")
+      body = next
+      run.plugins.push({ h, ctx })
+    } catch {
+      if (ownSignal.aborted) outcome = signal.aborted ? "cancelled" : "timeout"
+      else if (!["unbound", "unauthorized", "unavailable", "invalid"].includes(outcome)) outcome = "error"
+      // Exception text may contain tokens or recalled private material.
+      if (!signal.aborted) send({ event: "log", level: "warn", message: `${h.spec}: gateway request hook failed or timed out; keeping request` })
+    } finally {
+      h.state.calls++
+      if (["timeout", "error", "unauthorized", "unavailable", "invalid"].includes(outcome)) h.state.failures++
+      h.state.totalMillis += performance.now() - started
+      h.state.lastOutcome = outcome
+      h.state.lastBytes = outcome === "ready" ? bytes : 0
+      clearTimeout(timer)
+      ctl.abort()
+    }
+  }
+  if (signal.aborted || run.closed) {
+    closeGateway(run)
+    signal.throwIfAborted()
+    return null
+  }
+  return { id: run.id, token: run.token, body }
+}
+
+async function gatewayFinish(run, p, signal) {
+  if (run.finished) return null
+  run.finished = true
+  const total = AbortSignal.any([signal, run.controller.signal, AbortSignal.timeout(gatewayBudget())])
+  try {
+    for (const { h, ctx } of run.plugins) {
+      if (total.aborted) break
+      if (typeof h.onResponse !== "function") continue
+      const ctl = new AbortController()
+      const timer = setTimeout(() => ctl.abort(), gatewayTimeout(h))
+      ctx.signal = AbortSignal.any([total, ctl.signal])
+      ctx.success = p.success === true
+      if (p.request !== undefined) ctx.request = structuredClone(p.request)
+      try {
+        await bounded(Promise.resolve().then(() => h.onResponse(structuredClone(p.reply), ctx)), ctx.signal)
+      } catch {
+        if (!signal.aborted) send({ event: "log", level: "warn", message: `${h.spec}: gateway response hook failed or timed out` })
+      } finally {
+        clearTimeout(timer)
+        ctl.abort()
+      }
+    }
+  } finally {
+    closeGateway(run)
+  }
+  return null
+}
+
+async function gatewayRequest(p, signal) {
+  if (p.operation === "begin") return gatewayBegin(p, signal)
+  const run = gatewayRuns.get(p.id)
+  if (!run || run.closed || run.token !== p.token) return null
+  if (p.operation === "close") { closeGateway(run); return null }
+  if (p.operation === "finish") return gatewayFinish(run, p, signal)
+  return null
 }
 
 // auths are the auth hooks by provider, the last plugin to name one
@@ -1655,6 +1805,19 @@ function rateOf(v) {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0
 }
 
+// tiersOf reads the service tiers a plugin says a model serves
+// (m.serviceTiers): ids ("priority", "ultrafast"), or objects with an id as
+// Codex's catalog writes them; anything else is dropped
+function tiersOf(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  for (const t of v) {
+    const id = typeof t === "string" ? t.trim() : typeof t?.id === "string" ? t.id.trim() : ""
+    if (id && !out.includes(id)) out.push(id)
+  }
+  return out
+}
+
 // providers lists each provider and its accounts' models, each asked
 // through its proxy (proxies[provider][key], "" the provider's own), as a
 // built-in fetches each account's list through the account's.
@@ -1729,6 +1892,9 @@ async function providers({ proxies } = {}) {
           rateWas: rateOf(m.rateWas),
           // run fast when the request's service_tier is priority (Cursor's)
           fast: m.fast === true,
+          // the service tiers the vendor serves it at (service_tier
+          // "priority", "ultrafast"), which Codex then offers (#2514)
+          serviceTiers: tiersOf(m.serviceTiers),
           // a decision model (System One's), hidden from agents and
           // offered as a routing group's classifier
           decides: m.decides === true,
@@ -1983,8 +2149,11 @@ async function load({ provider, account, proxy }) {
 //   auth.usage(getAuth, provider) → {
 //     plan?, user? (the account as the service names it), until?,
 //     renew?: "auto" | "off", balance?, error?,
-//     resets?: { count, until?, byWindow?, fiveHour?, weekly? } (the
-//       rate-limit resets the account may spend),
+//     resets?: { count, until?, byWindow?, fiveHour?, weekly?, team?
+//       (a team plan's, not the person's own), each?: [{ until? (ISO or
+//       ms; none: it never runs out), window? ("fiveHour", "weekly") }]
+//       (every reset still to be used) } (the rate-limit resets the
+//       account may spend),
 //     windows?: [{ name, used (percent, 0–100), resetsAt? (ISO or ms),
 //       resetSecs?, display?, amount? / limit? / unit? (the window's own
 //       count, when it counts in amounts: amount of limit used, in unit,
@@ -2031,7 +2200,13 @@ async function usageOf(provider, account) {
     signIn: ["expired", "kept", "renewed"].includes(u.signIn) ? u.signIn : "",
     resets:
       u.resets && typeof u.resets === "object"
-        ? { count: num(u.resets.count), until: when(u.resets.until), byWindow: !!u.resets.byWindow, fiveHour: num(u.resets.fiveHour), weekly: num(u.resets.weekly) }
+        ? {
+            count: num(u.resets.count), until: when(u.resets.until), byWindow: !!u.resets.byWindow,
+            fiveHour: num(u.resets.fiveHour), weekly: num(u.resets.weekly), team: !!u.resets.team,
+            each: (Array.isArray(u.resets.each) ? u.resets.each : [])
+              .filter((r) => r && typeof r === "object")
+              .map((r) => ({ until: when(r.until), window: r.window === "fiveHour" || r.window === "weekly" ? r.window : "" })),
+          }
         : null,
     windows: (Array.isArray(u.windows) ? u.windows : []).map((w) => ({
       name: text(w?.name),
@@ -2212,6 +2387,13 @@ async function fetchAs(id, record, key, params) {
 // ---- the loop ----------------------------------------------------------------
 
 const handlers = {
+  gatewayStates() {
+    return Object.fromEntries(gatewayHooks.map(({ spec, state }) => [spec, {
+      calls: state.calls, failures: state.failures,
+      avgMillis: state.calls ? state.totalMillis / state.calls : 0,
+      lastOutcome: state.lastOutcome, lastBytes: state.lastBytes,
+    }]))
+  },
   async init(p) {
     authPath = p.authPath
     modelsDevPath = p.modelsDevPath ?? ""
@@ -2344,6 +2526,7 @@ const done = () => {
   if (--pending === 0 && closed) process.exit(0)
 }
 
+const gatewayInflight = new Map() // RPC id -> AbortController
 const rl = readline.createInterface({ input: process.stdin, terminal: false })
 rl.on("line", (line) => {
   if (!line.trim()) return
@@ -2357,6 +2540,7 @@ rl.on("line", (line) => {
     const id = msg.params?.id
     const record = inflight.get(id)
     if (record) transitionFetch(record, "cancelled")
+    gatewayInflight.get(id)?.abort()
     return
   }
   if (msg.method === "credit") {
@@ -2371,6 +2555,22 @@ rl.on("line", (line) => {
       (result) => send({ id: msg.id, result }),
       (e) => send({ id: msg.id, error: { message: String(e?.message ?? e) } }),
     ).finally(done)
+    return
+  }
+  if (msg.method === "gatewayRequest") {
+    const ctl = new AbortController()
+    gatewayInflight.set(msg.id, ctl)
+    // Own cancellation before waiting for init, just as provider fetches do.
+    bounded(ready ?? Promise.reject(new Error("the host has not been initialised")), ctl.signal)
+      .then(() => gatewayRequest(msg.params ?? {}, ctl.signal))
+      .then(
+        (result) => {
+          if (!ctl.signal.aborted) return send({ id: msg.id, result })
+          if (msg.params?.operation === "begin" && result?.id) closeGateway(gatewayRuns.get(result.id))
+        },
+        () => { if (!ctl.signal.aborted) return send({ id: msg.id, result: null }) },
+      )
+      .finally(() => { gatewayInflight.delete(msg.id); done() })
     return
   }
   if (msg.method === "fetch") {

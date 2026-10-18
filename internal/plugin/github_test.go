@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,8 +74,17 @@ func fakeGitHub(t *testing.T, up *atomic.Bool, asked *atomic.Int32) {
 		like("forker/opencode-claude-auth", map[string]any{"fork": true}),
 		like("old/opencode-old", map[string]any{"archived": true}),
 		like("magpie-community/plugins", nil))
-	r["items"] = items
-	search, _ := json.Marshal(r)
+	// one page of the search, as GitHub cuts it
+	search := func(q url.Values) []byte {
+		per, _ := strconv.Atoi(q.Get("per_page"))
+		page, _ := strconv.Atoi(q.Get("page"))
+		from, to := min(max(page-1, 0)*per, len(items)), len(items)
+		if per > 0 {
+			to = min(from+per, len(items))
+		}
+		b, _ := json.Marshal(map[string]any{"total_count": len(items), "incomplete_results": false, "items": items[from:to]})
+		return b
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
 		if q.URL.Path != "/search/repositories" {
 			reads.Add(1)
@@ -90,7 +101,7 @@ func fakeGitHub(t *testing.T, up *atomic.Bool, asked *atomic.Int32) {
 			if got := q.URL.Query().Get("q"); got != "topic:magpie-plugin archived:false fork:false" {
 				t.Errorf("searched %q", got)
 			}
-			w.Write(search)
+			w.Write(search(q.URL.Query()))
 			return
 		}
 		if name, ok := strings.CutPrefix(q.URL.Path, "/npm/"); ok {
@@ -128,6 +139,32 @@ func fakeGitHub(t *testing.T, up *atomic.Bool, asked *atomic.Int32) {
 // Repositories tagged magpie-plugin: each with what its package.json says,
 // in GitHub's order; forks, archived ones and magpie-community's left out.
 // Asked once in six hours; with GitHub down, what it said last.
+// Every page of the search is read: with a page short of what is tagged,
+// the list is the same as from one page, in GitHub's order (HoGee_xxl on X:
+// 59 tagged, and the 9 past GitHub's first page of 50 never showed).
+func TestTaggedReposEveryPage(t *testing.T) {
+	var up atomic.Bool
+	var asked atomic.Int32
+	up.Store(true)
+	fakeGitHub(t, &up, &asked)
+	was := taggedPage
+	taggedPage = 4
+	t.Cleanup(func() { taggedPage = was })
+
+	var repos []string
+	for _, x := range TaggedRepos(context.Background()) {
+		repos = append(repos, x.Repo)
+	}
+	want := "rynfar/meridian griffinmartin/opencode-claude-auth slkiser/opencode-quota someone/word-guard someone/agent-aider someone/page-glance someone/flaky-entry"
+	if strings.Join(repos, " ") != want {
+		t.Fatalf("repos %v\nwant %s", repos, want)
+	}
+	// 15 items, four to a page
+	if n := asked.Load(); n != 4 {
+		t.Fatalf("asked %d pages, want 4", n)
+	}
+}
+
 func TestTaggedRepos(t *testing.T) {
 	var up atomic.Bool
 	var asked atomic.Int32

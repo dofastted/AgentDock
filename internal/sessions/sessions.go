@@ -2,7 +2,7 @@
 // files — Claude Code's projects/*/<id>.jsonl (and Qoder's, the same kind),
 // Codex's rollout files, OpenCode's database (or its older JSON files) and
 // ZCode's, Pi's session files and omp's, DeepSeek Harness's, Cline's, Grok
-// Build's, WorkBuddy's, Droid's, Cursor CLI's and Alma's chat stores — with the tokens each spent, what that cost at the
+// Build's, WorkBuddy's and CodeBuddy Code's, Droid's, Cursor CLI's and Alma's chat stores — with the tokens each spent, what that cost at the
 // effective price, and the command that resumes it. It only ever reads the
 // agents' folders.
 //
@@ -118,7 +118,7 @@ type Session struct {
 	// Gateway: seen only through magpie's gateway, with no file of the
 	// agent's on this computer (external.go)
 	Gateway       bool          `json:"gateway,omitempty"`
-	Agent         string        `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy, droid, cursor, hermes, alma, kimi
+	Agent         string        `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy, codebuddy, droid, cursor, hermes, alma, kimi
 	ID            string        `json:"id"`
 	Cwd           string        `json:"cwd"`
 	Title         string        `json:"title"` // the name it was given, else the agent's own title, else the first prompt
@@ -473,7 +473,7 @@ func allFiles() []file {
 	var out []file
 	for _, fs := range [][]file{callFiles(), openCodeFiles(), piFiles(),
 		wslFiles("pi", "omp", "kimi"), zcodeFiles(), dshFiles(), clineFiles(), ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")),
-		grokFiles(), workbuddyFiles(), droidFiles(), ompFiles(), cursorFiles(), hermesFiles(), almaFiles(), kimiFiles()} {
+		grokFiles(), workbuddyFiles(), codebuddyFiles(), droidFiles(), ompFiles(), cursorFiles(), hermesFiles(), almaFiles(), kimiFiles()} {
 		out = append(out, fs...)
 	}
 	return out
@@ -493,6 +493,7 @@ func Dirs() []string {
 		{QoderDir("qoder-cn"), filepath.Join(QoderDir("qoder-cn"), "projects")},
 		{GrokDir(), filepath.Join(GrokDir(), "sessions")},
 		{WorkBuddyDir(), filepath.Join(WorkBuddyDir(), "projects")},
+		{CodeBuddyDir(), filepath.Join(CodeBuddyDir(), "projects")},
 		{OmpDir(), filepath.Join(OmpDir(), "sessions")},
 		{FactoryDir(), filepath.Join(FactoryDir(), "sessions")},
 		{CursorDir(), filepath.Join(CursorDir(), "chats")},
@@ -1175,7 +1176,7 @@ func parserFor(agent string) sessionParser {
 		return sessionParser{line: codexBody}
 	case "pi", "omp":
 		return sessionParser{line: piParse}
-	case "workbuddy":
+	case "workbuddy", "codebuddy":
 		return sessionParser{line: workbuddyLine}
 	default:
 		return sessionParser{line: claudeLine, claude: true}
@@ -1219,7 +1220,7 @@ func parse(f file, old *state) *state {
 	if err == nil {
 		s.Off = off
 	}
-	if f.agent == "workbuddy" && s.Cwd == "" {
+	if isBuddy(f.agent) && s.Cwd == "" {
 		workbuddyMeta(s, f.path)
 	}
 	return s
@@ -1240,6 +1241,9 @@ func scan(path string, off int64, fn func([]byte)) (int64, error) {
 // to is stepped over without being gathered (most of a Codex rollout's
 // bytes are lines no one reads: compactions, tool output). A nil head
 // wants every line.
+// scanHook, when a test sets it, is told where each scan of a file starts.
+var scanHook func(path string, off int64)
+
 func scanHead(path string, off int64, head func([]byte) bool, fn func([]byte)) (int64, error) {
 	return scanAt(path, off, head, func(b []byte, _, _ int64) bool { fn(b); return true })
 }
@@ -1250,6 +1254,9 @@ func scanHead(path string, off int64, head func([]byte) bool, fn func([]byte)) (
 // A compressed file's places are those of its lines decompressed; it is read
 // from its start, what comes before off passed over.
 func scanAt(path string, off int64, head func([]byte) bool, fn func(b []byte, start, end int64) bool) (int64, error) {
+	if scanHook != nil {
+		scanHook(path, off)
+	}
 	f, err := openLines(path)
 	if err != nil {
 		return off, err
@@ -1477,6 +1484,10 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 		run = "qoderclicn --resume " + id
 	case "grok":
 		run = "grok --resume " + id
+	case "codebuddy":
+		// its CLI's -r, --resume [sessionId], one bin of the package's
+		// three (codebuddy, cbc, codebuddy-code)
+		run = "codebuddy --resume " + id
 	case "omp":
 		run = "omp --resume " + id
 		if profile := ompProfile(path); profile != "" {

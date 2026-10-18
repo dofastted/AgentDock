@@ -221,6 +221,13 @@ func mergeKept(have, want map[string]any, own []string) map[string]any {
 	}
 	for k, h := range have {
 		if slices.Contains(own, k) {
+			// magpie's key for the gateway, where the user put a key of
+			// the gateway's own instead: theirs stays (keyHolds)
+			if hs, ok := h.(string); ok {
+				if ws, ok := want[k].(string); ok && hs != ws && keyHolds(hs, ws) {
+					out[k] = hs
+				}
+			}
 			continue
 		}
 		w, ok := want[k]

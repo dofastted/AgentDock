@@ -901,12 +901,13 @@ func sameHost(a, b string) bool { return hostOf(a) == hostOf(b) }
 // gateway — pairs of key and value, read with get — and says which no longer
 // holds, "" when all do. A URL is quoted; a key's value never is. A URL
 // that reaches magpie another way (reachesMagpie: a reverse proxy, #1985)
-// holds.
+// holds. So does a key of the gateway's own the user put in place of
+// magpie's (keyHolds).
 func wiringOff(name, file string, get func(string) (string, bool), kvs ...string) string {
 	for i := 0; i+1 < len(kvs); i += 2 {
 		k, want := kvs[i], kvs[i+1]
 		v, _ := get(k)
-		if v == want || v != "" && reachesMagpie(v, want) {
+		if keyHolds(v, want) || v != "" && reachesMagpie(v, want) {
 			continue
 		}
 		where := name + "'s " + k + " (" + filepath.Base(file) + ")"

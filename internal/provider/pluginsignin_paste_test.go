@@ -99,3 +99,53 @@ func TestLoopbackPorts(t *testing.T) {
 		t.Error("Command Code's page posts its key: there is no address to paste")
 	}
 }
+
+// Command Code's page posts its key to the plugin's port from script, so
+// a magpie on a server or in Docker has no address to paste. Its sign-in
+// takes a key made on Command Code's keys page in place, through the
+// plugin's API key way, as the built-in's did (#2468): an address is
+// refused, a key signs in, and the plugin keeps it.
+func TestPluginSignInTakesAPastedKey(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Setenv("FAKE_LOOPBACK", "1")
+	t.Setenv("FAKE_ID", CommandCodePlanID)
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("../plugin/testdata/fake/index.js")
+	if _, err := plugin.Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, err := StartPluginSignIn(CommandCodePlanID, 1, map[string]string{"where": "home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.PasteKey || st.KeysURL != cmdKeysURL || st.PasteCallback {
+		t.Fatalf("Command Code's browser sign-in takes a pasted key: %+v", st)
+	}
+	if err := SubmitSignInCallback(st.ID, "http://127.0.0.1:1/callback?code=x"); err == nil {
+		t.Fatal("an address was taken as a key")
+	}
+	if got, _ := SignInStatus(st.ID); got.State != "waiting" {
+		t.Fatalf("after a refused paste: %+v", got)
+	}
+	if err := SubmitSignInCallback(st.ID, "  user_cc_key1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := SignInStatus(st.ID); got.State != "done" {
+		t.Fatalf("after the pasted key: %+v", got)
+	}
+	auths := plugin.Auths(CommandCodePlanID)
+	var kept bool
+	for _, a := range auths {
+		kept = kept || a["type"] == "api" && a["key"] == "user_cc_key1"
+	}
+	if !kept {
+		t.Fatalf("the plugin didn't keep the key: %v", auths)
+	}
+}

@@ -24,8 +24,76 @@ import (
 // real tool call, and the reply ends as one that called tools. Held text
 // that isn't all such blocks goes on as the text it was.
 
-// textCallMarks are what a call written into the text opens with.
-var textCallMarks = []string{"<tool_call>", "<｜DSML｜", "<|DSML|"}
+// textCallMarks are what a call written into the text opens with, beside
+// DeepSeek's DSML tags, which dsmlMark reads.
+var textCallMarks = []string{"<tool_call>"}
+
+// dsmlMark tells whether s begins with a DSML tag's mark, read as the
+// parse regexes read one (dsmlTag): <, spaces, / and spaces for a close
+// when closing is true, a pipe, then a run of pipes and spaces, DSML and
+// another run, which may be empty. A pipe is ASCII | or full-width ｜, in
+// any number and any mix of widths: DeepSeek writes one or two
+// (#2623, OKURBITO: <｜｜DSML｜｜invoke went out as text), and its widths
+// don't always agree within a tag, so no spelling is listed. n is the
+// mark's length when s begins with one; more is whether s, too short for
+// one, could be one's beginning still being written, down to a full-width
+// pipe's first bytes.
+func dsmlMark(s string, closing bool) (n int, more bool) {
+	if !strings.HasPrefix(s, "<") {
+		return 0, false
+	}
+	i := 1
+	space := func() {
+		for i < len(s) && strings.ContainsRune(" \t\r\n", rune(s[i])) {
+			i++
+		}
+	}
+	// pipe steps over one pipe at i; part is whether s ends in the first
+	// bytes of a full-width one
+	pipe := func() (ok, part bool) {
+		switch {
+		case i < len(s) && s[i] == '|':
+			i++
+			return true, false
+		case strings.HasPrefix(s[i:], "｜"):
+			i += len("｜")
+			return true, false
+		}
+		return false, i < len(s) && strings.HasPrefix("｜", s[i:])
+	}
+	// run reads pipes and spaces from i; part as for pipe
+	run := func() (part bool) {
+		for {
+			space()
+			if ok, part := pipe(); !ok {
+				return part
+			}
+		}
+	}
+	space()
+	if closing && i < len(s) && s[i] == '/' {
+		i++
+		space()
+	}
+	if i == len(s) {
+		return 0, true
+	}
+	if ok, part := pipe(); !ok {
+		return 0, part
+	}
+	if run() || i == len(s) {
+		return 0, true
+	}
+	if rest := s[i:]; !strings.HasPrefix(rest, "DSML") {
+		return 0, strings.HasPrefix("DSML", rest)
+	}
+	i += len("DSML")
+	if run() || i == len(s) {
+		// the run after DSML may go on in the next chunk
+		return 0, true
+	}
+	return i, false
+}
 
 // writtenCall is one call read out of the text.
 type writtenCall struct {
@@ -91,6 +159,21 @@ func textCallAt(s string) (at, tail int) {
 		if i := strings.Index(s, m); i >= 0 && (at < 0 || i < at) {
 			at = i
 		}
+	}
+	for i := strings.IndexByte(s, '<'); i >= 0 && (at < 0 || i < at); {
+		n, more := dsmlMark(s[i:], false)
+		if n > 0 {
+			at = i
+			break
+		}
+		if more && tail == 0 {
+			tail = len(s) - i
+		}
+		j := strings.IndexByte(s[i+1:], '<')
+		if j < 0 {
+			break
+		}
+		i += 1 + j
 	}
 	if at >= 0 {
 		return at, 0
@@ -162,11 +245,19 @@ func parseTextCalls(s string, names map[string]bool) (calls []writtenCall, rest 
 // cutMark is the end of s that is a mark's beginning cut short (</ of
 // </tool_call>), "" when there's none; a lone < may be text.
 func cutMark(s string) string {
-	for _, m := range append([]string{"</tool_call>", "</parameter>", "</｜DSML｜", "</|DSML|"}, textCallMarks...) {
+	for _, m := range append([]string{"</tool_call>", "</parameter>"}, textCallMarks...) {
 		for n := len(m) - 1; n >= 2; n-- {
 			if strings.HasSuffix(s, m[:n]) {
 				return m[:n]
 			}
+		}
+	}
+	// a DSML tag's, open or close, however many its pipes; a run of
+	// them holds no <, so only the last can be one cut short. It has
+	// begun its pipes (a full-width one's first bytes too): "x < " is text
+	if i := strings.LastIndexByte(s, '<'); i >= 0 && strings.IndexAny(s[i:], "|｜\xef") >= 0 {
+		if _, more := dsmlMark(s[i:], true); more {
+			return s[i:]
 		}
 	}
 	return ""

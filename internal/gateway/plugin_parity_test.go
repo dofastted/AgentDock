@@ -144,3 +144,54 @@ func TestTraceNamesMovedAccount(t *testing.T) {
 		t.Fatalf("weighed = %+v, want grok's account", w)
 	}
 }
+
+// A failed tool result reaches the plugins of Devin and Qoder as their
+// built-ins sent it, "Error: " first, and Cursor's as is_error, which its
+// plugin reads; no other chat upstream is told either.
+func TestPluginToolFailureSaid(t *testing.T) {
+	failed := &Request{Messages: []Message{
+		{Role: "user", Parts: []Part{{Kind: Text, Text: "go"}}},
+		{Role: "assistant", Parts: []Part{{Kind: ToolCall, ID: "c1", Name: "Bash", Args: json.RawMessage(`{}`)}}},
+		{Role: "user", Parts: []Part{{Kind: ToolResult, CallID: "c1", Text: "exit status 1", IsError: true}}},
+	}}
+	tool := func(host string) map[string]any {
+		var m struct{ Messages []map[string]any }
+		if err := json.Unmarshal(buildChat(failed, "m", host, false), &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, msg := range m.Messages {
+			if msg["role"] == "tool" {
+				return msg
+			}
+		}
+		t.Fatalf("%s: no tool message in %v", host, m.Messages)
+		return nil
+	}
+	for _, host := range []string{"devin", "qoder", "qoder-cn"} {
+		if got := tool(host); got["content"] != "Error: exit status 1" || got["is_error"] != nil {
+			t.Errorf("%s: %v", host, got)
+		}
+	}
+	if got := tool("cursor"); got["content"] != "exit status 1" || got["is_error"] != true {
+		t.Errorf("cursor: %v", got)
+	}
+	for _, host := range []string{"api.openai.com", "api.deepseek.com", "zed", provider.CommandCodePlanID} {
+		if got := tool(host); got["content"] != "exit status 1" || got["is_error"] != nil {
+			t.Errorf("%s: %v", host, got)
+		}
+	}
+}
+
+// A moved Command Code account's chat is built for its plugin, not for the
+// built-in's API host it shows, so a Go conversation keeps its reasoning
+// (chatReplaysReasoning) as one added on the plugin does.
+func TestMovedBuildHostIsPlugin(t *testing.T) {
+	movedFake(t, provider.CommandCodePlanID, http.NotFoundHandler())
+	p, err := provider.Find(provider.CommandCodePlanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := buildHost(*p); got != provider.CommandCodePlanID {
+		t.Fatalf("buildHost = %q, Host = %q", got, p.Host())
+	}
+}

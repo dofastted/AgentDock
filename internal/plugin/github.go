@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,9 @@ var (
 	taggedEach   = 20 * time.Second
 	taggedAtOnce = 12
 	taggedRetry  = 20 * time.Second
+	// taggedPage is how many repositories one page of the search holds
+	// (GitHub's most is 100)
+	taggedPage = 100
 )
 
 var (
@@ -152,32 +156,51 @@ func TaggedRepos(ctx context.Context) []Tagged {
 func askTagged(ctx context.Context, last []Tagged) (l []Tagged, whole bool, err error) {
 	c, cancel := context.WithTimeout(ctx, taggedWait)
 	defer cancel()
-	v := url.Values{"q": {"topic:" + Topic + " archived:false fork:false"}, "sort": {"stars"}, "order": {"desc"}, "per_page": {"50"}}
-	b, err := fetchJSON(c, githubAPI+"/search/repositories?"+v.Encode(), 4<<20)
-	if err != nil {
-		return nil, false, err
+	type item struct {
+		FullName      string    `json:"full_name"`
+		HTMLURL       string    `json:"html_url"`
+		Description   string    `json:"description"`
+		Stars         int       `json:"stargazers_count"`
+		DefaultBranch string    `json:"default_branch"`
+		Pushed        time.Time `json:"pushed_at"`
+		Archived      bool      `json:"archived"`
+		Fork          bool      `json:"fork"`
+		Owner         struct {
+			Login     string `json:"login"`
+			AvatarURL string `json:"avatar_url"`
+		} `json:"owner"`
+		License *struct {
+			SPDX string `json:"spdx_id"`
+		} `json:"license"`
 	}
-	var r struct {
-		Items []struct {
-			FullName      string    `json:"full_name"`
-			HTMLURL       string    `json:"html_url"`
-			Description   string    `json:"description"`
-			Stars         int       `json:"stargazers_count"`
-			DefaultBranch string    `json:"default_branch"`
-			Pushed        time.Time `json:"pushed_at"`
-			Archived      bool      `json:"archived"`
-			Fork          bool      `json:"fork"`
-			Owner         struct {
-				Login     string `json:"login"`
-				AvatarURL string `json:"avatar_url"`
-			} `json:"owner"`
-			License *struct {
-				SPDX string `json:"spdx_id"`
-			} `json:"license"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(b, &r); err != nil {
-		return nil, false, err
+	var r struct{ Items []item }
+	// every page, not the first: one page left out every repository past
+	// it. GitHub's search answers at most 1000 results.
+	listed := map[string]bool{}
+	for page := 1; page*taggedPage <= 1000; page++ {
+		v := url.Values{"q": {"topic:" + Topic + " archived:false fork:false"}, "sort": {"stars"}, "order": {"desc"},
+			"per_page": {strconv.Itoa(taggedPage)}, "page": {strconv.Itoa(page)}}
+		b, err := fetchJSON(c, githubAPI+"/search/repositories?"+v.Encode(), 4<<20)
+		if err != nil {
+			return nil, false, err
+		}
+		var p struct {
+			Total int    `json:"total_count"`
+			Items []item `json:"items"`
+		}
+		if err := json.Unmarshal(b, &p); err != nil {
+			return nil, false, err
+		}
+		for _, it := range p.Items {
+			// a repository starred between two pages can show on both
+			if k := strings.ToLower(it.FullName); !listed[k] {
+				listed[k] = true
+				r.Items = append(r.Items, it)
+			}
+		}
+		if len(p.Items) < taggedPage || page*taggedPage >= p.Total {
+			break
+		}
 	}
 	before := map[string]Tagged{}
 	for _, t := range last {

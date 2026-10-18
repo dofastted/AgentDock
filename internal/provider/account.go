@@ -69,10 +69,6 @@ type Account struct {
 	// go (google.go).
 	codeAssist string
 
-	// generate is set on a Command Code account: its key, and whether its
-	// plan is Go, asked at /alpha/generate (commandcode_plan.go).
-	generate func(ctx context.Context) (key string, ok bool)
-
 	sign   func(ctx context.Context, req *http.Request, body []byte) error
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
@@ -136,10 +132,10 @@ func (p Provider) ListedAPIs(model string) []Protocol {
 	if p.IsPlugin() {
 		return p.pluginAPIs(model)
 	}
-	// asked for every model of every agent: read once while a request holds
-	ms, _, _ := p.live()
-	for _, m := range ms {
-		if m.ID == model && len(m.APIs) > 0 {
+	// asked for every model of every agent: looked up, not the list
+	// copied and scanned for each (2,500 models' /v1/models took 3s)
+	for _, m := range p.liveByID(model) {
+		if len(m.APIs) > 0 {
 			out := make([]Protocol, len(m.APIs))
 			for i, a := range m.APIs {
 				out[i] = Protocol(a)
@@ -277,11 +273,6 @@ func (p Provider) Explain(msg string, status int, body []byte) string {
 		return msg
 	}
 	if more := p.Account.explain(status, body); more != "" {
-		// an account's reading of a block page that names the network
-		// block itself (ZCodeStartBlockedHint) takes the generic one's place
-		if more == ZCodeStartBlockedHint {
-			msg = strings.TrimSuffix(msg, " — "+BlockedHint)
-		}
 		return msg + " — " + more
 	}
 	return msg
@@ -858,43 +849,6 @@ func Accounts() []Provider {
 	if p, ok := copilotAccount(cfg); ok {
 		out = append(out, p)
 	}
-	if p, ok := cursorAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := grokAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := devinAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := kiroAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := zcodeAccount(); ok {
-		out = append(out, p)
-	}
-	for _, w := range []*wbSite{wbCN, wbAI} {
-		if p, ok := workBuddyAccount(w); ok {
-			out = append(out, p)
-		}
-	}
-	if p, ok := commandCodeAccount(); ok {
-		out = append(out, p)
-	}
-	for _, agent := range qoderAgents {
-		if p, ok := qoderAccountOf(agent); ok {
-			out = append(out, p)
-		}
-	}
-	if p, ok := zedAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := factoryAccount(); ok {
-		out = append(out, p)
-	}
-	if p, ok := mimoAccount(); ok {
-		out = append(out, p)
-	}
 	if p, ok := siwcAccount(); ok {
 		out = append(out, p)
 	}
@@ -904,7 +858,7 @@ func Accounts() []Provider {
 		}
 	}
 	// a built-in moved onto its plugin is the plugin's now (migrate.go)
-	out = slices.DeleteFunc(out, func(p Provider) bool { return Moved(p.ID) })
+	out = slices.DeleteFunc(out, func(p Provider) bool { return PluginServes(p.ID) })
 	return placeMoved(out, pluginAccounts())
 }
 
@@ -923,7 +877,7 @@ func placeMoved(out, plugins []Provider) []Provider {
 	}
 	var rest []Provider
 	for _, p := range plugins {
-		if !Moved(p.ID) || !slices.Contains(builtinOrder, p.ID) {
+		if !PluginServes(p.ID) || !slices.Contains(builtinOrder, p.ID) {
 			rest = append(rest, p)
 			continue
 		}

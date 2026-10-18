@@ -43,7 +43,9 @@ func (f *fileProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.asked = append(f.asked, r.URL.String())
 	f.mu.Unlock()
 	b, ok := f.files[r.URL.Path]
-	if r.URL.Host != "files.test" || !ok {
+	// the image's URL comes to the proxy pinned to the public address
+	// files.test was checked at (publicTransport)
+	if r.URL.Host != filesAddr || !ok {
 		w.WriteHeader(404)
 		return
 	}
@@ -56,6 +58,9 @@ func (f *fileProxy) got() []string {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.asked...)
 }
+
+// filesAddr is the public address files.test resolves to in these tests.
+const filesAddr = "93.184.216.34:80"
 
 // relayed is a gateway whose provider "relay" answers images with URLs on
 // files.test, a host reached only through the provider's own proxy.
@@ -76,6 +81,7 @@ func relayed(t *testing.T, vendor http.HandlerFunc) (*Server, *fileProxy) {
 	if err := catalog.SaveLive("relay", up.URL+"/v1", []catalog.Model{{ID: "gpt-image-2.5-sunburst"}}); err != nil {
 		t.Fatal(err)
 	}
+	resolveTo(t, map[string]string{"files.test": "93.184.216.34"})
 	return New(), px
 }
 
@@ -118,7 +124,7 @@ func TestImageByURLIsFetchedForB64Caller(t *testing.T) {
 	if b, _ := base64.StdEncoding.DecodeString(a.Data[0].B64); !bytes.Equal(b, big) {
 		t.Fatalf("got %d bytes of %d", len(b), len(big))
 	}
-	if got := px.got(); len(got) != 1 || got[0] != "http://files.test/4k.png" {
+	if got := px.got(); len(got) != 1 || got[0] != "http://"+filesAddr+"/4k.png" {
 		t.Fatalf("the provider's proxy was asked %v", got)
 	}
 	if strings.Contains(asked[0], "response_format") {
@@ -195,5 +201,65 @@ func TestSizeOf(t *testing.T) {
 		if got := sizeOf(n); got != want {
 			t.Errorf("sizeOf(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// The URL a vendor answers an image with is in the vendor's answer, and
+// what the model was steered to draw or do can steer it: one on this
+// computer or its network is answered by URL, never downloaded and handed
+// back as the image. The vendor's own host:port, which the user named
+// themselves, is downloaded from.
+func TestVendorImageURLAtPrivateAddressNotFetched(t *testing.T) {
+	fresh(t)
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
+	inside, hits := secret(t, string(pngBytes))
+	resolveTo(t, map[string]string{"inside.test": "127.0.0.1"})
+	_, port, _ := strings.Cut(strings.TrimPrefix(inside.URL, "http://"), ":")
+	var next sync.Mutex
+	answer := ""
+	var up *httptest.Server
+	up = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/files/own.png" {
+			w.Write(pngBytes)
+			return
+		}
+		next.Lock()
+		u := answer
+		next.Unlock()
+		io.WriteString(w, `{"created":1,"data":[{"url":"`+u+`"}]}`)
+	}))
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: up.URL + "/v1", Key: "key", Models: []string{"gpt-image-2.5-sunburst"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive("relay", up.URL+"/v1", []catalog.Model{{ID: "gpt-image-2.5-sunburst"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	draw := func(u string) fetchedAnswer {
+		t.Helper()
+		next.Lock()
+		answer = u
+		next.Unlock()
+		code, _, raw := postImages(t, s, "/v1/images/generations", "application/json", `{"model":"relay/gpt-image-2.5-sunburst","prompt":"a city","response_format":"b64_json"}`)
+		var a fetchedAnswer
+		json.Unmarshal([]byte(raw), &a)
+		if code != 200 || len(a.Data) != 1 {
+			t.Fatalf("%s: %d %.300s", u, code, raw)
+		}
+		return a
+	}
+	for _, u := range []string{inside.URL + "/admin.png", "http://inside.test:" + port + "/admin.png", "http://[::ffff:127.0.0.1]:" + port + "/admin.png"} {
+		if a := draw(u); a.Data[0].URL != u || a.Data[0].B64 != "" {
+			t.Fatalf("%s was answered %+v", u, a.Data[0])
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("the private service was asked %d times", hits.Load())
+	}
+	if a := draw(up.URL + "/files/own.png"); a.Data[0].URL != "" || a.Data[0].B64 != base64.StdEncoding.EncodeToString(pngBytes) {
+		t.Fatalf("the vendor's own file: %+v", a.Data[0])
 	}
 }

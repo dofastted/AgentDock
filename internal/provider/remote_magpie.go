@@ -151,12 +151,8 @@ func (p Provider) remotePrice(model string) (catalog.Price, bool) {
 	if !p.IsRemoteMagpie() {
 		return catalog.Price{}, false
 	}
-	ms, _, ok := p.live()
-	if !ok {
-		return catalog.Price{}, false
-	}
-	for _, m := range ms {
-		if m.ID == model && m.Price != nil {
+	for _, m := range p.liveByID(model) {
+		if m.Price != nil {
 			return *m.Price, true
 		}
 	}

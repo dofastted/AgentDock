@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/settings"
@@ -89,13 +90,14 @@ type call struct {
 	// A fetch's head and chunks wait here, in the order they came, until
 	// the body's reader takes them: the host's reader queues them without
 	// ever waiting on one request's consumer (see push).
-	stream  bool
-	mu      sync.Mutex
-	queue   []message
-	queued  int           // the queued chunks' decoded bytes
-	over    error         // why the call was given up on
-	stopped bool          // the call is over for good: nothing more is queued
-	wake    chan struct{} // buffered 1: something was queued, or the call is over
+	stream      bool
+	cancellable bool // a gateway request owns asynchronous I/O, without a stream slot
+	mu          sync.Mutex
+	queue       []message
+	queued      int           // the queued chunks' decoded bytes
+	over        error         // why the call was given up on
+	stopped     bool          // the call is over for good: nothing more is queued
+	wake        chan struct{} // buffered 1: something was queued, or the call is over
 
 	// window is this call's credit in charged bytes (a frame's payload plus
 	// frameOverhead) and owed is how much of it the child has spent and the
@@ -342,7 +344,7 @@ func (c *call) transitionLocked(event callEvent, why error, answer *message) fun
 			}{c.over.Error()}}
 			c.terminal = &m
 		}
-		if event == callCancelled && c.state == callActive && c.stream {
+		if event == callCancelled && c.state == callActive && (c.stream || c.cancellable) {
 			c.state = callAborting
 		} else {
 			c.state = callReleased
@@ -641,6 +643,9 @@ func changed() {
 }
 
 func changedNow() {
+	// the sign-ins are read again, even by a request holding the files it
+	// read (filememo.Hold): a sign-in just saved is in what comes next
+	filememo.Look(AuthPath())
 	onChangeMu.Lock()
 	fs := append([]func(){}, onChangeNow...)
 	onChangeMu.Unlock()
@@ -803,6 +808,12 @@ func get(ctx context.Context) (*host, error) {
 	checkList()
 	hostMu.Lock()
 	defer hostMu.Unlock()
+	return getLocked(ctx)
+}
+
+// getLocked requires hostMu. Gateway hooks bound both the lock wait and
+// startup with their request-hook budget.
+func getLocked(ctx context.Context) (*host, error) {
 	if hostStale.Swap(false) && current != nil {
 		go current.retire()
 		current = nil
@@ -958,13 +969,14 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		Spec    string         `json:"spec"`
 		Target  string         `json:"target"`
 		Options map[string]any `json:"options,omitempty"`
+		Gateway string         `json:"gateway,omitempty"`
 	}
 	var items []item
 	for _, e := range l.Plugins {
 		// a plugin that is only gateway middleware or an agent runs in
 		// magpie (internal/middleware, internal/agentplug), not here
 		if !e.Off && !InMagpieOnly(Target(e.Spec)) {
-			items = append(items, item{e.Spec, Target(e.Spec), e.Options})
+			items = append(items, item{e.Spec, Target(e.Spec), e.Options, Gateway(Target(e.Spec))})
 		}
 	}
 	var res struct {
@@ -1392,6 +1404,9 @@ func (h *host) call(ctx context.Context, method string, params, out any) error {
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	c.cancellable = method == "gatewayRequest"
+	c.mu.Unlock()
 	if err := h.enqueueCall(ctx, map[string]any{"id": id, "method": method, "params": params}, nil, c); err != nil {
 		c.settle(err)
 		return err

@@ -58,6 +58,10 @@ type Route struct {
 	Rule          *RuleHit     `json:"rule,omitempty"`          // the group's rules for it, when it has any
 	SealedTask    bool         `json:"sealedTask,omitempty"`    // only ChatGPT accounts can read this subagent's task
 	LeadAccount   string       `json:"leadAccount,omitempty"`   // the parent account put first for a sealed task
+	// Compaction: the key or account that sealed the native compaction
+	// the request carries, the only one it went to (#1099): Routing says
+	// so, not that it is the only one on for the model (#2639)
+	Compaction string `json:"compaction,omitempty"`
 	// Subagent is a Codex or Claude Desktop subagent's request put on
 	// the model set for its subagents, or kept on the one asked for and why
 	Subagent *SubagentPick `json:"subagent,omitempty"`
@@ -296,12 +300,15 @@ type Try struct {
 	Picked bool   `json:"picked,omitempty"` // Effort is the turn's pick, in place of the agent's
 	// Fixed: the effort the group's member it went to is fixed at, which
 	// Effort is (fitted to the model's levels) whatever was asked
-	Fixed  string    `json:"fixed,omitempty"`
-	Fast   bool      `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
-	Start  time.Time `json:"start"`
-	Done   bool      `json:"done"`
-	Status int       `json:"status,omitempty"`
-	Millis int64     `json:"ms,omitempty"`
+	Fixed string `json:"fixed,omitempty"`
+	// RuleEffort: the reasoning the group's rule asks the member for
+	// (Rule.UseEffort, #2633), which Effort is whatever was asked
+	RuleEffort string    `json:"ruleEffort,omitempty"`
+	Fast       bool      `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
+	Start      time.Time `json:"start"`
+	Done       bool      `json:"done"`
+	Status     int       `json:"status,omitempty"`
+	Millis     int64     `json:"ms,omitempty"`
 	// TTFT: ms from Start to its reply's first content, FirstText to its
 	// first text, when it streamed any (#196)
 	TTFT      int64 `json:"ttft,omitempty"`
@@ -378,6 +385,13 @@ type planned struct {
 	// cap set on them, for a conversation that stays strictly on one to
 	// go on there (provider.AffinityStrict, #1797)
 	capped []candidate
+	// unlisted: the accounts left out (in left) as their own list lacks
+	// the model, their rows beside them in unlistedW, kept for the
+	// checkpoint narrowing: the one that sealed a conversation's compaction
+	// is tried for it as the last resort an account whose list lacks the
+	// model is, though no other can read it
+	unlisted  []candidate
+	unlistedW []Weighed
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {

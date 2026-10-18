@@ -322,3 +322,46 @@ func TestMarketInstallsASkillKeptInClaudesFolder(t *testing.T) {
 		t.Errorf("skills in the tree %v, want %v", got, want)
 	}
 }
+
+// 碳碳双键's report on Discord: tw93/waza keeps its eight skills in skills/
+// and again in plugins/waza/skills/ (some copies behind the top ones), and
+// typing "tw93/waza" listed 16 skills, each twice. The paths are the
+// repository's own.
+func TestRepoWithAPluginCopyListsEachSkillOnce(t *testing.T) {
+	sandbox(t)
+	names := []string{"check", "health", "hunt", "learn", "read", "think", "ui", "write"}
+	files := map[string]string{}
+	for _, n := range names {
+		files["skills/"+n+"/SKILL.md"] = "---\nname: " + n + "\ndescription: the top one\n---\n"
+		files["plugins/waza/skills/"+n+"/SKILL.md"] = "---\nname: " + n + "\ndescription: the plugin's copy\n---\n"
+	}
+	fakeSkillRepo(t, files)
+
+	p, err := ProbeSkills("tw93/waza")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, c := range p.Candidates {
+		paths = append(paths, c.Path)
+		if c.Description != "the top one" {
+			t.Errorf("%s: %q, want the top one", c.Path, c.Description)
+		}
+	}
+	var want []string
+	for _, n := range names {
+		want = append(want, "skills/"+n)
+	}
+	if !slices.Equal(paths, want) {
+		t.Errorf("candidates %v, want %v", paths, want)
+	}
+
+	tree := &gitTree{}
+	for p := range files {
+		tree.Tree = append(tree.Tree, gitEntry{Path: p, Type: "blob"})
+	}
+	sort.Slice(tree.Tree, func(i, j int) bool { return tree.Tree[i].Path < tree.Tree[j].Path })
+	if got := skillDirsIn(tree, ""); !slices.Equal(got, want) {
+		t.Errorf("skills in the tree %v, want %v", got, want)
+	}
+}

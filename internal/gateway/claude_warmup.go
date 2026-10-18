@@ -50,7 +50,11 @@ func askClaude(ctx context.Context, configDir, model string) error {
 	cmd := binary.command(ctx, claudeWarmArgs(model)...)
 	cmd.Dir = tmp
 	cmd.Stdin = strings.NewReader("hi")
-	cmd.Env = binary.env(netproxy.EnvWith(claudeProxy(ctx), cleanClaudeEnv(os.Environ())), configDir)
+	env, err := binary.proxied(ctx, cleanClaudeEnv(os.Environ()))
+	if err != nil {
+		return err
+	}
+	cmd.Env = binary.env(env, configDir)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	runErr := runClaudeTree(cmd)
@@ -101,7 +105,11 @@ func claudeUsage(ctx context.Context, configDir string) (string, error) {
 		})
 	}
 	env = append(env, "DISABLE_TELEMETRY=1", "DISABLE_ERROR_REPORTING=1", "DISABLE_AUTOUPDATER=1")
-	cmd.Env = binary.env(netproxy.EnvWith(claudeProxy(ctx), env), configDir)
+	env, err = binary.proxied(ctx, env)
+	if err != nil {
+		return "", err
+	}
+	cmd.Env = binary.env(env, configDir)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	runErr := runClaudeTree(cmd)

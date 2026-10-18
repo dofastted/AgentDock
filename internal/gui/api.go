@@ -1185,6 +1185,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.PickedModels = cur.PickedModels       // "only models I pick" (#1337)
 		in.OwnModelsHidden = cur.OwnModelsHidden // an agent's own models left out (#1642)
 		in.FastPicks = cur.FastPicks             // switched in the agents' pickers (#954)
+		in.UltraPicks = cur.UltraPicks           // and sent Ultrafast (#1954)
 		in.AgentEfforts = cur.AgentEfforts       // picked in an agent's row (#1003)
 		in.PluginCheckins = cur.PluginCheckins   // set on its own (plugin-checkin below)
 		in.PluginOptions = cur.PluginOptions     // set on its own (plugin-option below)
@@ -1195,6 +1196,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.Port = cur.Port                                 // set on its own (port below), which moves the gateway
 		in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors below)
 		in.AllowIPs = cur.AllowIPs                         // set on its own (allowips below)
+		in.FetchPrivate = cur.FetchPrivate                 // in settings.json only
 		in.GitHubToken = cur.GitHubToken                   // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
@@ -1217,6 +1219,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.CodexAgentsV1 = cur.CodexAgentsV1
 		in.FullContext = cur.FullContext // set on its own (full-context below)
 		in.CompactAt = cur.CompactAt     // and so is the threshold
+		// Codex's background compaction, set on its own (codex-async-compact below)
+		in.CodexAsyncCompact, in.CodexAsyncCompactPercent = cur.CodexAsyncCompact, cur.CodexAsyncCompactPercent
 		// Claude Desktop's list, set in its row on the Agents page
 		in.DesktopLongest = cur.DesktopLongest
 		// and the Get started card put away, from the card itself
@@ -1491,6 +1495,28 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			err = provider.SetCompactAt(*in.At)
 		}
 		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// Codex's background compaction (#2490): on or off, and the share of
+	// a model's window it starts at (0: Codex's own, 65), written into the
+	// config Codex is routed through
+	mux.HandleFunc("POST /api/settings/codex-async-compact", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			On      bool
+			Percent *int
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		pct := settings.Load().CodexAsyncCompactPercent
+		if in.Percent != nil {
+			pct = *in.Percent
+		}
+		if err := provider.SetCodexAsyncCompact(in.On, pct); err != nil {
 			fail(rw, err)
 			return
 		}

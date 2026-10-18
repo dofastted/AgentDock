@@ -112,12 +112,15 @@
       <button class="copy" data-copy="ex-cli">复制</button>
       <pre id="ex-cli">magpie group rule add coder use=deepseek/deepseek-v4-flash intent=<span class="s">"a quick question"</span> classifier=groq/llama-3.1-8b-instant
 magpie group rule add coder use=deepseek/deepseek-v4-pro intent=<span class="s">"writing or fixing tests"</span>
+magpie group rule add coder use=deepseek/deepseek-v4-pro use-effort=low intent=<span class="s">"a simple edit"</span>   <span class="c"># 同一个模型，用 low 推理强度</span>
 magpie group rule coder                           <span class="c"># 带编号的规则列表和意图判断模型</span>
 magpie group rule classifier coder groq/llama-3.1-8b-instant   <span class="c"># 更换意图判断模型</span>
 magpie group rule mv coder 3 1                    <span class="c"># 顺序很重要：从上往下</span>
 magpie group rule rm coder 2</pre>
     </div>
     <p><code>intent=</code> 也可以写成 <code>asks=</code> 或 <code>about=</code>；<code>classifier=</code> 也可以写成 <code>classify=</code> 或 <code>by=</code>。在 <code>rule add</code> 上加 <code>classifier=</code> 会设置整个分组的意图判断模型，只有第一次需要。它保存在 <code>~/.config/magpie/providers.json</code> 该分组的 <code>"classifier"</code> 字段里，每条规则保存为 <code>{"use": …, "intent": …}</code>。</p>
+
+    <p id="effort">规则还可以设定它的模型用什么推理强度，这样一个意图同时选定模型和推理强度：<code>use-effort=</code>（<code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code> 或 <code>max</code>），保存为 <code>"useEffort"</code>，例如 <code>{"use": "deepseek/deepseek-v4-pro", "intent": "a simple edit", "useEffort": "low"}</code>。在编辑器里，从规则的 <span class="ui">⋯</span> 菜单选 <span class="ui">设定推理强度</span>，设定后显示在模型旁边。之后这一轮发给该模型的请求都用这个推理强度，不管 Agent 要求什么，取模型最接近的档位。magpie 不知道档位的模型按 Agent 的要求发送，分组里接替它的备用模型也一样。在分组里固定了推理强度的模型保持它自己的。不设定时按 Agent 的要求发送。规则设定了推理强度时，路由页会写明。</p>
 
     <h2 id="how"><a class="anchor" href="#how">一轮是怎么路由的</a></h2>
     <p>Agent 发往带规则的分组的每个请求，都按下面的顺序处理：</p>

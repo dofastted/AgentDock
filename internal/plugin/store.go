@@ -463,13 +463,16 @@ func notPlugin(target string) error {
 	if err != nil || !st.IsDir() || IsPi(target) {
 		return nil
 	}
+	if Gateway(target) != "" {
+		return nil
+	}
 	if f, _ := Middleware(target); f != "" {
 		return nil
 	}
 	if f, _ := Agent(target); f != "" {
 		return nil
 	}
-	if p, _ := WindowPage(target); p != nil {
+	if w, _ := Window(target); w != nil {
 		return nil
 	}
 	var pkg struct {

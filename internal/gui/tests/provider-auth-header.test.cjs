@@ -3,8 +3,9 @@
 // answering 401 "x-api-key 和 Authorization 不可以同时存在"): the editor has a
 // Key header row, Both, x-api-key or Authorization: Bearer, opening as it
 // was saved or learned; Save posts the pick. A relay with only a Chat
-// address has no row until an Anthropic one is typed. Anthropic's own API
-// (bothAuth false) and a signed-in account have none. In English and
+// address has no row until an Anthropic one is typed, and none for
+// Anthropic's own or Bedrock Mantle's. Anthropic's own API (bothAuth false)
+// and a signed-in account have none. In English and
 // Chinese, and at a phone's width.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -138,6 +139,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await seg(page).isVisible(), true, "the row comes with an Anthropic address");
       await url.fill("https://api.anthropic.com");
       assert.equal(await seg(page).isVisible(), false, "Anthropic's own takes x-api-key alone");
+      await url.fill("https://relay.example.com");
+      assert.equal(await seg(page).isVisible(), true);
+      await url.fill("https://bedrock-mantle.us-east-1.api.aws/anthropic");
+      assert.equal(await seg(page).isVisible(), false, "Bedrock Mantle's takes x-api-key alone (@marktoown on X)");
       await url.fill("");
       const saved = await save(page, posts);
       assert.equal("authHeader" in saved.body, false, "not said with no Anthropic address");

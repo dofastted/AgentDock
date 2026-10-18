@@ -83,6 +83,7 @@
     <a href="#ids">Provider ids</a>
     <a href="#test">Testing</a>
     <a href="#publish">Publishing and listing</a>
+    <a href="#gateway-request">Async gateway request hooks</a>
     <a href="#middleware">Gateway middleware</a>
     <a href="#tools">Tools for every agent</a>
     <a href="#agents">Agent plugins</a>
@@ -216,7 +217,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <li><b>Updates.</b>
         <ul>
           <li>The community’s packages (<code>@magpie-community/*</code>) update by themselves a little after magpie starts, then every hour.</li>
-          <li>Any other package with a newer version shows a dot on <span class="ui">Plugins</span>, and the user updates it with a click or <code>magpie plugin update</code>.</li>
+          <li>Any other package with a newer version shows a dot on <span class="ui">Plugins</span>, and in the sidebar <span class="ui">Installed</span> reads “1 update”. Plugins then opens on Installed, which names the plugins with a newer version at the top beside <span class="ui">Update all</span>; the user updates them with a click or <code>magpie plugin update</code>.</li>
           <li>A spec pinned to a version (<code>name@1.2.3</code>) stays on it until the user updates it: <span class="ui">Update to …</span>, <span class="ui">Update all</span> and <code>magpie plugin update</code> install the newest version and unpin it.</li>
           <li>A git repository has no version to compare. It shows an update when its branch or tag (the default branch without <code>#ref</code>) is at another commit than the one Bun installed: GitHub is asked through its API, any other host with <code>git ls-remote</code>, at most every ten minutes, and the hourly check asks again. A spec pinned to a commit never has one. The row shows the commit installed.</li>
         </ul></li>
@@ -348,6 +349,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
           <li><code>rateWas</code>: the rate before a discount that is running now.</li>
         </ul>
         Model pickers show them.</li>
+      <li><code>serviceTiers</code>, on a model the <code>models</code> hook gives: the service tiers its vendor serves it at, as ids, such as <code>["priority", "ultrafast"]</code>. Codex is offered them in its model list (<code>priority</code> as Fast), and a Chat or Responses request that asks for one of them reaches your <code>fetch</code> with its <code>service_tier</code>. A tier the model doesn’t list isn’t sent where magpie translates the request.</li>
       <li>The keys of <code>variants</code> become the model’s reasoning levels when it reasons.</li>
     </ul>
     <h3>When the vendor can’t be reached</h3>
@@ -608,6 +610,13 @@ m plugin logout acme</pre>
         </ul></li>
     </ul>
 
+    <h2 id="gateway-request"><a class="anchor" href="#gateway-request">Async gateway request hooks</a></h2>
+    <p>A plugin can await I/O before an agent request is routed, for example to recall project context. Declare <code>"magpie": { "hooks": "./hooks.js" }</code> in package.json, or add a <code>*.hooks.js</code> / <code>.mjs</code> / <code>.ts</code> / <code>.mts</code> file (Bun runs TypeScript without a build step). Export a named async <code>onRequest(body, ctx)</code>. A gateway-only package needs no OpenCode main/exports.</p>
+    <p>Optional async <code>onResponse(reply, ctx)</code> receives a best-effort completion notification after output finishes. It cannot change the reply and never holds the live stream. Client tool declarations and tool loops stay with the client.</p>
+<p>It runs in Bun once per agent request, before the JS gateway middleware, for every provider, Codex's own ChatGPT sign-in included. body is the agent API object. ctx contains <code>protocol</code>, <code>model</code>, <code>stream</code>, <code>path</code>, <code>agent</code>, <code>session</code>, <code>cwd</code>, <code>query</code>, <code>options</code> and <code>signal</code>. The query is the latest user text, excluding tool results and images. Missing identity fields are empty; authorization headers are never included.</p>
+<p>Return an object to replace the request, or undefined to keep it. A hook that changes the model, streaming, the client's tools or its tool choice is rolled back, as a failure, and gets no <code>onResponse</code> for that request. Each hook receives a clone; mutations from failed or undefined hooks are discarded. Successful changes follow enabled plugin order. Each hook defaults to one second; <code>gatewayTimeoutMs</code> accepts integers from 100 to 10000 milliseconds. The chain sums budgets, clamped to 2–10 seconds; startup plus RPC is bounded to 11 seconds. Settings → Plugins offers JSON options and call, latency, failure and outcome diagnostics. <code>ctx.report(code, bytes)</code> accepts ready/empty/unbound/unauthorized/unavailable/invalid/skipped and byte counts only. Statistics reset on reload and retain no private text. Use <code>ctx.signal</code> with fetch. Errors, invalid returns, timeouts and a host busy starting keep the request. Bun plugins have host privileges; install trusted code.</p>
+<p>Install with <code>magpie plugin add ./my-plugin</code>; save options with <code>magpie plugin options my-plugin '&lbrace;"serverUrl":"http://127.0.0.1:8000"&rbrace;'</code>. On/off and options changes reload the host; source-only edits need a configuration reload. Internal title/classifier requests skip the hook.</p>
+
     <h2 id="middleware"><a class="anchor" href="#middleware">Gateway middleware</a></h2>
     <p>A plugin can also be <em>gateway middleware</em>: code that magpie’s gateway runs on every request an agent sends it, before the request is routed, and on the reply on its way back. It can give a model another name, add to the system prompt, turn a request away, change or hide what the model says, or keep its own count of what goes through. It works with every provider, a plugin’s or not.</p>
     <div class="code">
@@ -642,6 +651,7 @@ m plugin logout acme</pre>
       <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/system-prompt"><code>system-prompt</code></a></td><td>A system prompt of yours on every request, or only some agents’ or models’, in each API’s own place. A request with its own keeps it unless <code>override</code> is on.</td></tr>
       <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/word-guard"><code>word-guard</code></a></td><td>New API’s sensitive-word filter: turn away or mask words and patterns in what users send, and in replies if you like.</td></tr>
       <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/think-tags"><code>think-tags</code></a></td><td>Take a <code>&lt;think&gt;…&lt;/think&gt;</code> block out of the start of a reply’s text, or put a Chat reply’s <code>reasoning_content</code> into it (New API’s <code>thinking_to_content</code>).</td></tr>
+      <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/antigravity-cloak"><code>antigravity-cloak</code></a></td><td>Breaks up the words Antigravity turns Claude Code’s and the Agent SDK’s system prompts away for, in what it sends Antigravity only. Other providers are sent the prompt as it was.</td></tr>
     </table></div>
     <div class="code">
       <span class="lang">shell</span>
@@ -664,13 +674,14 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
     <div class="table-wrap"><table>
       <tr><th>Hook</th><th>Is given</th><th>Returns</th></tr>
       <tr><td><code>onRequest(body, ctx)</code></td><td>The request body, before routing: a new <code>model</code> routes it elsewhere.</td><td>The body, or nothing. <code>ctx.reject(status, message)</code> turns the request away with that error, in the agent’s API (403 when no status is given).</td></tr>
+      <tr><td><code>onProvider(body, ctx)</code></td><td>The request body as it is about to go to one provider; <code>ctx.provider</code> has its <code>id</code>, <code>name</code>, <code>account</code> (the subscription’s kind, such as <code>claude</code> or <code>antigravity</code>; absent for an API key) and <code>model</code>. It is called again for each provider a request is tried on, each time with the body <code>onRequest</code> left, so a change for one provider reaches no other.</td><td>The body, or nothing. The request is routed by now: it can’t be turned away or sent elsewhere.</td></tr>
       <tr><td><code>onEvent(event, ctx)</code></td><td>Each event of a streamed reply: its <code>data:</code> JSON.</td><td>The event, nothing, or <code>null</code> to leave the event out.</td></tr>
       <tr><td><code>onResponse(body, ctx)</code></td><td>A reply that isn’t streamed, whole; <code>ctx.status</code> is its status.</td><td>The body, or nothing.</td></tr>
     </table></div>
     <p><code>export const events = ["content_block_delta"]</code> calls <code>onEvent</code> only for events of those names (Anthropic Messages and Responses name theirs). Chat Completions and Gemini events have no name, so leave <code>events</code> out for them. An event holds a piece of the reply, so a word can be split over two events. A <code>data: [DONE]</code> line and comments pass by unseen. A compressed reply passes as it is.</p>
     <p><code>ctx</code> has <code>protocol</code> (<code>anthropic</code>, <code>chat</code>, <code>responses</code> or <code>gemini</code>), <code>model</code> and <code>stream</code> as the agent asked, <code>path</code>, <code>agent</code> when magpie knows it, <code>options</code> (the plugin’s <a href="#middleware-options">options</a>) and <code>state</code>, an object of the request’s own.</p>
     <h3>When a hook fails</h3>
-    <p>A hook has 250 ms for a request or a whole reply and 50 ms for an event; loading has a second. A hook that throws, runs out of time or returns something else goes on as if it weren’t there: the request or the event is sent as it was. Settings → Plugins shows each middleware’s hooks, how many calls it had, the average time each took and how many failed, with the last error. The hooks see what the agent sent and gets back, before magpie’s redaction on the way out and after it on the way back. magpie’s own requests (thread titles, the router’s classifier) don’t go through middleware.</p>
+    <p>A hook has 250 ms for a request, a provider’s try or a whole reply and 50 ms for an event; loading has a second. A hook that throws, runs out of time or returns something else goes on as if it weren’t there: the request or the event is sent as it was. Settings → Plugins shows each middleware’s hooks, how many calls it had, the average time each took and how many failed, with the last error. The hooks see what the agent sent and gets back, before magpie’s redaction on the way out and after it on the way back. magpie’s own requests (thread titles, the router’s classifier) don’t go through middleware.</p>
 
     <h3 id="gateway-points"><a class="anchor" href="#gateway-points">Routings and usage rows</a></h3>
     <p>The same module can also export <code>strategies</code> and <code>onUsage</code>. Such a file can be named <code>*.gateway.js</code>, and a package can say <code>"magpie": { "gateway": "./gw.js" }</code>.</p>
@@ -797,7 +808,10 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
   <span class="s">"name"</span>: <span class="s">"magpie-usage-glance"</span>,
   <span class="s">"version"</span>: <span class="s">"0.1.0"</span>,
   <span class="s">"magpie"</span>: {
-    <span class="s">"page"</span>: { <span class="s">"title"</span>: <span class="s">"Usage glance"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span>, <span class="s">"icon"</span>: <span class="s">"page/icon.svg"</span> },
+    <span class="s">"page"</span>: {
+      <span class="s">"title"</span>: <span class="s">"Usage glance"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span>, <span class="s">"icon"</span>: <span class="s">"page/icon.svg"</span>,
+      <span class="s">"titles"</span>: { <span class="s">"zh"</span>: <span class="s">"用量速览"</span>, <span class="s">"ja"</span>: <span class="s">"使用量の概要"</span> }
+    },
     <span class="s">"permissions"</span>: [<span class="s">"usage:summary"</span>]
   }
 }</pre>
@@ -820,7 +834,8 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
 <span class="k">const</span> opts = <span class="k">await</span> magpie.options.get()            <span class="c">// this plugin's own options</span>
 <span class="k">await</span> magpie.options.set({ ...opts, hideCost: <span class="k">true</span> })</pre>
     </div>
-    <p>The Plugins page shows the page, and what it may read, on the plugin’s row before it is turned on. <code>page.file</code> and <code>page.icon</code> are paths inside the plugin. The page’s files are what sits in <code>file</code>’s folder; a path out of it, or a link that leads out, isn’t served. A package can be a page and a provider, middleware or an agent too. A plugin that is only a page doesn’t start the plugin host.</p>
+    <p>The Plugins page shows the page, and what it may read, on the plugin’s row before it is turned on. <code>page.file</code> and <code>page.icon</code> are paths inside the plugin. The page’s files are what sits in <code>file</code>’s folder; a path out of it, or a link that leads out, isn’t served. A package can be a page and a provider, middleware or an agent too. A plugin that is only a page doesn’t start the plugin host. <code>page.titles</code> (and a panel’s <code>titles</code>) names the tab in other languages, by language code (<code>zh</code>, <code>zh-TW</code>, <code>ja</code>, <code>de</code>); <code>title</code> is used for any other.</p>
+    <p>What the page leaves unstyled already looks like magpie: the bridge adds a stylesheet for the font, colours, headings, buttons, fields and tables, with no weight (<code>:where()</code>), so any rule of the page’s own wins. Use the <code>--magpie-*</code> variables to match the window in your own styles.</p>
     <h3>What the page can ask</h3>
     <div class="table-wrap"><table>
       <tr><th>Field / call</th><th>What it gives</th></tr>
@@ -838,6 +853,56 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
       <li>An error the page doesn’t catch shows <span class="ui">This page stopped working</span> in its place, with <span class="ui">Try again</span>. Its own scripts’ errors reach it as “Script error.”, so look in the window’s console for the rest.</li>
     </ul>
 
+    <h3 id="panels"><a class="anchor" href="#panels">Panels in magpie’s own pages</a></h3>
+    <p>A plugin can also put panels into the pages magpie draws itself. Each one is a small page of its own in the plugin’s folder, with the same bridge, reads, options and sandbox as a page. It sits in a card under a heading with its title, as tall as it draws.</p>
+    <div class="code">
+      <span class="lang">package.json</span>
+      <button class="copy" data-copy="pn-pkg">Copy</button>
+      <pre id="pn-pkg">{
+  <span class="s">"name"</span>: <span class="s">"magpie-provider-notes"</span>,
+  <span class="s">"version"</span>: <span class="s">"0.1.0"</span>,
+  <span class="s">"magpie"</span>: {
+    <span class="s">"panels"</span>: [
+      { <span class="s">"slot"</span>: <span class="s">"provider"</span>, <span class="s">"file"</span>: <span class="s">"ui/notes.html"</span>, <span class="s">"title"</span>: <span class="s">"Notes"</span> },
+      { <span class="s">"slot"</span>: <span class="s">"usage"</span>, <span class="s">"file"</span>: <span class="s">"ui/spend.html"</span>, <span class="s">"title"</span>: <span class="s">"Top models today"</span> }
+    ],
+    <span class="s">"permissions"</span>: [<span class="s">"usage:summary"</span>]
+  }
+}</pre>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th><code>slot</code></th><th>Where the panel goes</th><th><code>magpie.context</code></th></tr>
+      <tr><td><code>agents</code></td><td>The end of the Agents page</td><td><code>{}</code></td></tr>
+      <tr><td><code>usage</code></td><td>The end of Usage’s Overview</td><td><code>{}</code></td></tr>
+      <tr><td><code>settings</code></td><td>A <span class="ui">Plugins</span> tab in Settings, there only while a plugin has a panel in it</td><td><code>{}</code></td></tr>
+      <tr><td><code>provider</code></td><td>Each saved provider’s editor</td><td><code>{ provider: { id, name } }</code></td></tr>
+    </table></div>
+    <p>A plugin has at most 8 panels. A panel’s height follows its <code>&lt;html&gt;</code> (up to 2400px), so let the page size itself and don’t give <code>html</code> or <code>body</code> a fixed height. A panel that throws, or doesn’t answer in 10 seconds, shows <span class="ui">{name} stopped working</span> with <span class="ui">Try again</span> in its own place; the page around it and the panels beside it go on.</p>
+    <h3 id="replaces"><a class="anchor" href="#replaces">Taking a built-in page’s place</a></h3>
+    <p>A page can take the place of one of magpie’s own: add <code>"replaces"</code> to <code>magpie.page</code>, one of <code>sessions</code>, <code>library</code>, <code>routing</code> or <code>usage</code>. Its tab then stands where the built-in’s was, and links to that page open the plugin’s. When two plugins ask for the same page, the first in the Plugins list takes it and the other is a page of its own. Turn the plugin off and the built-in page is back as it was.</p>
+    <div class="code">
+      <span class="lang">package.json</span>
+      <button class="copy" data-copy="pg-replaces">Copy</button>
+      <pre id="pg-replaces"><span class="s">"page"</span>: { <span class="s">"title"</span>: <span class="s">"My library"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span>, <span class="s">"replaces"</span>: <span class="s">"library"</span> }</pre>
+    </div>
+    <h3 id="actions"><a class="anchor" href="#actions">Items in magpie’s menus</a></h3>
+    <p>A plugin with a page can add items to the menus of magpie’s rows: a provider’s (right-click it) and an agent’s (its handle, or right-click). They come after magpie’s own, named in the window’s language like a page’s title. Picking one opens the plugin’s page and tells it which item, and the row’s id and name, nothing else of it. The page handles it with <code>magpie.onAction</code>; an item picked before the page gave its handler waits for it.</p>
+    <div class="code">
+      <span class="lang">package.json</span>
+      <button class="copy" data-copy="pg-actions">Copy</button>
+      <pre id="pg-actions"><span class="s">"page"</span>: { <span class="s">"title"</span>: <span class="s">"Balance"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span> },
+<span class="s">"actions"</span>: [
+  { <span class="s">"id"</span>: <span class="s">"check"</span>, <span class="s">"menu"</span>: <span class="s">"provider"</span>, <span class="s">"title"</span>: <span class="s">"Check balance"</span>, <span class="s">"titles"</span>: { <span class="s">"zh"</span>: <span class="s">"查余额"</span> } }
+]</pre>
+    </div>
+    <div class="code">
+      <span class="lang">page/app.js</span>
+      <button class="copy" data-copy="pg-onaction">Copy</button>
+      <pre id="pg-onaction">magpie.onAction(({ id, provider }) =&gt; {
+  <span class="c">// id: "check"; provider: { id, name }</span>
+});</pre>
+    </div>
+    <p><code>menu</code> is <code>provider</code> or <code>agent</code>. An <code>id</code> is lower-case letters, digits and dashes, up to 40. A plugin has at most 8 items, and an item with no <code>title</code> takes its page’s. A plugin without a page adds no items. The Plugins page says which menus a plugin adds to.</p>
     <h2 id="pi"><a class="anchor" href="#pi">pi packages</a></h2>
     <p>magpie also runs <a href="https://github.com/earendil-works/pi">pi</a>’s packages. A pi extension that registers a provider with <code>pi.registerProvider</code> works in magpie as it does in pi, with nothing to change, and is added like any plugin (<code>magpie plugin add pi-antigravity</code>).</p>
     <ul>

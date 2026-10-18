@@ -30,6 +30,29 @@ static int nonActivating(void *win) {
 	return [w isKindOfClass:[NSPanel class]] && (w.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0;
 }
 
+// Can be made key: a borderless window can't unless its class says so,
+// as Wails' panel class does.
+static int canBeKey(void *win) {
+	return ((NSWindow *)win).canBecomeKeyWindow;
+}
+
+// Whether this session lets an app that isn't active make a
+// non-activating panel key from code: a plain titled one is shown and
+// made key as the quick panel is. With no click or key press behind it,
+// macOS 26.2 left even that one not key on a Mac no one was at (#2450).
+static int sessionKeysPanels(void) {
+	NSPanel *p = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 40, 40)
+		styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskNonactivatingPanel
+		backing:NSBackingStoreBuffered defer:NO];
+	p.releasedWhenClosed = NO;
+	[p orderFrontRegardless];
+	[p makeKeyWindow];
+	int key = p.isKeyWindow;
+	[p orderOut:nil];
+	[p release];
+	return key;
+}
+
 // Frontmost: the app whose menu bar shows, and whose Space the Mac goes
 // to. A non-activating panel made key leaves another app frontmost.
 static int appFrontmost(void) {
@@ -97,6 +120,19 @@ func joinsFullScreenSpaces(w *application.WebviewWindow) bool {
 	p := w.NativeWindow()
 	return p != nil && C.joinsFullScreenSpaces(p) != 0
 }
+
+// canBeKey says whether w can be made key, take the keyboard; on the
+// main thread.
+func canBeKey(w *application.WebviewWindow) bool {
+	p := w.NativeWindow()
+	return p != nil && C.canBeKey(p) != 0
+}
+
+// sessionKeysPanels says whether this session makes a non-activating
+// panel key when an app that isn't active asks with no input behind it,
+// which decides whether a test can see the quick panel take the keyboard
+// (#2450); on the main thread.
+func sessionKeysPanels() bool { return C.sessionKeysPanels() != 0 }
 
 // nonActivating says whether w shows and takes the keyboard without
 // activating magpie, as the quick panel does (#2141); on the main thread.

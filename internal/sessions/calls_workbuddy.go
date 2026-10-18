@@ -44,7 +44,7 @@ func workbuddyCallFiles() []file {
 // message lines, and the same models.json, so its calls are read as
 // WorkBuddy's are, from its own folder.
 func codebuddyCallFiles() []file {
-	return buddyFiles("codebuddy", CodeBuddyDir())
+	return codebuddyFiles()
 }
 
 // CodeBuddyDir is CodeBuddy Code's folder: $CODEBUDDY_CONFIG_DIR, else

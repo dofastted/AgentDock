@@ -50,6 +50,7 @@ magpie.plugin("usage", (ctx) => {
     <div class="row-head" id="usageKeysHead" hidden><button class="fold" type="button" data-fold="keys" aria-expanded="true" aria-controls="usageKeys"><span class="label" data-t>Gateway keys</span></button></div>
     <div class="list" id="usageKeys" hidden></div>
     <p class="usage-note" id="usageNote"></p>
+    <div class="plugin-slot" data-slot="usage" hidden></div>
   </div>
   <div class="usage-pane" id="ledgerPane" hidden>
     <div class="sess-tools">

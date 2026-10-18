@@ -155,6 +155,15 @@ func ListedDrawer(ref string) string {
 	return pid + "/" + codexDrawer
 }
 
+// listsCantName is whether p's image models are ones magpie names itself
+// (a ChatGPT account's GPT Image, a Grok subscription's Grok Imagine, a
+// WorkBuddy plan's those its config lists), apart from its chat models:
+// an account's own list of models (#474), picked in the editor from the
+// chat models, can't name them, so it never bars one (heyiwei5 on X).
+func listsCantName(p provider.Provider) bool {
+	return drawsCodex(p) || drawsGrok(p) || drawsWorkBuddy(p)
+}
+
 // codexDrawer is the image model Codex CLI asks a ChatGPT account for, the
 // one Automatic picks there.
 const codexDrawer = "gpt-image-2"
@@ -431,7 +440,7 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 			return
 		}
 		call.Provider, call.To = p.ID, provider.Chat
-		ctx, cancel := context.WithTimeout(withPrivateFetch(r.Context(), r), drawTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), drawTimeout)
 		defer cancel()
 		// the account that drew, or refused last, is the one recorded
 		var (
@@ -481,15 +490,16 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		}
 		s.record(call)
 		// asked for the image itself, one the vendor keeps at a URL is
-		// fetched the way the vendor was reached: through its proxy, by
-		// the client that just had its answer (#1576: the 4K image a relay
-		// drew in 40 s was lost to generate_image's own download). One
+		// fetched through the vendor's proxy (#1576: the 4K image a relay
+		// drew in 40 s was lost to generate_image's own download), from
+		// public addresses or the vendor's own host only: the URL is in
+		// its answer, which the request can steer (vendorClient). One
 		// that can't be fetched is answered by its URL all the same, never
 		// dropped: it is drawn, and paid for.
 		data := make([]map[string]any, 0, len(out.Images))
 		for _, im := range out.Images {
 			if im.URL != "" && inline(d.Want) {
-				if b, mt, err := FetchImage(p.Via(r.Context()), s.client, im.URL); err == nil {
+				if b, mt, err := FetchImage(p.Via(r.Context()), vendorClient(p), im.URL); err == nil {
 					im = picture{Mime: mt, Data: b}
 				} else if s.debug {
 					log.Printf("images: %s's image at %s is answered by its URL: %v", p.ID, im.URL, err)
@@ -802,6 +812,17 @@ func (s *Server) drawOnAccounts(ctx context.Context, r *http.Request, p provider
 	// an account whose list lacks the image model is put aside for text
 	// when another's list is unknown; for drawing it is asked last
 	_, _, left, barred := perKeyBarred(q, model, provider.Chat)
+	if listsCantName(q) {
+		// its accounts' own lists of models are picked from its chat
+		// models, which its image models are never among: a list keeps
+		// an account from no drawing, as it couldn't name one
+		for _, c := range barred {
+			if c.capped == nil {
+				left = append(left, c)
+			}
+		}
+		barred = slices.DeleteFunc(barred, func(c candidate) bool { return c.capped == nil })
+	}
 	for _, c := range left {
 		if !slices.ContainsFunc(cs, func(o candidate) bool { return o.p.AccountID() == c.p.AccountID() }) {
 			cs = append(cs, c)
@@ -1273,14 +1294,10 @@ func readImagesAnswer(p provider.Provider, url string, b []byte, code int) (draw
 
 // fetchPicture downloads an image an edit was given by URL, for an images
 // API that takes only files. The URL is the caller's: it is fetched from
-// public addresses only (publicClient), but for a request from this
-// computer (withPrivateFetch), and what comes must be an image.
+// public addresses only (publicClient), from wherever the request came,
+// and what comes must be an image.
 func (s *Server) fetchPicture(ctx context.Context, url string) ([]byte, string, error) {
-	c := publicClient
-	if privateFetchAllowed(ctx) {
-		c = s.client
-	}
-	b, _, err := FetchImage(ctx, c, url)
+	b, _, err := FetchImage(ctx, publicClient, url)
 	if err != nil {
 		return nil, "", fmt.Errorf("couldn't fetch the image at %s: %v", url, err)
 	}

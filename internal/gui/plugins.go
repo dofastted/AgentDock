@@ -106,8 +106,8 @@ type pluginEntryJSON struct {
 	// differ, whatever the version in its package.json says
 	Commit string `json:"commit,omitempty"`
 	Head   string `json:"head,omitempty"`
-	// Moved are the built-in subscriptions moved onto it, which go back
-	// to themselves when it is removed or turned off
+	// Moved are the built-in subscriptions moved onto it, which stop
+	// with it when it is removed or turned off (no built-in to go back to)
 	Moved []string `json:"moved"`
 	// AutoUpdated is the update magpie made to it by itself lately
 	AutoUpdated *plugin.Updated `json:"autoUpdated,omitempty"`
@@ -121,7 +121,10 @@ type pluginEntryJSON struct {
 	Named bool `json:"named,omitempty"`
 	// OptionsExample is what its package suggests for its options, which
 	// the options editor starts from when none are set
-	OptionsExample map[string]any `json:"optionsExample,omitempty"`
+	OptionsExample map[string]any       `json:"optionsExample,omitempty"`
+	Gateway        *plugin.GatewayState `json:"gateway,omitempty"`
+	IsGateway      bool                 `json:"isGateway,omitzero"`
+	GatewayOnly    bool                 `json:"gatewayOnly,omitzero"`
 	// IsMiddleware is whether its package has gateway middleware, said of
 	// one switched off too, which Middleware leaves out; MiddlewareOnly is
 	// whether that is all it has, no provider to sign in to
@@ -138,6 +141,14 @@ type pluginEntryJSON struct {
 	// switched off too: what the row shows before it is turned on, with
 	// what the page may read of magpie's
 	Page *pluginPageInfoJSON `json:"page,omitempty"`
+	// Panels are the panels it adds to magpie's own pages
+	// (magpie.panels), said of one switched off too, and PanelReads what
+	// they may read of magpie's
+	Panels     []pluginPanelInfoJSON `json:"panels,omitempty"`
+	PanelReads []string              `json:"panelReads,omitempty"`
+	// Actions are the items its page adds to magpie's menus
+	// (magpie.actions), said of one switched off too
+	Actions []pluginActionInfoJSON `json:"actions,omitempty"`
 	// Clashes are the providers it signs in to that another plugin signs
 	// in to as well (a plugin of the user's own beside a third party's):
 	// the host runs one plugin for each, and the row says which, with a
@@ -158,8 +169,22 @@ type pluginToolJSON struct {
 
 // pluginPageInfoJSON is a plugin's page as its row says it.
 type pluginPageInfoJSON struct {
-	Title string   `json:"title,omitempty"`
-	Reads []string `json:"reads"`
+	Title    string   `json:"title,omitempty"`
+	Replaces string   `json:"replaces,omitempty"` // the built-in page it takes the place of
+	Reads    []string `json:"reads"`
+}
+
+// pluginPanelInfoJSON is a panel a plugin adds, as its row says it.
+type pluginPanelInfoJSON struct {
+	Slot  string `json:"slot"`
+	Title string `json:"title,omitempty"`
+}
+
+// pluginActionInfoJSON is a menu item a plugin's page adds, as its row
+// says it.
+type pluginActionInfoJSON struct {
+	Menu  string `json:"menu"`
+	Title string `json:"title,omitempty"`
 }
 
 // pluginClashJSON is a provider two plugins sign in to, as a row says it.
@@ -240,6 +265,7 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	// npm's newest, as it said last: asking it again is /api/plugins/npm's
 	known := plugin.InfoCached(npmNames(l.Plugins))
 	mws := middleware.States()
+	gws := plugin.GatewayStates(ctx)
 	var agentErrs map[string]string
 	for _, e := range l.Plugins {
 		if f, _ := plugin.Agent(plugin.Target(e.Spec)); f != "" && !e.Off {
@@ -249,6 +275,17 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	}
 	for _, e := range l.Plugins {
 		j := pluginEntryJSON{Entry: e, Error: errs[e.Spec], Providers: names[e.Spec], Version: plugin.Installed(e.Spec), Named: answered}
+		if plugin.Gateway(plugin.Target(e.Spec)) != "" {
+			j.IsGateway = true
+			j.GatewayOnly = plugin.GatewayOnly(plugin.Target(e.Spec))
+			if !e.Off {
+				state := plugin.GatewayState{LastOutcome: "idle"}
+				if found, ok := gws[e.Spec]; ok {
+					state = found
+				}
+				j.Gateway = &state
+			}
+		}
 		if npmPlugin(e.Spec) {
 			j.Latest = known[plugin.Name(e.Spec)].Version
 		}
@@ -267,6 +304,8 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 		}
 		if file, only := plugin.Middleware(plugin.Target(e.Spec)); file != "" {
 			j.IsMiddleware, j.MiddlewareOnly = true, only
+		}
+		if j.IsMiddleware || j.IsGateway {
 			j.OptionsExample = plugin.OptionsExample(plugin.Target(e.Spec))
 		}
 		if file, _ := plugin.Agent(plugin.Target(e.Spec)); file != "" {
@@ -276,10 +315,22 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 				j.Agent = pluginAgentOf(e.Spec, agentErrs)
 			}
 		}
-		if pg, _ := plugin.WindowPage(plugin.Target(e.Spec)); pg != nil {
-			j.Page = &pluginPageInfoJSON{Title: pg.Title, Reads: pg.Reads}
-			if j.Page.Reads == nil {
-				j.Page.Reads = []string{}
+		if w, _ := plugin.Window(plugin.Target(e.Spec)); w != nil {
+			reads := w.Reads
+			if reads == nil {
+				reads = []string{}
+			}
+			if w.Page != nil {
+				j.Page = &pluginPageInfoJSON{Title: w.Page.Title, Replaces: w.Page.Replaces, Reads: reads}
+			}
+			for _, p := range w.Panels {
+				j.Panels = append(j.Panels, pluginPanelInfoJSON{Slot: p.Slot, Title: p.Title})
+			}
+			if len(w.Panels) > 0 {
+				j.PanelReads = reads
+			}
+			for _, a := range w.Actions {
+				j.Actions = append(j.Actions, pluginActionInfoJSON{Menu: a.Menu, Title: a.Title})
 			}
 			j.InMagpieOnly = plugin.InMagpieOnly(plugin.Target(e.Spec))
 		}

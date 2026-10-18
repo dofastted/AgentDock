@@ -5,10 +5,13 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"mime"
 	"net"
+	"net/http"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -72,12 +75,13 @@ type cRequest struct {
 
 func parseChat(body []byte) (*Request, error) {
 	body = liftMessageTools(body) // a request handle didn't see (#2322)
+	body = shapeChatTools(body)   // and its tools in another API's shape (#2622)
 	var c cRequest
 	if err := decodeJSON(body, &c); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
 	r := &Request{Model: c.Model, MaxTokens: c.MaxCompletionTokens, Temp: c.Temperature, TopP: c.TopP,
-		Stream: c.Stream, Effort: effortOf(c.ReasoningEffort), Parallel: c.ParallelToolCalls, Fast: c.ServiceTier == "priority", Tier: c.ServiceTier,
+		Stream: c.Stream, Effort: effortOf(c.ReasoningEffort), Parallel: c.ParallelToolCalls, Fast: c.ServiceTier == "priority" || c.ServiceTier == "ultrafast", Ultrafast: c.ServiceTier == "ultrafast", Tier: c.ServiceTier,
 		CacheKey: c.PromptCacheKey, Format: openAIFormat(c.ResponseFormat), AccessPrograms: c.AccessPrograms}
 	if r.MaxTokens == 0 {
 		r.MaxTokens = c.MaxTokens
@@ -234,11 +238,22 @@ func dataURL(p Part) string {
 // built-in's, for show, which Cursor's is none, and its fast mode was lost
 // on every request magpie translated (#1360).
 func buildHost(p provider.Provider) string {
-	if p.IsPlugin() && p.PluginProvider() == "cursor" {
-		return "cursor"
+	if p.IsPlugin() {
+		switch id := p.PluginProvider(); id {
+		case "cursor", provider.CommandCodePlanID, "devin", "qoder", "qoder-cn":
+			// the plugin's own id, never the built-in's API host a moved
+			// account shows (api.commandcode.ai), which lost a moved Command
+			// Code Go conversation its reasoning
+			return id
+		}
 	}
 	return p.Host()
 }
+
+// failedAsText are the plugins whose vendor has no failed mark on a tool
+// result: the built-in said it in the text, "Error: " first (devin.go,
+// qoder.go), and so the chat request to the plugin says it there too.
+var failedAsText = map[string]bool{"devin": true, "qoder": true, "qoder-cn": true}
 
 // chatReplaysReasoning is whether a Chat upstream wants a turn's reasoning
 // back in reasoning_content: DeepSeek's models wherever they are served
@@ -418,7 +433,16 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 					}
 					out += note
 				}
-				tools = append(tools, map[string]any{"role": "tool", "tool_call_id": p.CallID, "content": out})
+				if p.IsError && failedAsText[host] {
+					out = "Error: " + out
+				}
+				tool := map[string]any{"role": "tool", "tool_call_id": p.CallID, "content": out}
+				if p.IsError && host == "cursor" {
+					// Cursor's plugin reads it, as the built-in told Cursor
+					// isError; another chat upstream has no such field
+					tool["is_error"] = true
+				}
+				tools = append(tools, tool)
 				seeLater(p)
 			}
 		}
@@ -427,6 +451,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 		flush()
 	}
 	showSeen()
+	msgs, _ = withoutSilentAssistants(msgs)
 	msgs = pairToolMessages(msgs)
 	out := map[string]any{"model": model, "messages": msgs, "stream": r.Stream}
 	if r.CacheKey != "" {
@@ -530,9 +555,10 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 //     calls split over consecutive assistant messages were joined into
 //     one by joinSplitCalls before, so they are pending together (#1275);
 //   - an assistant message with nothing in it — no text, no calls, no
-//     reasoning, what a thinking-only turn becomes — is dropped inside a
-//     pending exchange, where it would sit between calls and their
-//     answers; outside an exchange it passes through, as on main.
+//     reasoning — is dropped inside a pending exchange, where it would
+//     sit between calls and their answers. One with neither text nor
+//     calls was taken out before, wherever it stood
+//     (withoutSilentAssistants, #2599).
 func pairToolMessages(msgs []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	var pending []string          // calls of the last assistant message with tool_calls
@@ -640,6 +666,131 @@ func emptyAssistant(m map[string]any) bool {
 	}
 	s, _ := m["content"].(string)
 	return strings.TrimSpace(s) == ""
+}
+
+// silentAssistant reports whether a Chat message is an assistant turn
+// that says nothing: no content or only blank text, and no tool_calls or
+// function_call. It is what an agent keeps of a reply the user cut off
+// before it said anything — only its thinking, an empty text, nothing —
+// and DeepSeek, Kimi and the like turn the whole request away over it,
+// "Invalid assistant message: content or tool_calls must be set", on
+// every later turn of the conversation (#2599). reasoning_content is not
+// content to them. A prefill to go on from (prefix, partial), a refusal
+// and an audio reply say something and stay.
+func silentAssistant(m map[string]any) bool {
+	if m["role"] != "assistant" {
+		return false
+	}
+	if m["prefix"] == true || m["partial"] == true || m["function_call"] != nil || m["audio"] != nil {
+		return false
+	}
+	if s, _ := m["refusal"].(string); s != "" {
+		return false
+	}
+	switch c := m["tool_calls"].(type) {
+	case []map[string]any:
+		if len(c) > 0 {
+			return false
+		}
+	case []any:
+		if len(c) > 0 {
+			return false
+		}
+	case nil:
+	default:
+		return false
+	}
+	switch c := m["content"].(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(c) == ""
+	case []any:
+		for _, p := range c {
+			pm, _ := p.(map[string]any)
+			if t, _ := pm["text"].(string); pm == nil || pm["type"] != "text" || strings.TrimSpace(t) != "" {
+				return false
+			}
+		}
+		return true
+	case []map[string]any:
+		for _, pm := range c {
+			if t, _ := pm["text"].(string); pm["type"] != "text" || strings.TrimSpace(t) != "" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// withoutSilentAssistants leaves out of a Chat request's messages every
+// assistant turn that says nothing (silentAssistant), and joins the user
+// messages it stood between into one, as toolAsUser joins: some models'
+// chat templates turn away two user messages in a row. Nothing of the cut
+// turn reaches the model, as nothing of it reached the user. Every
+// strict-template rule stays kept: a tool message still follows the turn
+// with its call, and a tool message followed by the user's is what an
+// agent sends whenever the user writes after a tool result. It reports
+// whether it changed anything; the messages are edited in place.
+func withoutSilentAssistants(msgs []map[string]any) ([]map[string]any, bool) {
+	if !slices.ContainsFunc(msgs, silentAssistant) {
+		return msgs, false
+	}
+	out := make([]map[string]any, 0, len(msgs))
+	dropped := false
+	for _, m := range msgs {
+		if silentAssistant(m) {
+			dropped = true
+			continue
+		}
+		if n := len(out); dropped && n > 0 && m["role"] == "user" && out[n-1]["role"] == "user" {
+			if joined, ok := joinedUserContent(out[n-1]["content"], m["content"]); ok {
+				prev := maps.Clone(out[n-1])
+				prev["content"] = joined
+				out[n-1] = prev
+				continue
+			}
+		}
+		dropped = false
+		out = append(out, m)
+	}
+	return out, true
+}
+
+// joinedUserContent is two user messages' content as one: two texts with a
+// blank line between them, else the parts of the first and then the
+// second's, a text becoming a text part.
+func joinedUserContent(a, b any) (any, bool) {
+	as, aText := a.(string)
+	bs, bText := b.(string)
+	if aText && bText {
+		return as + "\n\n" + bs, true
+	}
+	parts := func(c any) ([]any, bool) {
+		switch c := c.(type) {
+		case string:
+			if strings.TrimSpace(c) == "" {
+				return nil, true
+			}
+			return []any{map[string]any{"type": "text", "text": c}}, true
+		case []any:
+			return c, true
+		case []map[string]any:
+			out := make([]any, len(c))
+			for i, p := range c {
+				out[i] = p
+			}
+			return out, true
+		}
+		return nil, false
+	}
+	ap, aok := parts(a)
+	bp, bok := parts(b)
+	if !aok || !bok {
+		return nil, false
+	}
+	return append(slices.Clip(ap), bp...), true
 }
 
 // aiStudioHost is Google AI Studio's Gemini API, whose OpenAI-compatible
@@ -776,6 +927,8 @@ type cUsage struct {
 	CachedTokens             int `json:"cached_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	// Credit is what WorkBuddy says the request cost in its plan's credits
+	Credit *float64 `json:"credit"`
 	// what a plugin's step collected of its conversation's earlier steps,
 	// which their own replies couldn't count (the Cursor plugin's usage
 	// events that showed late, yetone/magpie#1053): billed with the step,
@@ -812,6 +965,9 @@ func (u cUsage) usage() Usage {
 	if u.CompletionTokensDetails != nil {
 		out.Reasoning = u.CompletionTokensDetails.ReasoningTokens
 	}
+	if c := u.Credit; c != nil && *c >= 0 {
+		out.Credits = c
+	}
 	if d := u.MagpieDeferred; d != nil && d.PromptTokens+d.CompletionTokens > 0 {
 		out.Deferred = &Usage{Input: max(d.PromptTokens-d.CachedTokens-d.CacheWriteTokens, 0), Output: d.CompletionTokens,
 			CacheRead: d.CachedTokens, CacheWrite: d.CacheWriteTokens}
@@ -842,7 +998,14 @@ type chatDecoder struct {
 	lead         string
 	thought      bool
 	thoughtClose string
-	past         bool // the reply's text has begun; no tag is looked for now
+	// code is where the thinking is in Markdown code, where a close tag is
+	// an example written out, not the close (#2634: "使用 `<think>…</think>`
+	// 标签" cut the reply at the example's close)
+	code mdCode
+	past bool // the reply's text has begun; no tag is looked for now
+	// trim is a thinking block just closed: the line breaks after its
+	// close are left out of the answer, in whatever chunk they come
+	trim bool
 }
 
 // thoughtTags are the tags a leading block of thinking comes between in a
@@ -878,21 +1041,15 @@ func (d *chatDecoder) text(s string, emit func(Event)) {
 	if d.thought {
 		s = d.lead + s
 		d.lead = ""
-		if i := strings.Index(s, thoughtClose); i >= 0 {
+		if i, keep := d.code.find(s, thoughtClose, false); i >= 0 {
 			if i > 0 {
 				emit(Event{Kind: KThink, Text: s[:i]})
 			}
-			d.thought, d.past = false, true
-			s = strings.TrimLeft(s[i+len(thoughtClose):], "\n")
+			d.thought, d.past, d.trim = false, true, true
+			s = s[i+len(thoughtClose):]
 		} else {
-			// the end of it may be the close tag begun
-			keep := 0
-			for n := min(len(thoughtClose)-1, len(s)); n > 0; n-- {
-				if strings.HasSuffix(s, thoughtClose[:n]) {
-					keep = n
-					break
-				}
-			}
+			// the end of it may be the close tag, or a run of backticks,
+			// begun
 			if t := s[:len(s)-keep]; t != "" {
 				emit(Event{Kind: KThink, Text: t})
 			}
@@ -900,9 +1057,89 @@ func (d *chatDecoder) text(s string, emit func(Event)) {
 			return
 		}
 	}
+	if d.trim {
+		if s = strings.TrimLeft(s, "\n"); s != "" {
+			d.trim = false
+		}
+	}
 	if s != "" {
 		emit(Event{Kind: KText, Text: s})
 	}
+}
+
+// mdCode follows whether text read piece by piece is in Markdown code: an
+// inline span, taken to end with its line, or a fenced block.
+type mdCode struct {
+	span  int  // the backticks the open inline span began with; 0 for none
+	fence int  // the backticks the open fenced block began with; 0 for none
+	mid   bool // past the line's leading spaces
+}
+
+// find gives where close is first outside code in s, read on from the
+// pieces before, or -1 and how many bytes at the end of s are held back
+// for the next piece: a close tag or a run of backticks that may go on
+// there. Unless last, that is; then nothing is held.
+func (m *mdCode) find(s, close string, last bool) (at, hold int) {
+	for j := 0; j < len(s); {
+		switch c := s[j]; {
+		case c == '`':
+			k := j
+			for k < len(s) && s[k] == '`' {
+				k++
+			}
+			if k == len(s) && !last {
+				return -1, len(s) - j
+			}
+			switch n := k - j; {
+			case m.fence > 0:
+				if !m.mid && n >= m.fence {
+					m.fence = 0
+				}
+			case m.span > 0:
+				if n == m.span {
+					m.span = 0
+				}
+			case !m.mid && n >= 3:
+				m.fence = n
+			default:
+				m.span = n
+			}
+			m.mid = true
+			j = k
+		case c == '\n':
+			m.span, m.mid = 0, false
+			j++
+		case c == ' ' || c == '\t':
+			j++
+		case c == '<' && m.span == 0 && m.fence == 0:
+			if strings.HasPrefix(s[j:], close) {
+				return j, 0
+			}
+			if !last && strings.HasPrefix(close, s[j:]) {
+				return -1, len(s) - j
+			}
+			m.mid = true
+			j++
+		default:
+			m.mid = true
+			j++
+		}
+	}
+	return -1, 0
+}
+
+// afterThought is t without a leading <think>…</think> block, a whole
+// reply's thinking where its API leaves it in the text; t when it has none.
+func afterThought(t string) string {
+	rest, ok := strings.CutPrefix(t, "<think>")
+	if !ok {
+		return t
+	}
+	var m mdCode
+	if i, _ := m.find(rest, "</think>", true); i >= 0 {
+		return strings.TrimSpace(rest[i+len("</think>"):])
+	}
+	return t
 }
 
 // markedThought sends a piece of text Gemini marked as a thought
@@ -1029,6 +1266,12 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		}
 		if t != "" {
 			emit(Event{Kind: KThink, Text: t})
+			if !d.thought && d.lead == "" {
+				// a reply whose thinking has a field of its own doesn't
+				// also give it in its text: a <think> there is the
+				// model's words (#2634)
+				d.past = true
+			}
 		}
 		if c.Delta.ExtraContent.Google.Thought {
 			d.markedThought(content, emit)
@@ -1063,7 +1306,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KStop, Stop: stopFromChat(c.FinishReason)})
 		}
 	}
-	if ch.Usage != nil && (ch.Usage.PromptTokens > 0 || ch.Usage.CompletionTokens > 0 || ch.Usage.MagpieDeferred != nil) {
+	if ch.Usage != nil && (ch.Usage.PromptTokens > 0 || ch.Usage.CompletionTokens > 0 || ch.Usage.MagpieDeferred != nil || ch.Usage.Credit != nil) {
 		emit(Event{Kind: KUsage, Usage: ch.Usage.usage()})
 	}
 	return nil
@@ -1192,7 +1435,12 @@ func (e *chatEncoder) event(ev Event) {
 				"function": map[string]any{"arguments": ev.Text}}}}, nil, nil)
 		}
 	case KError:
-		failed := map[string]any{"message": ev.Text, "type": "api_error"}
+		typ := "api_error"
+		if ev.Status == http.StatusRequestEntityTooLarge && ev.Code != "context_length_exceeded" {
+			// the same type a 413 JSON body carries (writeErrorSaid)
+			typ = "request_too_large"
+		}
+		failed := map[string]any{"message": ev.Text, "type": typ}
 		if ev.Code != "" {
 			failed["code"] = ev.Code // preserve the upstream error type, including refusals
 		}

@@ -8,8 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -356,4 +358,92 @@ func TestHermesKeepsTheUsersSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("pick")
+}
+
+// PaulT on Discord: a key made under Gateway keys, put in Hermes's
+// config.yaml in place of magpie's, goes through magpie all the same, so
+// the check is quiet and a sync keeps it. A key the gateway doesn't take
+// still is drift.
+func TestHermesWithAGatewayKeyOfTheUsers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HERMES_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro"}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := appdir.HermesHomeIn(home)
+	path := filepath.Join(dir, "config.yaml")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(path, []byte("model:\n  default: x\n"), 0o644)
+	a := hermes(home)
+	if err := a.Field("model").Set("magpie/deepseek/pro"); err != nil {
+		t.Fatal(err)
+	}
+	if d := a.Check(); d != "" {
+		t.Fatalf("as magpie wrote it: %s", d)
+	}
+	secret, err := access.Update("add-key", access.Change{Name: "hermes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetYAML(path, edit.KV{Path: "providers.magpie.api_key", Value: secret}); err != nil {
+		t.Fatal(err)
+	}
+	if d := a.Check(); d != "" {
+		t.Fatalf("a key the gateway issued is drift: %s", d)
+	}
+	if err := a.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := edit.GetYAML(path, "providers.magpie.api_key"); v != secret {
+		t.Fatalf("a sync wrote over the user's key: %q", v)
+	}
+	if err := edit.SetYAML(path, edit.KV{Path: "providers.magpie.api_key", Value: "sk-not-this-gateways"}); err != nil {
+		t.Fatal(err)
+	}
+	if d := a.Check(); !strings.Contains(d, "api_key") {
+		t.Fatalf("a key the gateway doesn't take is not reported: %q", d)
+	}
+	if err := a.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := edit.GetYAML(path, "providers.magpie.api_key"); v != gateway.Token {
+		t.Fatalf("a key the gateway doesn't take is kept: %q", v)
+	}
+}
+
+// keyHolds, which every agent's check of magpie's key goes through: a key
+// of the gateway's own stands in for magpie's, never for a URL or another
+// value, and one the gateway doesn't take doesn't.
+func TestKeyHoldsTakesAGatewayKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	secret, err := access.Update("add-key", access.Change{Name: "mine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		v, want string
+		ok      bool
+	}{
+		{gateway.Token, gateway.Token, true},
+		{secret, gateway.Token, true},
+		{secret, gateway.TokenFor("alma"), true},
+		{"sk-other", gateway.Token, false},
+		{"", gateway.Token, false},
+		{secret, "http://127.0.0.1:3425/v1", false},
+		{secret, "chat_completions", false},
+	} {
+		if got := keyHolds(c.v, c.want); got != c.ok {
+			t.Errorf("keyHolds(%q, %q) = %v", c.v, c.want, got)
+		}
+	}
+	if d := wiringOff("X", "x.yaml", func(string) (string, bool) { return secret, true }, "api_key", gateway.Token); d != "" {
+		t.Fatalf("wiringOff: %s", d)
+	}
 }

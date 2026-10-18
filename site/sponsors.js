@@ -13,4 +13,5 @@
 export const SPONSORS = [
   { id: "yylx", home: "https://yylx.io/?ref=magpie" },
   { id: "apinebula", home: "https://apinebula.ai/ref/Gs54HwyB", readme: "https://apinebula.ai/ref/qmXqFGpr" },
+  { id: "zerotoken", readme: "https://zzq.si" },
 ];

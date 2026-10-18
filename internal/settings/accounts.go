@@ -3,6 +3,8 @@ package settings
 import (
 	"os"
 	"strings"
+
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // AccountDiscoveryOff is whether magpie leaves agents' sign-ins unread
@@ -10,7 +12,22 @@ import (
 // but "", "0" or "false" for this process alone. The variable only ever
 // turns discovery off; it never turns on what the user saved off.
 func AccountDiscoveryOff() bool {
-	return noAccountsEnv() || Load().NoAccountDiscovery
+	if noAccountsEnv() {
+		return true
+	}
+	fileMu.RLock()
+	defer fileMu.RUnlock()
+	// the one setting, parsed once for each version of the file: it is
+	// asked for each agent and each plugin every time the providers are
+	// built, a whole parse of settings.json each (#2502)
+	off, err := filememo.Read("settings:no-accounts", Path(), func(b []byte) (bool, error) {
+		s, err := parse(b)
+		return s.NoAccountDiscovery, err
+	})
+	if err != nil {
+		return load().NoAccountDiscovery
+	}
+	return off
 }
 
 // AccountDiscoveryOffIn is AccountDiscoveryOff with the settings already

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // fourK is a real 3840x2160 PNG of about the size #1576's relay sent
@@ -107,6 +108,19 @@ func (c *client) await(args map[string]any) (map[string]any, string) {
 	return nil, ""
 }
 
+// fetchLocal lets these tests' vendor, a server on this computer, be
+// downloaded from: the user's fetchPrivate naming loopback.
+func fetchLocal(t *testing.T) {
+	t.Helper()
+	was := settings.Load()
+	st := was
+	st.FetchPrivate = []string{"127.0.0.1"}
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { settings.Save(was) })
+}
+
 func shorterWaits(t *testing.T, stall time.Duration) {
 	wasWithin, wasStall := answerWithin, gateway.ImageStall
 	answerWithin, gateway.ImageStall = 200*time.Millisecond, stall
@@ -126,6 +140,7 @@ func TestFourKImageByURLIsSaved(t *testing.T) {
 	}
 	t.Logf("the 4K PNG is %.1f MB", float64(len(big))/(1<<20))
 	shorterWaits(t, time.Second)
+	fetchLocal(t)
 	files := httptest.NewServer(slowFile(big, 100*time.Millisecond, 0)) // ~4 s in all
 	t.Cleanup(files.Close)
 	g := &urlGateway{urls: []string{files.URL + "/4k.png"}}
@@ -173,6 +188,7 @@ func TestFourKImageAsB64IsSaved(t *testing.T) {
 func TestStalledDownloadSaysWhereTheImageIs(t *testing.T) {
 	big := fourK()
 	shorterWaits(t, 300*time.Millisecond)
+	fetchLocal(t)
 	stuck := httptest.NewServer(slowFile(big, 0, 3<<20))
 	t.Cleanup(stuck.Close)
 	fine := httptest.NewServer(slowFile(big, 0, 0))
@@ -192,5 +208,36 @@ func TestStalledDownloadSaysWhereTheImageIs(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(project, "two-1.png")); !bytes.Equal(b, big) {
 		t.Fatalf("saved %d bytes of %d", len(b), len(big))
+	}
+}
+
+// The URL an image is answered by is the vendor's, and what the model was
+// steered to draw can steer it: one on this computer or its network is
+// not downloaded unless the user's fetchPrivate names it, and the answer
+// says where the image is.
+func TestVendorImageAtPrivateAddressNotFetched(t *testing.T) {
+	shorterWaits(t, time.Second)
+	var hits sync.Mutex
+	n := 0
+	inside := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Lock()
+		n++
+		hits.Unlock()
+		w.Write([]byte("\x89PNG\r\n\x1a\n secret"))
+	}))
+	t.Cleanup(inside.Close)
+	project := t.TempDir()
+	c := initialized(t, &urlGateway{urls: []string{inside.URL + "/admin.png"}}, project)
+	r, out := c.await(map[string]any{"prompt": "a city", "path": "city.png"})
+	if r["isError"] != true || !strings.Contains(out, "private address") || !strings.Contains(out, inside.URL+"/admin.png") {
+		t.Fatalf("%v: %s", r["isError"], out)
+	}
+	hits.Lock()
+	defer hits.Unlock()
+	if n != 0 {
+		t.Fatalf("the private server was asked %d times", n)
+	}
+	if _, err := os.Stat(filepath.Join(project, "city.png")); err == nil {
+		t.Fatal("something was saved")
 	}
 }

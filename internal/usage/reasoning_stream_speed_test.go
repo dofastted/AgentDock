@@ -149,7 +149,7 @@ func TestRowFlagsApart(t *testing.T) {
 			}
 		})
 	}
-	bits := []uint16{1, 2, 4, 8, 16, 32, swapKnown, rowHandedOn, rowReasoningHidden, rowOwnCost, rowCompactionKnown, rowCompaction}
+	bits := []uint16{1, 2, 4, 8, 16, 32, swapKnown, rowHandedOn, rowReasoningHidden, rowOwnCost, rowCompactionKnown, rowCompaction, rowCredits}
 	var all uint16
 	for _, b := range bits {
 		if all&b != 0 {

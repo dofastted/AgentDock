@@ -32,6 +32,7 @@ func sandbox(t *testing.T) string {
 	t.Setenv("HOME", h)
 	t.Setenv("USERPROFILE", h)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
+	t.Setenv("XDG_STATE_HOME", "")
 	// Gemini CLI is found by its binary alone
 	bin := filepath.Join(h, "bin")
 	testenv.Program(t, filepath.Join(bin, "gemini"), "#!/bin/sh\n")
@@ -1011,6 +1012,42 @@ func TestGitHubSource(t *testing.T) {
 	}
 }
 
+// A skills CLI command pasted whole installs from its source
+// (RockyShowlle on X: the npx line a skill's page gives), whatever runs
+// it and wherever its flags are; anything else is left as it is.
+func TestSkillsCommand(t *testing.T) {
+	for in, want := range map[string]string{
+		"npx skills add vercel-labs/agent-skills":                     "vercel-labs/agent-skills",
+		"  npx -y skills@latest add owner/repo --skill pdf ":          "owner/repo",
+		"npx skills add --skill pdf -a claude-code owner/repo":        "owner/repo",
+		"bunx skills add https://github.com/o/r/tree/main/skills/pdf": "https://github.com/o/r/tree/main/skills/pdf",
+		"pnpm dlx skills add o/r":                                     "o/r",
+		"bun x skills add o/r -y":                                     "o/r",
+		"owner/repo":                                                  "owner/repo",
+		"npx skills find pdf":                                         "npx skills find pdf",
+		"npx other add o/r":                                           "npx other add o/r",
+		"npx skills add --skill pdf":                                  "npx skills add --skill pdf",
+		"~/skills/pdf":                                                "~/skills/pdf",
+	} {
+		if got := skillsCommand(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+	sandbox(t)
+	newFakeGitHub(t)
+	p, err := ProbeSkills("npx skills add someone/cli --skill pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Kind != "github" || p.Source != "someone/cli" || len(p.Candidates) != 1 || p.Candidates[0].Name != "pdf" {
+		t.Fatalf("probe: %+v", p)
+	}
+	ok(t)(InstallSkills("npx skills add someone/cli --skill pdf", []string{p.Candidates[0].Path}, nil))
+	if l := mustLoad(t); l.skill("pdf") == nil || l.skill("pdf").Source.Repo != "someone/cli" {
+		t.Fatalf("installed: %+v", l.skill("pdf"))
+	}
+}
+
 // A server or skill on no agent is listed with none, not null: the page
 // looks in the list, and a null blanked the whole Library.
 func TestReadNoAgents(t *testing.T) {
@@ -1169,6 +1206,45 @@ command = "gh-mcp"
 	want := map[string]bool{"node_repl": true, "cua_repl": true, "computer-use": true, "gh": false}
 	if !maps.Equal(own, want) {
 		t.Errorf("own: %v, want %v", own, want)
+	}
+}
+
+// Another app's server in Codex's config, run from inside that app's
+// bundle, is one to bring in, its empty args and inline env table read as
+// they are (iomect's #2635, the TOML as the report gave it). Only the
+// agent's own app's servers are its own.
+func TestFoundServerFromAnotherApp(t *testing.T) {
+	h := sandbox(t)
+	write(t, filepath.Join(h, ".codex/config.toml"), `[mcp_servers.netcatty-external]
+command = "/Applications/Netcatty.app/Contents/Resources/app.asar.unpacked/electron/cli/netcatty-external-mcp"
+args = []
+env = { NETCATTY_EXTERNAL_MCP_DISCOVERY_FILE = "/Users/****/Library/Application Support/netcatty/external-mcp/discovery.json" }
+
+[mcp_servers.computer-use]
+command = "/Applications/Codex.app/Contents/Resources/SkyComputerUseClient"
+`)
+	v, err := Read(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *Found
+	own := map[string]bool{}
+	for i, f := range v.FoundServers {
+		own[f.Server.Name] = f.Own
+		if f.Server.Name == "netcatty-external" {
+			got = &v.FoundServers[i]
+		}
+	}
+	if got == nil || got.Own {
+		t.Fatalf("netcatty-external found as %+v; own %v", got, own)
+	}
+	s := got.Server
+	if s.Command != "/Applications/Netcatty.app/Contents/Resources/app.asar.unpacked/electron/cli/netcatty-external-mcp" || len(s.Args) != 0 ||
+		s.Env["NETCATTY_EXTERNAL_MCP_DISCOVERY_FILE"] != "/Users/****/Library/Application Support/netcatty/external-mcp/discovery.json" || !slices.Contains(s.Agents, "codex") {
+		t.Errorf("netcatty-external read as %+v", s)
+	}
+	if !own["computer-use"] {
+		t.Errorf("the Codex app's own server isn't its own: %v", own)
 	}
 }
 

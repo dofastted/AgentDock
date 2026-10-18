@@ -112,12 +112,15 @@
       <button class="copy" data-copy="ex-cli">コピー</button>
       <pre id="ex-cli">magpie group rule add coder use=deepseek/deepseek-v4-flash intent=<span class="s">"a quick question"</span> classifier=groq/llama-3.1-8b-instant
 magpie group rule add coder use=deepseek/deepseek-v4-pro intent=<span class="s">"writing or fixing tests"</span>
+magpie group rule add coder use=deepseek/deepseek-v4-pro use-effort=low intent=<span class="s">"a simple edit"</span>   <span class="c"># 同じモデルを low の推論で</span>
 magpie group rule coder                           <span class="c"># the rules, numbered, and the classifier</span>
 magpie group rule classifier coder groq/llama-3.1-8b-instant   <span class="c"># change the classifier</span>
 magpie group rule mv coder 3 1                    <span class="c"># order matters: top first</span>
 magpie group rule rm coder 2</pre>
     </div>
     <p><code>intent=</code> は <code>asks=</code> と <code>about=</code> とも書けます。<code>classifier=</code> は <code>classify=</code> と <code>by=</code> とも書けます。<code>rule add</code> の <code>classifier=</code> はグループの判定モデルを設定するもので、最初の 1 回だけ必要です。判定モデルは <code>~/.config/magpie/providers.json</code> のグループのレコードに <code>"classifier"</code> として、各ルールは <code>{"use": …, "intent": …}</code> として保存されます。</p>
+
+    <p id="effort">ルールはモデルに求める推論も指定できるので、意図でモデルと推論の強さを組で選べます。<code>use-effort=</code>（<code>low</code>、<code>medium</code>、<code>high</code>、<code>xhigh</code>、<code>max</code>）で、<code>"useEffort"</code> として保存されます。例：<code>{"use": "deepseek/deepseek-v4-pro", "intent": "a simple edit", "useEffort": "low"}</code>。エディタではルールの <span class="ui">⋯</span> メニューの <span class="ui">推論を指定</span> から設定し、設定するとモデルの横に表示されます。そのターンのリクエストでは、エージェントの指定にかかわらず、ルールのモデルにその推論をモデルの最も近いレベルで求めます。magpie がレベルを知らないモデルはエージェントの指定どおりで、グループがフェイルオーバーする先のモデルも同じです。グループで推論が固定されたモデルはその固定のままです。指定しなければエージェントの指定どおりです。ルールが推論を指定したときは、ルーティングタブにそう表示されます。</p>
 
     <h2 id="how"><a class="anchor" href="#how">ターンのルーティング</a></h2>
     <p>ルールのあるグループにエージェントが送るリクエストは、すべて次の手順をこの順に通ります。</p>

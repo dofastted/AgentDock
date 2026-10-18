@@ -7,7 +7,8 @@
 //     gateway routes it, and its reply as the agent gets it. The JS gateway
 //     middleware (internal/middleware) is the one there, registered by
 //     plugins/middleware. It fails open: a middleware that fails leaves the
-//     request as it was.
+//     request as it was. A Run that is also Tried changes the body again
+//     for each provider the gateway tries the request on.
 //   - Masker: what magpie sends to a vendor, masked as the settings say,
 //     and what the vendor answers with the values back. The redact plugin
 //     registers it. It fails closed: when the settings ask for masking and
@@ -54,6 +55,21 @@ type Run interface {
 	Wrap(w http.ResponseWriter) (http.ResponseWriter, func())
 	// End is the request's end, after done
 	End()
+}
+
+// To is the provider a request is tried on, as a middleware is told it.
+type To struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Account string `json:"account,omitempty"` // the subscription's kind (claude, antigravity, …); empty for a key
+	Model   string `json:"model"`             // the model asked of it, by its id there
+}
+
+// Tried is a Run that also changes the body each provider the request is
+// tried on is sent: Tried is that try's body, in the agent's API, and
+// changes no other try's.
+type Tried interface {
+	Tried(body []byte, to To) []byte
 }
 
 // Masker masks what magpie sends to a vendor and puts the values back in

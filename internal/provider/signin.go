@@ -37,7 +37,6 @@ import (
 // The vendors' sign-in pages; vars so tests can point them elsewhere.
 var (
 	codexAuthorizeURL = "https://auth.openai.com/oauth/authorize"
-	devinAuthorizeURL = "https://app.devin.ai/auth/cli/continue"
 	// codexCallbackAddr is fixed: OpenAI only sends Codex's client back to
 	// port 1455.
 	codexCallbackAddr = "127.0.0.1:1455"
@@ -103,14 +102,17 @@ type signInFlow struct {
 	state    string
 	redirect string
 	srv      *http.Server
-	stop     func() // ends an agent's own login command, when that is the sign-in
-	kiro     *kiroFlow
+	stop     func()           // ends an agent's own login command, when that is the sign-in
 	site     string           // where to sign in, for an agent with more than one (ZCode: "zai" or "bigmodel")
 	plugin   string           // a plugin's sign-in session, finished with the code pasted back
 	claude   *claudeCLISignIn // Claude Code's own sign-in, run by magpie
 	// pluginPorts are where a plugin's browser sign-in comes back to on
 	// this machine, for its address pasted (pluginsignin_paste.go)
 	pluginPorts []string
+	// pluginKey is a plugin's browser sign-in also finished by a key made
+	// on KeysURL and pasted: its provider and "api" method, as the plugin
+	// lists it (pluginsignin_paste.go)
+	pluginKey *pluginKeyWay
 
 	// nonce and hostID are a ChatGPT API sign-in's: what its ID token must
 	// carry, and this machine's id it registers magpie for (chatgpt_api.go)
@@ -242,7 +244,7 @@ func StartSignInWith(agent string, o SignInOptions) (SignInState, error) {
 	}
 	// one moved onto its plugin signs in there: an account signed in to
 	// here would be the built-in's, which nothing serves now
-	if Moved(agent) {
+	if PluginServes(agent) {
 		return SignInState{}, fmt.Errorf("%s runs on its plugin: sign in through the plugin (magpie plugin login %s)", agent, agent)
 	}
 	s := &signInFlow{verifier: randomToken(48), state: randomToken(24), done: make(chan struct{}), site: site}
@@ -371,79 +373,9 @@ func (s *signInFlow) begin() error {
 		s.mu.Lock()
 		s.st.URL = siwcAuthorize(s.redirect, s.state, s.nonce, challenge, s.hostID)
 		s.mu.Unlock()
-	case "cursor":
-		// Cursor has no sign-in of its own to borrow: its CLI signs in
-		if err := startCursorSignIn(s); err != nil {
-			return err
-		}
-	case "grok":
-		// so is Grok: its CLI signs in with a device code
-		if err := startGrokSignIn(s); err != nil {
-			return err
-		}
-	case "devin":
-		// `devin auth login` is a TUI over this same PKCE + localhost
-		// callback, so magpie runs the round itself
-		if ln, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
-			return err
-		}
-		s.redirect = fmt.Sprintf("http://127.0.0.1:%d/callback", ln.Addr().(*net.TCPAddr).Port)
-		q.Set("redirect_uri", s.redirect)
-		q.Set("state", s.state)
-		q.Set("prompt", "select_account")
-		q.Set("code_challenge", challenge)
-		q.Set("code_challenge_method", "S256")
-		q.Set("cli_pkce_marker", "1")
-		// set with the lock: the window follows a sign-in that installed
-		// devin first while this runs
-		s.mu.Lock()
-		s.st.URL = devinAuthorizeURL + "?" + q.Encode()
-		s.mu.Unlock()
-	case "kiro":
-		// Kiro's sign-in page, as the Kiro IDE opens it
-		if ln, err = startKiroSignIn(s, challenge); err != nil {
-			return err
-		}
 	case "copilot":
 		// GitHub's device code, as Copilot's editors sign in
 		if err := startCopilotSignIn(s); err != nil {
-			return err
-		}
-	case "workbuddy", WorkBuddyAIID:
-		// Tencent's sign-in, as WorkBuddy (CodeBuddy) or WorkBuddy AI makes it
-		if err := startWorkBuddySignIn(s, wbSiteOf(agent)); err != nil {
-			return err
-		}
-	case CommandCodePlanID:
-		// Command Code's browser sign-in, as its CLI makes it
-		if err := startCommandCodeSignIn(s); err != nil {
-			return err
-		}
-	case "qoder", QoderCNID:
-		// Qoder's device flow on the account's site (qoder.com or qoder.cn),
-		// run by magpie and kept in its own store
-		if err := startQoderSignIn(s, qoderSiteOf(agent)); err != nil {
-			return err
-		}
-	case "zed":
-		// Zed's own sign-in: zed.dev sends the browser back to a port magpie
-		// listens on, with the account's token encrypted to magpie's key
-		if err := startZedSignIn(s); err != nil {
-			return err
-		}
-	case "factory":
-		// WorkOS's device code, as droid signs in to Factory
-		if err := startFactorySignIn(s); err != nil {
-			return err
-		}
-	case MiMoID:
-		// Xiaomi's long-poll sign-in, for the MiMo server's service
-		if err := startMiMoSignIn(s); err != nil {
-			return err
-		}
-	case "zcode":
-		// Z.ai's or BigModel's sign-in, as ZCode makes it
-		if err := startZCodeSignIn(s, s.site); err != nil {
 			return err
 		}
 	case "gemini", "antigravity":
@@ -551,11 +483,11 @@ func SubmitSignInCallback(id, raw string) error {
 	if s.pluginPorts != nil {
 		return s.pluginCallback(raw)
 	}
+	if s.pluginKey != nil {
+		return s.pastedPluginKey(raw)
+	}
 	if s.claude != nil {
 		return s.claudePaste(raw)
-	}
-	if s.status().Agent == CommandCodePlanID {
-		return s.commandCodeKey(raw)
 	}
 	return s.pastedCallback(raw)
 }
@@ -596,13 +528,6 @@ func (s *signInFlow) pastedCallback(raw string) error {
 	claimed := s.claimed
 	s.mu.Unlock()
 	if !claimed {
-		// Kiro's page sends an AWS sign-in on to AWS: the next page to open
-		if loc := rep.h.Get("Location"); rep.code/100 == 3 && strings.HasPrefix(loc, "https://") && s.kiro != nil {
-			s.mu.Lock()
-			s.st.URL = loc
-			s.mu.Unlock()
-			return nil
-		}
 		if st := s.status(); st.State == "failed" {
 			return errors.New(st.Error)
 		}
@@ -635,19 +560,6 @@ func (s *signInFlow) ownCallback(u *url.URL, redirect string) bool {
 		return false
 	}
 	q := u.Query()
-	switch {
-	case s.st.Agent == "zed":
-		// no state: the token in it is encrypted to this sign-in's key
-		return q.Get("user_id") != "" && q.Get("access_token") != ""
-	case s.kiro != nil:
-		if u.Path != "/oauth/callback" && u.Path != "/signin/callback" {
-			return false
-		}
-		s.mu.Lock()
-		aws := s.kiro.state
-		s.mu.Unlock()
-		return q.Get("state") == s.state || (aws != "" && q.Get("state") == aws)
-	}
 	return u.Path == want.Path && q.Get("state") == s.state
 }
 
@@ -749,10 +661,6 @@ func (s *signInFlow) finish(out SignInState) bool {
 }
 
 func (s *signInFlow) callback(w http.ResponseWriter, r *http.Request) {
-	if s.kiro != nil {
-		s.kiroCallback(w, r)
-		return
-	}
 	switch r.URL.Path {
 	case "/callback", "/auth/callback", "/oauth2callback", "/oauth-callback":
 	case "/cancel":
@@ -798,18 +706,6 @@ func (s *signInFlow) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l, err := s.exchange(ctx, q.Get("code"))
-	if err == nil && s.st.Agent == "devin" {
-		// the exchange kept it already: the CLI's own, or one beside it
-		using := false
-		for _, d := range devinLogins() {
-			if strings.EqualFold(d.User, l.User) {
-				using = d.Active
-			}
-		}
-		s.finish(SignInState{State: "done", User: l.User, Plan: l.Plan, Using: using})
-		signInPage(w, true, "You're signed in", fmt.Sprintf("%s is added to magpie. You can close this tab.", l.User))
-		return
-	}
 	if err == nil {
 		var using bool
 		if err = keepLogin(ctx, func() (err error) { using, err = addLogin(l); return err }); err == nil {
@@ -844,11 +740,7 @@ func (s *signInFlow) googleDone(ctx context.Context, w http.ResponseWriter, app 
 
 // exchange trades the code for tokens and makes them into a login.
 func (s *signInFlow) exchange(ctx context.Context, code string) (savedLogin, error) {
-	switch s.st.Agent {
-	case "codex":
-		return codexExchange(ctx, code, s.verifier, s.redirect)
-	}
-	return devinExchange(ctx, code, s.verifier, s.redirect)
+	return codexExchange(ctx, code, s.verifier, s.redirect)
 }
 
 func postToken(ctx context.Context, tokenURL, ctype string, body []byte, out any) error {

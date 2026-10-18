@@ -180,21 +180,29 @@ func agentModelList(a *agent.Agent) []agentModelJSON {
 
 func agentModelsAPI(mux *http.ServeMux) {
 	// a model the agent picks sent in its vendor's fast mode, or not (#954):
-	// for is the option's fastFor, the agent whose requests it goes on
+	// for is the option's fastFor, the agent whose requests it goes on. Ultra
+	// sends it as Ultrafast where the account offers that (#1954)
 	mux.HandleFunc("POST /api/agent-fast", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
-			For, Ref string
-			Fast     bool
+			For, Ref    string
+			Fast, Ultra bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
 		}
-		if err := provider.SetFastPick(in.For, in.Ref, in.Fast); err != nil {
+		tier := ""
+		switch {
+		case in.Fast && in.Ultra:
+			tier = "ultrafast"
+		case in.Fast:
+			tier = "priority"
+		}
+		if err := provider.SetFastTier(in.For, in.Ref, tier); err != nil {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, map[string]any{"fast": provider.IsFastPick(in.For, in.Ref)})
+		writeJSON(rw, map[string]any{"fast": provider.IsFastPick(in.For, in.Ref), "ultra": provider.IsUltraPick(in.For, in.Ref)})
 	})
 	mux.HandleFunc("GET /api/agent-models/{id}", func(rw http.ResponseWriter, r *http.Request) {
 		a, err := agent.Find(r.PathValue("id"))

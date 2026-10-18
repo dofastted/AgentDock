@@ -877,8 +877,8 @@ func untar(r io.Reader, dst string) error {
 // looked for a few folders deep, and not inside another skill. A hidden
 // folder is an agent's own (.claude, .agents) and is looked in only for its
 // skills folder: some repositories keep their skill only in
-// .claude/skills (#1964, UFO404). A skill found there that the repository
-// also has outside a hidden folder is that one, listed once.
+// .claude/skills (#1964, UFO404). A skill the repository holds twice, in a
+// hidden folder or a plugin's, is listed once (unhiddenFirst).
 func candidates(root, sub string) []Candidate {
 	base := filepath.Join(root, filepath.FromSlash(sub))
 	var out []Candidate
@@ -926,25 +926,78 @@ func inHidden(path string) bool {
 	return slices.ContainsFunc(strings.Split(path, "/"), func(p string) bool { return strings.HasPrefix(p, ".") })
 }
 
-// unhiddenFirst drops a skill in a hidden folder that is the same skill as
-// one outside every hidden folder, or as a hidden one listed before it: an
-// agent's folder often holds a copy of the repository's own skills.
+// unhiddenFirst lists each skill once: of copies of the same skill it keeps
+// the one outside every hidden folder, then the one fewest folders deep,
+// then the first. An agent's folder often holds a copy of the repository's
+// own skills, and a repository that is also a plugin often holds another
+// under its plugin's folder: tw93/waza has skills/check and
+// plugins/waza/skills/check, and every skill was listed twice (碳碳双键 on
+// Discord).
 func unhiddenFirst[T any](list []T, path func(T) string, same func(a, b T) bool) []T {
+	depth := func(c T) int { return strings.Count(path(c), "/") }
+	before := func(o T, j int, c T, i int) bool {
+		if ho, hc := inHidden(path(o)), inHidden(path(c)); ho != hc {
+			return !ho
+		}
+		if do, dc := depth(o), depth(c); do != dc {
+			return do < dc
+		}
+		return j < i
+	}
 	out := make([]T, 0, len(list))
 	for i, c := range list {
-		if inHidden(path(c)) && (slices.ContainsFunc(list, func(o T) bool { return !inHidden(path(o)) && same(o, c) }) ||
-			slices.ContainsFunc(list[:i], func(o T) bool { return inHidden(path(o)) && same(o, c) })) {
-			continue
+		dup := false
+		for j, o := range list {
+			if j != i && same(o, c) && before(o, j, c, i) {
+				dup = true
+				break
+			}
 		}
-		out = append(out, c)
+		if !dup {
+			out = append(out, c)
+		}
 	}
 	return out
 }
 
+// skillsCommand is the source a skills CLI command copied from a page
+// installs from (RockyShowlle on X): "npx skills add owner/repo --skill
+// x", run through npx, bunx, pnpm dlx and the like. Anything else is
+// given back as it is.
+func skillsCommand(input string) string {
+	f := strings.Fields(strings.TrimSpace(input))
+	i := 0
+	switch {
+	case len(f) > 1 && (f[0] == "npx" || f[0] == "bunx" || f[0] == "pnpx"):
+		i = 1
+	case len(f) > 2 && ((f[0] == "pnpm" || f[0] == "yarn") && f[1] == "dlx" || f[0] == "bun" && f[1] == "x"):
+		i = 2
+	default:
+		return input
+	}
+	for i < len(f) && strings.HasPrefix(f[i], "-") { // npx -y
+		i++
+	}
+	if i+1 >= len(f) || (f[i] != "skills" && !strings.HasPrefix(f[i], "skills@")) || f[i+1] != "add" {
+		return input
+	}
+	for i += 2; i < len(f); i++ {
+		switch a := f[i]; {
+		case a == "--skill" || a == "-s" || a == "--agent" || a == "-a":
+			i++ // and its value
+		case strings.HasPrefix(a, "-"):
+		default:
+			return a
+		}
+	}
+	return input
+}
+
 // ProbeSkills looks for skills at what the user typed: a GitHub repository
-// (or a folder in one), or a folder on this machine.
+// (or a folder in one), a folder on this machine, or a skills CLI command
+// for either.
 func ProbeSkills(input string) (*Probe, error) {
-	input = strings.TrimSpace(input)
+	input = strings.TrimSpace(skillsCommand(input))
 	if input == "" {
 		return nil, fmt.Errorf("paste a GitHub link or a folder's path")
 	}
@@ -988,7 +1041,7 @@ func ProbeSkills(input string) (*Probe, error) {
 
 func cachedProbe(input string) (*Probe, error) {
 	probes.Lock()
-	e := probes.m[strings.TrimSpace(input)]
+	e := probes.m[strings.TrimSpace(skillsCommand(input))]
 	probes.Unlock()
 	if e != nil {
 		if _, err := os.Stat(e.tmp); err == nil {
@@ -1745,6 +1798,65 @@ func foundSkills(l *Library) []FoundSkill {
 	return res
 }
 
+// linkVia is what the library links to for a skill found at the entry at,
+// whose folder is really at real: the first link on the way from at that
+// is outside every skills folder (the agents', the shared one and the
+// library's), which the app that made it keeps pointing at its current
+// folder, as ego lite's ~/.local/share/ego/ego-skills does. A folder in a
+// bundle's Versions/<v> is named through Versions/Current when Current is
+// that very version. It is real when nothing on the way is any steadier,
+// or when the way doesn't end at real.
+func linkVia(at, real string) string {
+	var homes []string
+	for _, d := range []string{skillsDir(), sharedSkillsDir()} {
+		homes = append(homes, realBelow(d))
+	}
+	for _, t := range Targets() {
+		if t.Skills != "" {
+			homes = append(homes, realBelow(t.Skills))
+		}
+	}
+	inHome := func(p string) bool {
+		up := realBelow(filepath.Dir(p))
+		return slices.ContainsFunc(homes, func(h string) bool { return within(up, h) })
+	}
+	cur := filepath.Clean(at)
+	for i := 0; inHome(cur); i++ {
+		to, ok := linkTarget(cur)
+		if !ok || i > 40 {
+			cur = real
+			break
+		}
+		if !filepath.IsAbs(to) {
+			to = filepath.Join(filepath.Dir(cur), to)
+		}
+		cur = filepath.Clean(to)
+	}
+	cur = currentVersion(cur)
+	if realDir(cur) != real {
+		return real
+	}
+	return cur
+}
+
+// currentVersion is p with a Versions/<v> part of it named Versions/Current,
+// when that link is there and points at <v>: a macOS framework's versions,
+// of which an update leaves the old one behind.
+func currentVersion(p string) string {
+	parts := strings.Split(p, string(filepath.Separator))
+	for i := len(parts) - 2; i > 0; i-- {
+		if parts[i] != "Versions" || parts[i+1] == "Current" {
+			continue
+		}
+		vs := strings.Join(parts[:i+1], string(filepath.Separator))
+		cur := filepath.Join(vs, "Current")
+		if realDir(cur) == realDir(filepath.Join(vs, parts[i+1])) && linked(cur) {
+			return filepath.Join(append([]string{cur}, parts[i+2:]...)...)
+		}
+	}
+	return p
+}
+
 // ImportSkill takes a skill the agents have of their own into the library:
 // a folder is moved in, a link to a folder elsewhere is linked to from the
 // library, and the agents that had it get the library's from then on.
@@ -1805,9 +1917,15 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 			src = nil
 		}
 	case f.Link != "" || shared:
-		if err := dirLink(f.real, skillDir(name)); err != nil {
+		// linked through the way the agent's own link goes, not to where
+		// it ends today: an app that keeps its skills in a versioned
+		// folder points its own link at the new one when it updates
+		// (iomect's ego lite, #2635), and the library follows
+		via := linkVia(f.at, f.real)
+		if err := dirLink(via, skillDir(name)); err != nil {
 			return err
 		}
+		src.Dir = via
 	default:
 		// a move that copied it all but couldn't take the whole folder away
 		// (a file in it held open) has brought it in all the same: what is

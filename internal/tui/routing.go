@@ -294,6 +294,7 @@ func (m *model) openClassifier(g provider.Group) {
 const ruleHint = `use=<model>, and any of: tokens=200k · images · effort=on|low|medium|high|xhigh|max · agents=codex,claude
 intent="a quick question" (the group's classifier=<model> tells it) · compact
 time=09:00-18:00 (local; 22:00-08:00 runs past midnight) · days=mon-fri · folders=~/work/acme,~/oss · except-folders=~/old · at=<n> for its place
+use-effort=low|medium|high|xhigh|max: the reasoning the model is asked for, whatever the agent asked
 or pause=<model> time=… days=… agents=… folders=… except-folders=…: the model is left out of the group then, not even a fallback`
 
 // openRule asks for a rule: a new one, or rule i (from 0) typed again.
@@ -667,6 +668,9 @@ func (m model) viewGroup() string {
 		arrow := " → "
 		if r.Pause {
 			arrow = " → pause "
+		}
+		if r.UseEffort != "" {
+			use += sMuted.Render(" at ") + sText.Render(r.UseEffort)
 		}
 		b.WriteString(pad + marker + sFaint.Render(fmt.Sprintf("%d  ", i+1)) + sMuted.Render(strings.Join(r.Conditions(), " · ")+arrow) + use + "\n")
 	}

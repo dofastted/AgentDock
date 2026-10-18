@@ -391,6 +391,8 @@ body.side-nav #nav button.has-dot::after { top: 50%; right: 10px; margin-top: -3
 .nav-sub > button { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
 .nav-sub > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub > button > em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* an update waiting, in the sidebar's dot colour, as the words the dot means */
+.nav-sub > button > em.up { color: var(--accent); font-weight: 500; }
 /* the selection (.nav-hl) is the only shape in the list: a row hovered or
    pressed has no ground of its own, which would show where the finger is
    before the selection slides there */
@@ -422,6 +424,16 @@ body.side-nav.mac :is(#view-library .lib-head, #view-plugins .pm-head, #view-set
 body.side-nav :is(#view-library .lib-head, #view-plugins .pm-head, #view-settings .set-head) > * { pointer-events: auto; --wails-draggable: no-drag; min-width: 0; }
 body.side-nav :is(#view-library .lib-head, #view-plugins .pm-head)::before { display: none; }
 body.side-nav :is(#view-library .lib-headacts) { flex-wrap: nowrap; }
+/* a narrow window (#2625): the buttons keep their size and the fields
+   their least, so what doesn't fit shows as too wide (app.js tools), never
+   run left over the title. First the buttons give their words up for
+   their icons, the name kept as the button's and its tooltip; only then
+   is the title cut: its first parts go, then its last is cut at its end */
+body.side-nav :is(#view-library .lib-headacts, #view-plugins .pm-mirror) { flex: none; }
+body.side-nav #view-plugins .pm-find { min-width: 120px; }
+body.side-nav.tools-tight :is(#view-library .lib-headacts button, #view-plugins .pm-mirror) > span:not(.lib-mini, .lib-switch) { display: none; }
+body.side-nav .crumb { max-width: var(--crumb-max, none); }
+body.side-nav .crumb > [hidden] { display: none; }
 body.side-nav :is(#view-library, #view-plugins, #view-settings) { padding-top: 8px; }
 /* the gateway, under Settings: where it listens; a click opens its page */
 .side-gw { display: flex; align-items: center; gap: 8px; height: 26px; margin-top: 2px; padding: 0 9px; border-radius: 6px; font-size: 11.5px; color: var(--muted); text-align: left; white-space: nowrap; }
@@ -985,14 +997,20 @@ body.window .field.solo { grid-column: auto; }
 /* a card's own refresh, left of when it was read (or of why it couldn't
    be), opening as the card is hovered: at rest the line starts where the
    card's other lines do (#840) */
-.quota-refresh { display: inline-flex; align-items: center; justify-content: center; width: 0; height: 14px; margin: 0; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--faint); vertical-align: -3px; opacity: 0; overflow: hidden; cursor: pointer; transition: width .12s, margin .12s, opacity .12s; }
-.quota-refresh svg { flex: none; }
-.subscription-card:hover .quota-refresh, .pq-card:hover .quota-refresh, .quota-refresh.busy { width: 14px; margin: 0 3px 0 -2px; opacity: 1; }
+.quota-refresh { display: inline-grid; place-items: center; width: 0; margin: 0; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--faint); vertical-align: baseline; opacity: 0; overflow: hidden; cursor: pointer; transition: width .12s, margin .12s, opacity .12s; }
+/* Inherited text supplies the inline baseline; the icon shares its centered cell. */
+.quota-refresh::before { content: "\00a0"; grid-area: 1 / 1; }
+.quota-refresh svg { grid-area: 1 / 1; }
+.subscription-card:hover .quota-refresh, .pq-card:hover .quota-refresh, .quota-refresh.busy, .quota-refresh.kept { width: 14px; margin: 0 3px 0 -2px; opacity: 1; }
 /* apart: Safari before 15.4 drops a whole selector list with :focus-visible in it */
 .quota-refresh:focus-visible { width: 14px; margin: 0 3px 0 -2px; opacity: 1; }
 .quota-refresh:hover { color: var(--fg); background: var(--pill-hover); }
 .quota-refresh.busy { cursor: default; }
-.quota-refresh.busy svg > * { transform-box: view-box; transform-origin: 50% 50%; animation: spin .8s linear infinite; }
+.quota-refresh.busy svg > * { transform-box: view-box; transform-origin: 50% 50%; }
+/* the other place's copy of a control that is turning (the tray panel's and the
+   Usage page's draw the same account) turns by itself */
+.quota-refresh.spun svg > * { animation: spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .quota-refresh.spun svg > * { animation: none; } }
 @media (hover: none) { .quota-refresh { width: 14px; margin: 0 3px 0 -2px; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .quota-refresh { transition: none; } }
 .skeleton { display: block; border-radius: 5px; background: linear-gradient(90deg, var(--skel, var(--pill)) 25%, var(--skel-hi, var(--pill-hover)) 45%, var(--skel, var(--pill)) 65%); background-size: 240% 100%; animation: skeleton-shift 1.4s ease-in-out infinite; }
@@ -1337,7 +1355,7 @@ body.window .field.solo { grid-column: auto; }
 .led.tight .led-dl .lc-opt { display: block; }
 .led.tight .model, .led.tight .where { max-width: 160px; }
 .led.tight th, .led.tight td { padding-left: 6px; padding-right: 6px; }
-.led.tighter .price-reference { display: none; }
+.led.tighter .price-reference, .led.tight2 .lc-opt2 { display: none; }
 /* the account's name is cut at 110px, but its column keeps room for the
    source badges under it, which don't wrap: capped at 110px the cell cut
    off the second English one ("Subscription") */
@@ -2061,6 +2079,10 @@ body.window .foot { padding-left: 18px; }
 .field .fast-tag { display: inline-flex; flex: none; color: var(--accent); }
 .field .fast-tag path { fill: currentColor; }
 .ag-open .field .fast-tag { order: 1; }
+/* Ultrafast (#1954): two bolts, overlapped to fit the bolt's place */
+.bolts { display: inline-flex; align-items: center; }
+.bolts svg + svg { margin-left: -8px; }
+.field .fast-tag .bolts svg + svg { margin-left: -6px; }
 .pop.explained li { height: auto; padding: 7px 8px; white-space: normal; align-items: flex-start; }
 .pop.explained li .option-words { flex-direction: column; align-items: flex-start; gap: 2px; }
 .pop.explained li .n { flex: none; overflow: visible; line-height: 1.4; }
@@ -3172,6 +3194,18 @@ body:not(.side-nav) #view-settings .set-head.stuck::before { box-shadow: 0 1px 0
 .view.plugin-page { padding: 0; }
 .plugin-frame { flex: 1; display: block; width: 100%; min-height: 240px; border: 0; background: transparent; }
 .view.plugin-page > .slot-error { margin: 0 12px; }
+/* a plugin's panels in magpie's own pages (P5): each a card, as tall as
+   what its frame draws, under its title */
+.plugin-slot { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.plugin-slot[hidden] { display: none; }
+.plugin-panel > .row-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.plugin-panel > .row-head .note { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.plugin-panel-body { border: 1px solid var(--line); border-radius: 10px; background: var(--card); overflow: hidden; }
+.plugin-panel-frame { flex: none; min-height: 0; height: 48px; }
+.plugin-panel-broke { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 12px 14px; }
+.plugin-panel-broke .note { flex: 1 1 200px; color: var(--muted); overflow-wrap: anywhere; }
+/* a built-in page a plugin's page replaces steps aside in the sidebar */
+#nav button[data-replaced] { display: none !important; }
 img.nav-ic { border-radius: 3px; object-fit: contain; }
 .row.pref { min-height: 50px; padding: 8px 12px 8px 14px; gap: 14px; }
 .row.pref .who { flex: 1 1 auto; }

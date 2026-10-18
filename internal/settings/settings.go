@@ -117,6 +117,14 @@ type Settings struct {
 	// its place (gateway.AllowIPs). This computer's own (KeepOwn), as LAN
 	// is: the addresses are of the network this computer is on.
 	AllowIPs []string `json:"allowIPs,omitempty"`
+	// FetchPrivate are the private hosts and ranges (a name, name:port, an
+	// IP or a CIDR range) magpie may download a URL from that it didn't
+	// choose itself: an image or video a request names or a vendor answers
+	// with, or a page web_fetch reads. None by default: such a URL is
+	// downloaded from public addresses only, whoever sent the request and
+	// from wherever (gateway.publicClient). In settings.json only; it names
+	// this computer's own network, so it isn't synced (KeepOwn).
+	FetchPrivate []string `json:"fetchPrivate,omitempty"`
 	// Port is the gateway's port on this computer, 0 for DefaultPort.
 	// MAGPIE_ADDR, where it is set, comes first (GatewayAddr).
 	Port int `json:"port,omitempty"`
@@ -221,6 +229,13 @@ type Settings struct {
 	// is stuck in a loop of the same few lines (#1359). Off, as by
 	// default, the gateway ends such a reply with an error.
 	NoLoopGuard bool `json:"noLoopGuard,omitempty"`
+	// ClaudeLeanPrompt starts a Claude subscription's Claude Code run with
+	// the caller's own instructions as its system prompt
+	// (--system-prompt-file), in place of Claude Code's (about 1.1K tokens
+	// a request on Sonnet 5.5), and not in its first message. Still the
+	// real Claude Code, its billing line and identity line kept; off, as by
+	// default, the run is the shape every Claude Code run has.
+	ClaudeLeanPrompt bool `json:"claudeLeanPrompt,omitempty"`
 	// RefusalRetries is how many more times a request the vendor's safety
 	// filter refused, with nothing said, is asked of another account or
 	// routing group member (#248), unset for every one left. 0 hands the
@@ -476,6 +491,17 @@ type Settings struct {
 	// off, in tokens: 0 is WorkingWindow (#876: 272K was the only one).
 	// A provider's or a model's own (ModelCompacts) comes before it.
 	CompactAt int `json:"compactAt,omitempty"`
+	// CodexAsyncCompact has Codex (0.163 on) compact a long conversation
+	// in the background, while its turn goes on, once it is past
+	// CodexAsyncCompactPercent of the model's window (#2490, lantern2077
+	// on Discord): [features.async_compaction] enabled in the config Codex
+	// is routed through, and capabilities.remote_compaction = "v2" on
+	// magpie's provider table, without which Codex never starts one on a
+	// provider other than OpenAI's. A value the user set there is theirs
+	// and stays (internal/agent/codex_async.go).
+	CodexAsyncCompact bool `json:"codexAsyncCompact,omitempty"`
+	// CodexAsyncCompactPercent is that share, 1–100; 0 is Codex's own, 65.
+	CodexAsyncCompactPercent int `json:"codexAsyncCompactPercent,omitempty"`
 	// ChinaMirror is the Plugins page's 「国内镜像」 switch: the plugin list,
 	// npm (the plugins' packages and what npm says of them) and Bun's
 	// downloads are asked of mirrors in China first, and of their official
@@ -559,6 +585,10 @@ type Settings struct {
 	// switched by the model in the agent's picker, as a routing group's
 	// member is (Group.Fast), without making a group of it.
 	FastPicks map[string][]string `json:"fastPicks,omitempty"`
+	// UltraPicks are the fast picks an agent's requests for are sent as
+	// Ultrafast instead (#1954), by agent id: each is in FastPicks too. An
+	// account that doesn't offer Ultrafast on the model is sent priority.
+	UltraPicks map[string][]string `json:"ultraPicks,omitempty"`
 
 	// The three maps below, and every one added beside them, are the
 	// per-model ones: a field named Model* whose type is a map[string]X,
@@ -939,6 +969,7 @@ func (s *Settings) KeepOwn(cur Settings) {
 	s.QuotaReads = cur.QuotaReads
 	s.NoAccountDiscovery = cur.NoAccountDiscovery
 	s.LAN, s.AllowIPs = cur.LAN, cur.AllowIPs
+	s.FetchPrivate = cur.FetchPrivate
 	s.SessionTerminal = cur.SessionTerminal
 }
 
@@ -1035,6 +1066,14 @@ func loadChecked() (Settings, error) {
 	}
 	// parsed on every call: a caller that asks many times in one look holds
 	// what it read (provider.Hold's heldSettings) rather than asking again
+	return parse(b)
+}
+
+// parse is settings.json's contents b read as Settings, from its last good
+// generation when b doesn't parse.
+func parse(b []byte) (Settings, error) {
+	var s Settings
+	var err error
 	parses.Add(1)
 	if perr := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s); perr != nil {
 		// one left all zero by a crash (#1505) is its last good generation

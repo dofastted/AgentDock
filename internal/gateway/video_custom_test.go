@@ -164,7 +164,7 @@ func TestCustomProviderMakesVideos(t *testing.T) {
 		t.Fatalf("no model named: %d %s", code, raw)
 	}
 	// another magpie asking this one for its video models is told of it
-	if objs := videomakerObjects(); len(objs) != 1 || objs[0]["id"] != "studio/vid-1" {
+	if objs := videomakerObjects(httptest.NewRequest("GET", "/v1/models", nil)); len(objs) != 1 || objs[0]["id"] != "studio/vid-1" {
 		t.Fatalf("videomakerObjects %v", objs)
 	}
 }

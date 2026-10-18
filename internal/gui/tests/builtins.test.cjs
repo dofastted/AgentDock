@@ -34,7 +34,7 @@ const PLUGINS = [
   { id: "usage", name: "Usage", sub: "Your allowances, what was spent and on what, each request, and what filled the context window" },
   { id: "warmups", name: "Warm-up and check-in", sub: "Start a subscription's usage window at a time you pick, and claim vendors' daily check-in credits", one: "1 warm-up or check-in on", many: "{n} warm-ups and check-ins on" },
 ];
-// a new install's (the Essentials preset): all off but the Gateway, Routing
+// the Essentials preset, picked by the user: all off but the Gateway, Routing
 // and Usage pages, the routing strategies, the gateway middleware, privacy
 // masking, web search, key limits and plugin tools, which are essential,
 // and two routing groups the user made

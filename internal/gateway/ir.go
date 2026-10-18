@@ -67,6 +67,8 @@ type Part struct {
 
 	// web_search: Text is the query
 	Hits []Hit
+
+	cache string // opted-in Claude bridge breakpoint TTL; empty for none
 }
 
 // The APIs a Part's Sealed reasoning is in.
@@ -142,6 +144,12 @@ type Tool struct {
 
 // Request is a call to a model, whichever API it arrived in.
 type Request struct {
+	// clientCache is non-nil only for the Claude bridge's explicit opt-in.
+	clientCache *clientCache
+	// leanPrompt has the Claude bridge give the caller's instructions as
+	// the run's system prompt, in place of Claude Code's (ClaudeLeanPrompt).
+	leanPrompt bool
+
 	Model      string
 	System     string
 	Messages   []Message
@@ -327,7 +335,14 @@ type Usage struct {
 	// 5-minute write is 1.25×, when its usage says so (cache_creation's
 	// ephemeral_1h_input_tokens)
 	CacheWrite1h int `json:"cache_write_1h,omitempty"`
-	Reasoning    int `json:"reasoning"`
+	// cacheCreationReported distinguishes a reported zero or pure-5m split
+	// from usage that did not report TTLs. It is wire evidence, not a counter.
+	cacheCreationReported bool
+	// cacheCreationHasCounts describes the parsed update's own split.
+	// It is never accumulated from earlier usage.
+	cacheCreationHasCounts bool
+
+	Reasoning int `json:"reasoning"`
 	// Served: the model the vendor's reply says answered, when it named
 	// one — which may not be the one it was asked for
 	Served string `json:"served,omitempty"`
@@ -352,6 +367,10 @@ type Usage struct {
 	// conversation, which their own replies couldn't (cUsage's
 	// MagpieDeferred): billed with this one, never told as its prompt
 	Deferred *Usage `json:"deferred,omitempty"`
+	// Credits is what the reply said the request cost in its plan's own
+	// credits, nil when it said none: WorkBuddy's usage.credit, the
+	// figure its app shows on each reply as "Credits Consumed" (#2512)
+	Credits *float64 `json:"credits,omitempty"`
 }
 
 // billed is what the request is billed for: its own count, and what it
@@ -392,6 +411,7 @@ func (u *Usage) add(v Usage) {
 	if v.CacheWrite1h > 0 {
 		u.CacheWrite1h = v.CacheWrite1h
 	}
+	u.cacheCreationReported = u.cacheCreationReported || v.cacheCreationReported
 	if v.Reasoning > 0 {
 		u.Reasoning = v.Reasoning
 	}
@@ -418,6 +438,9 @@ func (u *Usage) add(v Usage) {
 	}
 	if v.Deferred != nil {
 		u.Deferred = v.Deferred
+	}
+	if v.Credits != nil {
+		u.Credits = v.Credits
 	}
 }
 

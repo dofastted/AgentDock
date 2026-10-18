@@ -54,6 +54,11 @@ type modelJSON struct {
 	Same       string   `json:"same,omitempty"`      // the model the user said it is the same as, for the groups magpie finds (#583)
 	Merge      string   `json:"merge,omitempty"`     // what those groups merge it by when the user says nothing
 	Kind       string   `json:"kind,omitempty"`      // what the user said it makes: image or video (#1399)
+	// Desktop is the number Claude Desktop's menu says beside this model
+	// (gateway.DesktopNumber), so a row of that menu can be matched to its
+	// provider (#2578): only for a model Claude Desktop, installed here,
+	// is shown and names after its own catalog, "" for every other.
+	Desktop string `json:"desktop,omitempty"`
 	// what it costs, USD per million tokens (#819): the price the user set
 	// for it, and its list price, its vendor's else its maker's, before the
 	// provider's price rate
@@ -256,7 +261,8 @@ type providerJSON struct {
 
 type moveJSON struct {
 	Package string `json:"package"`
-	// State is "" (built-in, never moved), "plugin", "back" or "failed"
+	// State is "" (built-in, never moved), "plugin", "back" or "failed";
+	// a retired built-in's row is its plugin's, "plugin"
 	State string `json:"state"`
 	Error string `json:"error,omitempty"`
 	// Why is a failed move's reason, which the page says in its language
@@ -361,7 +367,7 @@ func accountLabel(p provider.Provider) (name, icon string) {
 		if name == "" {
 			name = p.Name
 		}
-		if provider.Moved(pp.ID) {
+		if provider.PluginServes(pp.ID) {
 			icon = p.Icon // the built-in's, as it was
 		}
 		return name, icon
@@ -485,6 +491,9 @@ type providersJSON struct {
 	// MovesTo is the plugin each of them goes to, for the add sheet's
 	// offer to install it before signing in
 	MovesTo map[string]string `json:"movesTo,omitempty"`
+	// Unmoved are the retired built-ins whose accounts haven't moved onto
+	// their plugins yet, served by nothing until they do, with why
+	Unmoved []provider.MoveCandidate `json:"unmoved,omitempty"`
 	// Moved is the agents the change moved off models it stopped serving
 	// (agent.Reseat), for the page to say so.
 	Moved []agent.Move `json:"moved,omitempty"`
@@ -545,7 +554,32 @@ func presetOwnClient(pr provider.PresetDef) bool {
 	return provider.Provider{Preset: pr.ID, Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic}.OwnClient()
 }
 
+// desktopNumbers are the numbers Claude Desktop's menu says beside the
+// models it names after its own catalog (gateway.DesktopNumber), by
+// "provider/model": none when Claude Desktop isn't installed, and only for
+// the models it is shown (provider.CatalogFor), so no other chip carries
+// a number nothing shows (#2578).
+func desktopNumbers(agents []agentUse) map[string]string {
+	if !slices.ContainsFunc(agents, func(u agentUse) bool { return u.Agent != nil && u.ID == "claude-desktop" }) {
+		return nil
+	}
+	shown, _ := provider.CatalogFor("claude-desktop")
+	out := map[string]string{}
+	for _, e := range shown {
+		if n := gateway.DesktopNumber(e); n != "" {
+			out[e.ID] = n
+		}
+	}
+	return out
+}
+
 func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
+	return providerInfoWith(p, agents, desktopNumbers(agents))
+}
+
+// providerInfoWith is providerInfo with the Claude Desktop numbers read
+// once for the whole list (desktopNumbers).
+func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string]string) providerJSON {
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(), MarksKinds: p.MarksKinds(),
@@ -609,7 +643,11 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	}
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
-	if provider.Movable(p.ID) {
+	if provider.BuiltinRetired(p.ID) {
+		// only its plugin's row is listed now: built-in accounts not moved
+		// yet are providersJSON.Unmoved's
+		out.Move = &moveJSON{Package: provider.MovePackage(p.ID), State: provider.MovePlugin}
+	} else if provider.Movable(p.ID) {
 		m, _ := provider.MigrationOf(p.ID)
 		out.Move = &moveJSON{Package: provider.MovePackage(p.ID), State: m.State, Error: m.Err, Why: m.Why}
 		if m.State == provider.MoveMoving {
@@ -712,6 +750,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		j.Same = sames[p.ID+"/"+m.ID]
 		j.Kind = p.ModelKind(m.ID)
 		j.Merge = provider.MergeName(m.ID)
+		j.Desktop = desktop[p.ID+"/"+m.ID]
 		if mp, ok := held.ModelPrices[p.ID+"/"+m.ID]; ok {
 			if pr, bad := mp.Price(); bad == "" {
 				j.Price = &pr
@@ -800,11 +839,23 @@ func providersState() providersJSON {
 	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: []excludedJSON{}}
 	s.OnPlugins = provider.OnPlugins()
 	s.Movable = provider.MovableIDs()
+	// a retired built-in whose plugin is installed is the plugin's, moved
+	// or not: the add sheet signs in to it through the plugin alone
+	for _, id := range s.Movable {
+		if _, ok := provider.PluginOf(id); ok && provider.BuiltinRetired(id) && !slices.Contains(s.OnPlugins, id) {
+			s.OnPlugins = append(s.OnPlugins, id)
+		}
+	}
 	for _, id := range s.Movable {
 		if s.MovesTo == nil {
 			s.MovesTo = map[string]string{}
 		}
 		s.MovesTo[id] = provider.MovePackage(id)
+	}
+	for _, c := range provider.MoveCandidates() {
+		if provider.BuiltinRetired(c.ID) {
+			s.Unmoved = append(s.Unmoved, c)
+		}
 	}
 	if err := provider.FileError(); err != nil {
 		s.FileError = err.Error()
@@ -826,11 +877,12 @@ func providersState() providersJSON {
 	}
 	findGroup := provider.GroupFinder()
 	uses := agentUses(agents, findGroup)
+	desktop := desktopNumbers(uses)
 	have := map[string]bool{}
 	for _, p := range provider.All() {
 		// a preset is added once any provider is its, whatever its id
 		have[p.ID], have[p.Preset] = true, true
-		s.Providers = append(s.Providers, providerInfo(p, uses))
+		s.Providers = append(s.Providers, providerInfoWith(p, uses, desktop))
 	}
 	// partners first, as the add sheet lists them
 	for _, pa := range provider.Partners() {
@@ -900,12 +952,15 @@ func failMove(rw http.ResponseWriter, err error) {
 	_ = json.NewEncoder(rw).Encode(map[string]any{"error": err.Error(), "why": provider.WhyOf(err)})
 }
 
-// moveProvider and moveBackProvider are provider.Move and MoveBack, for
-// tests to stand in for.
+// errRetired answers a move back to a built-in subscription, which magpie
+// no longer runs: its plugin does.
+var errRetired = errors.New("magpie's built-in subscriptions are retired: their community plugins run them")
+
+// moveProvider and adoptProvider are provider.Move and Adopt, for tests
+// to stand in for.
 var (
-	moveProvider     = provider.Move
-	moveBackProvider = provider.MoveBack
-	adoptProvider    = provider.Adopt
+	moveProvider  = provider.Move
+	adoptProvider = provider.Adopt
 )
 
 // moveContext keeps a move going though the page that asked for it goes
@@ -1241,12 +1296,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				return
 			}
 		case "moveback":
-			ctx, cancel := moveContext(r)
-			defer cancel()
-			if err := moveBackProvider(ctx, in.ID); err != nil {
-				fail(rw, err)
-				return
-			}
+			// the built-ins are retired: there is no going back to one
+			fail(rw, errRetired)
+			return
 		case "quiet":
 			// a removed account's "Add it back" line, dismissed (#116)
 			if err := provider.QuietAccount(in.ID); err != nil {

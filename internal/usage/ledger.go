@@ -150,7 +150,7 @@ func (f Filter) keepsRecord(r Record, codexIdentity bool, subagent, parentAgent 
 			return false
 		}
 	}
-	if f.CallerKey != "" && r.CallerKeyID != f.CallerKey {
+	if f.CallerKey != "" && r.CallerKeyID != f.CallerKey && (f.CallerKey != NoCallerKey || r.CallerKeyID != "") {
 		return false
 	}
 	if f.RouteID != 0 && r.RouteID != f.RouteID {
@@ -570,7 +570,7 @@ var CSVHeader = []string{"time", "agent", "requested_model", "provider", "host",
 	"effort", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "reasoning_tokens",
 	"cost_usd", "duration_ms", "ttft_ms", "status", "error", "session", "kind", "provider_key_id", "provider_key_name", "provider_account", "route_id",
 	"request_id", "endpoint", "error_message", "error_type", "source", "rejected", "session_provider", "session_account", "session_official_login", "caller_key_id", "caller_key_name", "response_id", "upstream",
-	"cache_write_5m_tokens", "cache_write_1h_tokens", "tries", "handed_on", "tier_asked", "tier_sent", "tier_served", "upstream_stop"}
+	"cache_write_5m_tokens", "cache_write_1h_tokens", "tries", "handed_on", "tier_asked", "tier_sent", "tier_served", "upstream_stop", "credits"}
 
 // WriteCSV writes rows as CSV, a header first (cache_write_tokens is every
 // cache write, as it always was, and the last two columns split it into
@@ -583,7 +583,9 @@ var CSVHeader = []string{"time", "agent", "requested_model", "provider", "host",
 // on: the request's outcome is the row with the same route_id after it.
 // tier_asked, tier_sent and tier_served are the service tier the client
 // asked for, the one sent on the row's try and the one the reply said it
-// ran at, each empty when there was none (Record.TierAsked).
+// ran at, each empty when there was none (Record.TierAsked). credits is
+// what the reply said the call cost in its plan's credits, empty when it
+// said none (Record.Credits).
 func WriteCSV(w io.Writer, rows []Row) error {
 	cw := csv.NewWriter(w)
 	cw.Write(CSVHeader)
@@ -601,6 +603,10 @@ func WriteCSV(w io.Writer, rows []Row) error {
 		if r.Tries > 0 {
 			tries = n(r.Tries)
 		}
+		credits := ""
+		if r.Credits != nil {
+			credits = strconv.FormatFloat(*r.Credits, 'f', -1, 64)
+		}
 		routeID := ""
 		if r.RouteID != 0 {
 			routeID = strconv.FormatInt(r.RouteID, 10)
@@ -610,7 +616,7 @@ func WriteCSV(w io.Writer, rows []Row) error {
 			cost, strconv.FormatInt(r.Millis, 10), ttft, n(r.Status), strconv.FormatBool(r.Failed()), r.Session, r.Kind, r.ProviderKeyID, r.ProviderKeyName, r.Account(), routeID,
 			r.RequestID, r.Endpoint, r.Error, r.ErrType, r.Source, strconv.FormatBool(r.IsRejected()), r.SessionProvider, r.SessionAccount, strconv.FormatBool(r.SessionOfficialLogin), r.CallerKeyID, r.CallerKeyName, r.ResponseID, r.Upstream,
 			n(r.CacheWrite - min(r.CacheWrite1h, r.CacheWrite)), n(min(r.CacheWrite1h, r.CacheWrite)), tries, strconv.FormatBool(r.HandedOn),
-			r.TierAsked, r.TierSent, r.TierServed, r.Stop})
+			r.TierAsked, r.TierSent, r.TierServed, r.Stop, credits})
 	}
 	cw.Flush()
 	return cw.Error()
@@ -838,10 +844,34 @@ func (r Row) Floor() (tokens int, ms int64) {
 }
 
 // Dimensions are what calls are told apart by: the provider they went to,
-// the agent that made them, the model, and the model at the provider it
+// the agent that made them, the model, the model at the provider it
 // went to ("modelAt"), so one model's speed at each provider can be compared
-// (inaction on Discord).
-var Dimensions = []string{"provider", "agent", "model", "modelAt"}
+// (inaction on Discord), and the gateway key that made them ("callerKey"),
+// so the clients a shared gateway serves can be compared (#2521).
+var Dimensions = []string{"provider", "agent", "model", "modelAt", "callerKey"}
+
+// NoCallerKey is the "callerKey" of a call that carried no gateway key: one
+// that wasn't counted against any, as this computer's own agents' are, or
+// that came before keys were recorded. As a filter it keeps only those.
+const NoCallerKey = "none"
+
+// Without is f with the pick of dimension d cleared: what d's shares are
+// counted over, so that the others are still there to switch to.
+func (f Filter) Without(d string) Filter {
+	switch d {
+	case "provider":
+		f.Provider = ""
+	case "agent":
+		f.Agent = ""
+	case "model":
+		f.Model = ""
+	case "modelAt":
+		f.Model, f.Provider = "", ""
+	case "callerKey":
+		f.CallerKey = ""
+	}
+	return f
+}
 
 // ModelAtKey is a call's "modelAt": its provider's id and its model, as
 // "provider/model" (a provider's id has no "/").
@@ -856,6 +886,11 @@ func (r Row) key(by string) string {
 		return r.Agent
 	case "modelAt":
 		return ModelAtKey(r.Provider, r.Model)
+	case "callerKey":
+		if r.CallerKeyID == "" {
+			return NoCallerKey
+		}
+		return r.CallerKeyID
 	case "computer":
 		if r.Computer == "" {
 			return ThisComputer

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -149,29 +150,90 @@ func TestEditImageURLThroughProxyIsPinnedAndRedirectsChecked(t *testing.T) {
 	}
 }
 
-// A request from this computer may name an image on it (a local agent's
-// own server): its sender reaches it anyway. A web page's request, or one
-// come through a tunnel, may not. What is downloaded must be an image.
+// Where a request came from gives it nothing: one from this computer is
+// also what a reverse proxy or relay in front of magpie on the same host
+// sends for anyone it serves, so it may not name a private address either.
+// Only the user's own settings.json "fetchPrivate" lets one in, and what
+// is then downloaded must still be an image.
 func TestEditImageURLFromThisComputer(t *testing.T) {
 	s, e := easeled(t)
 	srv, hits := secret(t, string(pngBytes))
 	local := func(r *http.Request) { r.RemoteAddr = "127.0.0.1:50000" }
-	if code, raw := editFrom(t, s, srv.URL+"/img.png", local); code != 200 || hits.Load() != 1 || len(e.got("/v1/images/edits")) != 1 {
-		t.Fatalf("a local agent's image: %d %s", code, raw)
-	}
 	for name, edit := range map[string]func(*http.Request){
-		"tunnel": func(r *http.Request) { local(r); r.Header.Set("X-Forwarded-For", "203.0.113.9") },
-		"page":   func(r *http.Request) { local(r); r.Header.Set("Sec-Fetch-Mode", "cors") },
+		"this computer": local,
+		"a reverse proxy here": func(r *http.Request) {
+			local(r)
+			r.Header.Set("X-Forwarded-For", "203.0.113.9")
+		},
+		"[::1]": func(r *http.Request) { r.RemoteAddr = "[::1]:50000" },
 	} {
-		editFrom(t, s, srv.URL+"/img.png", edit)
-		if hits.Load() != 1 {
-			t.Fatalf("%s: the private service was asked %d times", name, hits.Load())
+		if code, raw := editFrom(t, s, srv.URL+"/img.png", edit); code != 400 || !strings.Contains(raw, "private address") || !strings.Contains(raw, "fetchPrivate") {
+			t.Fatalf("%s: %d %s", name, code, raw)
 		}
+	}
+	if hits.Load() != 0 || len(e.got("/v1/images/edits")) != 0 {
+		t.Fatalf("the private service was asked %d times", hits.Load())
+	}
+
+	allowPrivate(t, "127.0.0.1")
+	if code, raw := editFrom(t, s, srv.URL+"/img.png", local); code != 200 || hits.Load() != 1 || len(e.got("/v1/images/edits")) != 1 {
+		t.Fatalf("named in fetchPrivate: %d %s", code, raw)
 	}
 	json, _ := secret(t, `{"admin_token":"s3cret"}`)
 	code, raw := editFrom(t, s, json.URL+"/status", local)
 	if code != 400 || !strings.Contains(raw, "isn't an image") || strings.Contains(raw, "s3cret") || len(e.got("/v1/images/edits")) != 1 {
 		t.Fatalf("not an image: %d %s", code, raw)
+	}
+}
+
+// allowPrivate writes the user's settings.json "fetchPrivate" for the test.
+func allowPrivate(t *testing.T, entries ...string) {
+	t.Helper()
+	was := settings.Load()
+	st := was
+	st.FetchPrivate = entries
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { settings.Save(was) })
+}
+
+// fetchPrivate's entries are a name, name:port, an IP or a range; a
+// settings.json that can't be read lets nothing extra in.
+func TestFetchPrivateEntries(t *testing.T) {
+	allowPrivate(t, "nas.lan", "box.lan:8080", "10.1.2.3", "192.168.7.0/24", "fd00::/8", "  ", "not a range/99")
+	a := allowFor([]string{"vendor.lan:9000"})
+	for _, c := range []struct {
+		host, port string
+		ok         bool
+	}{
+		{"nas.lan", "443", true}, {"NAS.lan", "80", true}, {"box.lan", "8080", true}, {"box.lan", "80", false},
+		{"vendor.lan", "9000", true}, {"vendor.lan", "9001", false}, {"other.lan", "80", false},
+	} {
+		if a.host(c.host, c.port) != c.ok {
+			t.Errorf("host %s:%s: %v", c.host, c.port, !c.ok)
+		}
+	}
+	for ip, ok := range map[string]bool{
+		"10.1.2.3": true, "10.1.2.4": false, "192.168.7.200": true, "192.168.8.1": false,
+		"fd12::1": true, "127.0.0.1": false, "169.254.169.254": false, "8.8.8.8": true,
+	} {
+		if a.addr(netip.MustParseAddr(ip)) != ok {
+			t.Errorf("%s: %v", ip, !ok)
+		}
+	}
+	if err := os.WriteFile(settings.Path(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a = allowFor(nil)
+	if a.host("nas.lan", "443") || a.addr(netip.MustParseAddr("10.1.2.3")) {
+		t.Fatal("an unreadable settings.json let a private host in")
+	}
+	if got := hostOf("http://Box.lan/x"); got != "box.lan:80" {
+		t.Fatalf("hostOf: %q", got)
+	}
+	if got := hostOf("https://[fd00::1]/v1"); got != "[fd00::1]:443" {
+		t.Fatalf("hostOf: %q", got)
 	}
 }
 

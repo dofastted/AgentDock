@@ -48,7 +48,7 @@ const (
 // installed (zenmux, #867), when it is id-plugin — but for a built-in moved
 // onto the plugin, whose id the plugin has now.
 func PluginID(id string) string {
-	if Moved(id) {
+	if PluginServes(id) {
 		return id
 	}
 	if slices.Contains(accountIDs, id) || Preset(id) != nil || id == "magpie" || customIDs()[id] {
@@ -175,6 +175,29 @@ func pluginModel(pp plugin.Provider, id string) (plugin.Model, bool) {
 	return plugin.Model{}, false
 }
 
+// PluginTiers are the service tiers p's plugin says its vendor serves
+// model at (m.serviceTiers, #2514): none for a provider not a plugin's, or
+// a model it doesn't list.
+func PluginTiers(p Provider, model string) []string {
+	if !p.IsPlugin() {
+		return nil
+	}
+	pp, ok := PluginOf(p.ID)
+	if !ok {
+		return nil
+	}
+	m, _ := pluginModel(pp, model)
+	return m.ServiceTiers
+}
+
+// pluginTierOn reports whether the plugin says its vendor serves m at tier,
+// on a Chat or Responses API, where the gateway sends it as service_tier
+// (forwardTranslated); a model on another API is sent no tier.
+func pluginTierOn(provider string, m plugin.Model, tier string) bool {
+	to := pluginProtocol(provider, m)
+	return (to == Chat || to == Responses) && slices.Contains(m.ServiceTiers, tier)
+}
+
 func pluginCatalog(pp plugin.Provider) []catalog.Model {
 	out := make([]catalog.Model, 0, len(pp.Models))
 	for _, m := range pp.Models {
@@ -186,6 +209,8 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 			// a decision model the plugin marked counts only where it
 			// serves a decision API (pp.Decide)
 			Decides: pp.Decide && m.Decides,
+			// the tiers it says its vendor serves the model at (#2514)
+			Tiers: m.ServiceTiers,
 		}
 		// a limit under catalog.LeastWindow (512, H20 on Discord) is none:
 		// the other one, or models.dev, answers (ListedWindow)
@@ -216,7 +241,7 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 		// So does Cline's plugin, which resells others' models as the
 		// ClinePass built-in does and gives no levels of its own: signed in
 		// through it, ClinePass showed none where its API key showed them
-		if len(c.Efforts) == 0 && (Moved(pp.ID) || pp.ID == "cline") {
+		if len(c.Efforts) == 0 && (PluginServes(pp.ID) || pp.ID == "cline") {
 			c.Efforts = borrowedEfforts(m.ID)
 		}
 		// OpenCode's price of a model it has none for is 0, as the
@@ -351,7 +376,7 @@ func pluginProvider(pp plugin.Provider, l pluginLogin) Provider {
 	a.sign = func(ctx context.Context, req *http.Request, body []byte) error { return nil }
 	a.transport = func(req *http.Request) (*http.Response, error) { return pluginFetch(pp, acct.Key, req) }
 	p := Provider{ID: id, Name: name, Icon: PluginIcon(pp), Account: a}
-	if c, ok := movedCards[pp.ID]; ok && Moved(pp.ID) {
+	if c, ok := movedCards[pp.ID]; ok && PluginServes(pp.ID) {
 		p.Name, p.Icon, p.Website = c.name, c.icon, c.site // as the built-in was
 		m, _ := MigrationOf(pp.ID)
 		a.moved, a.wasHost = true, m.Host

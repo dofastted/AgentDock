@@ -178,3 +178,29 @@ func TestUsageSaysCallsUnpriced(t *testing.T) {
 		t.Fatalf("headline %q", head)
 	}
 }
+
+// magpie usage says what the requests cost in their plans' credits where
+// the replies said (WorkBuddy's usage.credit, #2512): in the summary, and
+// on each agent's, model's and session's row of them; nothing where none did.
+func TestUsageSaysCredits(t *testing.T) {
+	groupsHome(t)
+	day := stats.Today.Since(holdUsageClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local)))
+	c := 0.35
+	for i := 0; i < 2; i++ {
+		stats.Append(stats.Record{Time: day.Add(time.Duration(i+1) * time.Second), Agent: "codex", Session: "s1", Provider: "workbuddy-ai", Model: "gemini-3.5-flash", Input: 10, Output: 2, Status: 200, Credits: &c})
+	}
+	stats.Append(stats.Record{Time: day.Add(5 * time.Second), Agent: "pi", Session: "s2", Provider: "a", Model: "m", Input: 1, Output: 1, Status: 200})
+	var b strings.Builder
+	if err := usageTo(&b, []string{"usage", "today"}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if n := strings.Count(out, "0.7 credits"); n < 4 { // the summary, the agent, the model and the session
+		t.Fatalf("0.7 credits said %d times:\n%s", n, out)
+	}
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "pi") && strings.Contains(l, "credits") {
+			t.Fatalf("a row with no credits said says some: %q", l)
+		}
+	}
+}

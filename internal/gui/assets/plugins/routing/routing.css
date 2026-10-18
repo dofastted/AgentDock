@@ -456,6 +456,12 @@ button.rt-session { cursor: pointer; }
 .rt-pick.off { opacity: .55; }
 .rt-pick:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 .rt-gnone { padding: 14px; font-size: 12px; line-height: 1.5; }
+/* the routing groups switched off: where they were, a line of why and the
+   way back on */
+.rt-goff { display: grid; gap: 6px; }
+.rt-goffbox { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; }
+.rt-goffwhy { flex: 1 1 260px; min-width: 0; font-size: 12px; line-height: 1.5; color: var(--fg-2); }
+.rt-goffon { flex: none; }
 .rt-gfound, .rt-gnames { display: flex; align-items: center; gap: 12px; padding: 2px 4px 4px; }
 .rt-gfound .txt, .rt-gnames .txt { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .rt-gfound b, .rt-gnames b { font-size: 12.5px; font-weight: 600; }
@@ -783,6 +789,11 @@ button.rt-session { cursor: pointer; }
 .pr-head .text { flex: none; font-size: 12px; }
 .skeleton.pr-sk { display: inline-block; width: 150px; height: 9px; border-radius: 4px; vertical-align: middle; }
 .skeleton.pr-sk-row { height: 40px; border-radius: 11px; }
+/* a Manual group's model, picked from the tray (#2489) */
+.pr-picks { display: flex; flex-direction: column; padding: 4px; border-radius: 11px; background: var(--card); box-shadow: var(--card-edge); }
+.pr-pick { display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 2px 4px 2px 8px; font-size: 12px; }
+.pr-gname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-weight: 550; }
+.pr-pick .sess-pick { flex: 0 1 auto; min-width: 0; max-width: 62%; }
 .pr-none { margin: 0; padding: 12px; border-radius: 11px; background: var(--card); box-shadow: var(--card-edge); font-size: 12px; line-height: 1.55; color: var(--muted); }
 .pr-none b { display: block; color: var(--fg); font-weight: 550; }
 .pr-list { display: flex; flex-direction: column; padding: 4px; border-radius: 11px; background: var(--card); box-shadow: var(--card-edge); }

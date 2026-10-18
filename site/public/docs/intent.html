@@ -112,12 +112,15 @@
       <button class="copy" data-copy="ex-cli">Copy</button>
       <pre id="ex-cli">magpie group rule add coder use=deepseek/deepseek-v4-flash intent=<span class="s">"a quick question"</span> classifier=groq/llama-3.1-8b-instant
 magpie group rule add coder use=deepseek/deepseek-v4-pro intent=<span class="s">"writing or fixing tests"</span>
+magpie group rule add coder use=deepseek/deepseek-v4-pro use-effort=low intent=<span class="s">"a simple edit"</span>   <span class="c"># the same model, asked for low reasoning</span>
 magpie group rule coder                           <span class="c"># the rules, numbered, and the classifier</span>
 magpie group rule classifier coder groq/llama-3.1-8b-instant   <span class="c"># change the classifier</span>
 magpie group rule mv coder 3 1                    <span class="c"># order matters: top first</span>
 magpie group rule rm coder 2</pre>
     </div>
     <p><code>intent=</code> also takes the spellings <code>asks=</code> and <code>about=</code>. <code>classifier=</code> also takes <code>classify=</code> and <code>by=</code>. <code>classifier=</code> on <code>rule add</code> sets the group’s classifier and is needed only the first time. The classifier is saved in the group’s record in <code>~/.config/magpie/providers.json</code> as <code>"classifier"</code>, and each rule as <code>{"use": …, "intent": …}</code>.</p>
+
+    <p id="effort">A rule can also set the reasoning its model is asked for, so an intent picks the model and the effort as a pair: <code>use-effort=</code> (<code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code> or <code>max</code>), saved as <code>"useEffort"</code>, such as <code>{"use": "deepseek/deepseek-v4-pro", "intent": "a simple edit", "useEffort": "low"}</code>. In the editor it is set from the rule’s <span class="ui">⋯</span> menu, <span class="ui">Set its reasoning</span>, and shows beside the model. The rule’s model is then asked for that effort on the turn’s requests, whatever the agent asked, at the model’s nearest level. A model whose levels magpie doesn’t know is asked as the agent asked, and so are the models the group fails over to. A model fixed at an effort in the group keeps its own. Without it, the model is asked as the agent asked. The Routing tab says when a rule set the effort.</p>
 
     <h2 id="how"><a class="anchor" href="#how">How a turn is routed</a></h2>
     <p>Every request an agent sends to a group with rules goes through these steps, in this order:</p>

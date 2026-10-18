@@ -754,16 +754,21 @@ magpie.plugin("library", (ctx) => {
       });
       go.append(glyph(GLYPH.search, "lib-mini"), el("span", "", t("Discover")));
       go.title = tab === "mcp" ? t("Go to the MCP servers you can add, under the list") : t("Go to the skills you can add, under the list");
+      // a narrow window's title bar shows the icon alone (app.css
+      // .tools-tight): the name stays the button's, not only its tooltip's
+      go.setAttribute("aria-label", t("Discover"));
       acts.append(go);
     }
     const more = button("", "lib-more", () => lib && reveal(lib.dir));
     more.append(glyph(GLYPH.folder, "lib-mini"), el("span", "", t("Library folder")));
+    more.setAttribute("aria-label", t("Library folder"));
     if (lib) more.title = tilde(lib.dir);
     else more.disabled = true;
     // magpie's backups beside it, on every tab: at the foot of a long
     // page they were hard to find (Dade on Discord: 备份在最底部)
     const back = button("", "lib-backups", () => lib && reveal(lib.backups));
     back.append(glyph(GLYPH.backup, "lib-mini"), el("span", "", t("Backups")));
+    back.setAttribute("aria-label", t("Backups"));
     if (lib) back.title = t("magpie keeps a copy of every file before it writes it.") + "\n" + tilde(lib.backups);
     else back.disabled = true;
     acts.append(more, back);
@@ -1097,8 +1102,19 @@ magpie.plugin("library", (ctx) => {
 
   // ---------- instructions ----------
 
+  // Measured at height auto, the textarea is short for a moment. What holds
+  // it is held at its height meanwhile, so the page never is: a page gone
+  // short has its view's scroll clamped by the browser, which no height put
+  // back undoes, and an input method's every keystroke is an input (#2636:
+  // the page jumped while a word was composed).
   function autosize(ta, min) {
-    const fit = () => { ta.style.height = "auto"; ta.style.height = Math.max(min, ta.scrollHeight + 2) + "px"; };
+    const fit = () => {
+      const box = ta.parentElement, was = box?.style.minHeight;
+      if (box) box.style.minHeight = box.offsetHeight + "px";
+      ta.style.height = "auto";
+      ta.style.height = Math.max(min, ta.scrollHeight + 2) + "px";
+      if (box) box.style.minHeight = was;
+    };
     ta.addEventListener("input", fit);
     // fitted once it's on the page, before it's painted, so what's under it
     // doesn't move a frame later

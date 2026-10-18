@@ -23,7 +23,6 @@ var notAnAgent = map[string]string{
 	"APPDATA":               "Windows' own folder, which a sandbox sets to one of its own rather than clears",
 	"LOCALAPPDATA":          "the same",
 	"PATH":                  "the process' own",
-	"TZ":                    "the process' own",
 	"USER":                  "the process' own",
 	"XDG_CONFIG_HOME":       "magpie's own folder's, which appdir decides",
 	"XDG_DATA_HOME":         "the same",

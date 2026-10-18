@@ -71,6 +71,7 @@ icons:
 	@go run build/icon/gen.go tray-flap internal/gui/trayflap
 	@go run build/icon/gen.go app 64 internal/gui/icon.png
 	@go run build/icon/gen.go app 1024 internal/gui/icon-1024.png
+	@go run build/icon/gen.go app 256 internal/gui/icon-256.png
 	@rm -rf build/darwin/magpie.iconset && mkdir -p build/darwin/magpie.iconset
 	@for s in 16 32 128 256 512; do \
 		go run build/icon/gen.go app $$s build/darwin/magpie.iconset/icon_$${s}x$${s}.png; \

@@ -431,7 +431,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			u.add(Usage{Served: ev.Model}) // the model the vendor says answered
 		case KUsage:
 			this.add(ev.Usage)
-			ev.Usage = ev.Usage.plus(before, true)
+			ev.Usage = ev.Usage.carryUpdate(this, before)
 			u.add(ev.Usage)
 		case KStop:
 			stop = ev.Stop
@@ -518,12 +518,12 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				// one event stream would be wrong, so give up cleanly
 				b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 				res.Body.Close()
-				failed = p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
+				failed = p.Name + " " + didNotStream + ": " + provider.APIError(b, "unexpected reply")
 				if !cont.resume {
 					return writeError(w, from, 502, failed), failed
 				}
 			} else {
-				dec := decoder(actual)
+				dec := decoderFor(p, actual)
 				attemptSee := see
 				if names := textCallNames(request.Tools); names != nil {
 					t := &textCallSee{names: names, see: see}
