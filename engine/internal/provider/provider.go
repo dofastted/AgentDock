@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1266,6 +1267,8 @@ func normalize(p Provider) Provider {
 	p.azureEndpoints()
 	// OpenCode Zen's or Go's other APIs, beside the one it was given (#1215)
 	p.openCodeEndpoints()
+	// Bedrock Mantle's other APIs, beside the one it was given
+	p.mantleEndpoints()
 	// a preset's provider keeps its headers too: the preset gives the
 	// endpoints and catalog, the headers say which workspace or app it is
 	p.Headers = cleanHeaders(p.Headers)
@@ -1505,11 +1508,11 @@ func openAIModel(model string) bool {
 // OpenAI's API or Copilot's; Anthropic's Messages for a Claude model
 // where that is served; Chat where that is served. "" when every
 // request is translated anyway: a sign-in served through its agent's own
-// API (Claude Code's binary, Cursor, Devin, Kiro, Code Assist).
+// API (Claude Code's binary, Devin, Code Assist).
 func (p Provider) Native(model string) Protocol {
 	if p.Account != nil {
 		switch p.Account.Agent {
-		case "claude", "cursor", "devin", "kiro":
+		case "claude", "devin":
 			return ""
 		}
 	}
@@ -1569,14 +1572,91 @@ func (p Provider) IsOpenCode() bool {
 	return OpenCodeURL("//" + p.Host()) // its port, if it names one, aside
 }
 
-// IsBedrock reports whether the provider is Amazon Bedrock's runtime: made
-// from its preset, or at its host.
+// IsBedrock reports whether the provider is Amazon Bedrock: its runtime
+// (bedrock-runtime.{region}.amazonaws.com) or its Mantle endpoint
+// (bedrock-mantle.{region}.api.aws), made from either's preset or at
+// either's host. The two take the same Bedrock API key and share what
+// Bedrock asks of a request: x-api-key alone on Messages, its own names
+// for Anthropic's betas, no metadata.user_id, max_completion_tokens on
+// chat completions, Claude on Messages and OpenAI's GPT models on
+// Responses first. What only the runtime does (no list of models) is the
+// preset's; what only Mantle does is IsBedrockMantle's.
 func (p Provider) IsBedrock() bool {
-	if p.Preset == "bedrock" {
+	if p.Preset == "bedrock" || p.IsBedrockMantle() {
 		return true
 	}
 	h := p.Host()
 	return strings.HasPrefix(h, "bedrock-runtime.") && strings.HasSuffix(h, ".amazonaws.com")
+}
+
+// IsBedrockMantle reports whether the provider is Amazon Bedrock's Mantle
+// endpoint (@marktoown on X): made from its preset, or added by its
+// address at bedrock-mantle.{region}.api.aws.
+func (p Provider) IsBedrockMantle() bool {
+	return p.Preset == "bedrock-mantle" || mantleHost(p.Host())
+}
+
+// mantleHost is a host of Bedrock's Mantle endpoint.
+func mantleHost(h string) bool {
+	return strings.HasPrefix(h, "bedrock-mantle.") && strings.HasSuffix(h, ".api.aws")
+}
+
+// mantleOpenAI is a model Mantle serves on its OpenAI APIs under
+// /openai/v1 rather than /v1, as the model's card says: OpenAI's closed
+// GPT models (GPT-6 Sol, GPT-5.5) and xAI's Grok. gpt-oss, Gemma and the
+// other open models are at /v1. Asked at the other one, Mantle answers
+// "model `x` isn't supported on this route".
+func mantleOpenAI(model string) bool {
+	return bedrockGPT(model) || strings.HasPrefix(strings.ToLower(model), "xai.")
+}
+
+// MantleBase is the base a request for model goes to on Mantle's chat
+// completions or Responses API, given a Mantle provider's base for it
+// (IsBedrockMantle): one ending /v1 or /openai/v1 goes at whichever of the
+// two serves the model, or at the other when other is set (the model was
+// refused at the first, so the gateway learned its prefix). A base ending
+// otherwise, one the user typed, is given back as it is.
+func MantleBase(base, model string, other bool) string {
+	root, ok := strings.CutSuffix(strings.TrimRight(strings.TrimSpace(base), "/"), "/v1")
+	if !ok {
+		return base
+	}
+	root = strings.TrimSuffix(root, "/openai")
+	if mantleOpenAI(model) != other {
+		return root + "/openai/v1"
+	}
+	return root + "/v1"
+}
+
+// mantleEndpoints fills in the APIs of Bedrock's Mantle endpoint a
+// provider added by its address was saved without: chat completions and
+// Responses at /v1, Messages at /anthropic, as the preset gives them. A
+// chat or Responses URL given at /openai/v1 is moved to /v1, where Mantle
+// lists its models (/openai/v1/models is 404); the gateway still asks each
+// model at the prefix that serves it (MantleBase). Any other URL the user
+// gave an API keeps it.
+func (p *Provider) mantleEndpoints() {
+	if p.Preset != "" && p.Preset != "bedrock-mantle" {
+		return
+	}
+	root := ""
+	for _, b := range []string{p.Chat, p.Responses, p.Anthropic} {
+		if u, err := url.Parse(strings.TrimSpace(b)); err == nil && u.Scheme != "" && mantleHost(strings.ToLower(u.Hostname())) {
+			root = u.Scheme + "://" + u.Host
+			break
+		}
+	}
+	if root == "" {
+		return
+	}
+	for _, b := range []*string{&p.Chat, &p.Responses} {
+		if strings.TrimRight(strings.TrimSpace(*b), "/") == root+"/openai/v1" {
+			*b = root + "/v1"
+		}
+	}
+	p.Chat = cmp.Or(p.Chat, root+"/v1")
+	p.Responses = cmp.Or(p.Responses, p.Chat)
+	p.Anthropic = cmp.Or(p.Anthropic, root+"/anthropic")
 }
 
 // bedrockClaude is a Bedrock id of a Claude model: a model id

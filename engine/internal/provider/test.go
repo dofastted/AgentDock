@@ -171,15 +171,24 @@ func (p Provider) AsksDecideModels() bool {
 	return p.Decides() && (v == ViaSystemOne || v == ViaVercel || v == ViaCloudflare)
 }
 
+// mantleBase is base for model at the prefix Mantle serves it under
+// (MantleBase), for a Mantle provider; base for any other.
+func (p Provider) mantleBase(base, model string) string {
+	if !p.IsBedrockMantle() {
+		return base
+	}
+	return MantleBase(base, model, false)
+}
+
 func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 	switch proto {
 	case Chat:
 		if q.IsBedrock() || q.IsAzure() {
-			return q.Chat + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":16}`, model)
+			return q.mantleBase(q.Chat, model) + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":16}`, model)
 		}
 		return q.Chat + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 	case Responses:
-		return q.Responses + "/responses", fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`, model)
+		return q.mantleBase(q.Responses, model) + "/responses", fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`, model)
 	case Anthropic:
 		return q.Anthropic + "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 	case Gemini:
@@ -623,7 +632,7 @@ var edgeBlocked = regexp.MustCompile(`(?i)request has been blocked|errors\.aliyu
 // EdgeBlocked says whether an error body is a firewall's block page rather
 // than the vendor's API answering, or one already put in plain words.
 func EdgeBlocked(b []byte) bool {
-	return edgeBlocked.Match(b) || bytes.Contains(b, []byte(BlockedHint)) || bytes.Contains(b, []byte(ZCodeStartBlockedHint))
+	return edgeBlocked.Match(b) || bytes.Contains(b, []byte(BlockedHint))
 }
 
 // APIError pulls the human message out of an error body when there is one.

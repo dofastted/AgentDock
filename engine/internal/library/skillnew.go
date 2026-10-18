@@ -115,8 +115,8 @@ type gitEntry struct {
 
 // skillDirsIn are the folders with a SKILL.md under base in a repository's
 // tree, as candidates would find them: a few folders deep, none in
-// node_modules, a hidden folder only through its skills folder, and none
-// inside another skill or a copy of one outside hidden folders.
+// node_modules, a hidden folder only through its skills folder, none
+// inside another skill, and each skill once (unhiddenFirst).
 func skillDirsIn(t *gitTree, base string) []string {
 	var dirs []string
 	for _, e := range t.Tree {

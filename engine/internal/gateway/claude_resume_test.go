@@ -75,6 +75,7 @@ esac
 echo '{"type":"system","subtype":"init","session_id":"'$sid'"}'
 while read -r line; do
   case $line in *'"type":"control_request"'*)
+    echo "control $line" >> $log
     # acknowledged as Claude Code does: initialize, a settings change
     id=$(printf '%s' "$line" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
     echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'"}}'

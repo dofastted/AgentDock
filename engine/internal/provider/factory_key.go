@@ -1,14 +1,9 @@
 package provider
 
-// PLUGIN-SERVED (see AGENTS.md): Factory ("factory") is a deprecated
-// built-in subscription served by its plugin,
-// @magpie-community/opencode-factory-auth, once moved onto it
-// (provider.Moved; the default for a new sign-in). A moved one's sign-ins,
-// models, requests and usage are all the plugin's, never this code's (only
-// the move, in migrate*.go, still reads its accounts). A fix here alone
-// doesn't reach those users; fix the plugin
-// (github.com/magpie-community/plugins, packages/factory) and raise the
-// mover's min in internal/provider/migrate_factory.go.
+// PLUGIN-SERVED (see AGENTS.md): Factory ("factory") is a retired built-in
+// subscription, served by its plugin alone,
+// @magpie-community/opencode-factory-auth (provider.BuiltinRetired). A key
+// pasted here is checked with whoami and kept as the plugin's account.
 
 // A Factory account added by its API key (fk-…), as droid takes one from
 // FACTORY_API_KEY (#506): droid's om() hands the key on as the token, sent as
@@ -20,11 +15,13 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/plugin"
 )
 
 // factoryKeyPrefix is droid's Uh: what a Factory API key starts with.
@@ -91,23 +88,29 @@ func factoryAddKey(ctx context.Context, key string) ImportedAccount {
 	if user == "" {
 		return ImportedAccount{User: factoryKeyName(key), Status: "failed", Error: "Factory took the key but didn't say whose account it is"}
 	}
+	return factoryKeyToPlugin(wctx, user, c)
+}
+
+// factoryKeyToPlugin keeps a key as an account of Factory's plugin, which
+// serves Factory now: an api account, as the plugin's own "Factory API
+// key" sign-in saves one (whoami's metadata beside the key).
+func factoryKeyToPlugin(ctx context.Context, user string, c factoryCreds) ImportedAccount {
 	status := "added"
-	if l, ok := factoryLookup(user); ok {
-		status = "updated"
-		if was, ok := factorySaved(l); ok && was.Key && was.Access == key {
+	for _, a := range plugin.Auths("factory") {
+		md, _ := a["metadata"].(map[string]any)
+		switch {
+		case str(a["type"]) == "api" && str(a["key"]) == c.Access:
 			status = "exists"
+		case status == "added" && strings.EqualFold(firstNonEmpty(str(md["email"]), str(a["email"])), user):
+			status = "updated"
 		}
 	}
-	auth, err := json.Marshal(c)
-	if err != nil {
-		return ImportedAccount{User: user, Status: "failed", Error: err.Error()}
+	auth := map[string]any{"type": "api", "key": c.Access, "metadata": map[string]any{
+		"email": c.Email, "userId": c.UserID, "region": c.Region, "premBaseHost": c.Prem}}
+	if status != "exists" {
+		if _, err := plugin.Import(ctx, "factory", auth); err != nil {
+			return ImportedAccount{User: user, Status: "failed", Error: err.Error()}
+		}
 	}
-	if err := addSideLogin(savedLogin{Agent: "factory", User: user, Auth: auth}, "", func(savedLogin) {}); err != nil {
-		return ImportedAccount{User: user, Status: "failed", Error: err.Error()}
-	}
-	_ = editSideLogin("factory", user, func(ls []savedLogin, i int) ([]savedLogin, error) {
-		ls[i].Lapsed = ""
-		return ls, nil
-	})
 	return ImportedAccount{User: user, Status: status}
 }

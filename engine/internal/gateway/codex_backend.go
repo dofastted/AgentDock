@@ -167,8 +167,27 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			// with nothing asked of OpenAI — and refused when the sign-in
 			// can't be shown to be the key's, switched off or gone
 			on := compactOn(r, model)
+			// a seal only its writer reads (#1099, #2271): a compact
+			// carrying one magpie recorded the writer of is judged here —
+			// the writer on in magpie answers it signed as the writer, a
+			// gone writer is refused with the reason — not relayed to be
+			// refused there (#2727)
+			writer, gone, _ := sealedCompact(r, model, body)
+			if writer != nil {
+				on = writer
+			}
+			// the key's accounts are asked of the account the compact
+			// goes to: the writer when it answers it, not the sign-in
 			if who, held := compactSigninHeld(r, model, on); held {
-				writeError(w, provider.Responses, 403, compactHeldError(who, model))
+				msg := compactHeldError(who, model)
+				if writer != nil {
+					msg = sealedCompactHeldError(who, model, writer)
+				}
+				writeError(w, provider.Responses, 403, msg)
+				return
+			}
+			if gone != "" {
+				writeError(w, provider.Responses, 400, gone)
 				return
 			}
 			if on != nil {
@@ -177,11 +196,27 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			}
 			break // preserve native compaction's existing passthrough
 		}
-		body, _ = codexInput(body, false)
-		if id, ok := codexAccounts(r, model); ok {
-			s.serveAgent(w, r, provider.Responses, withModel(body, id))
+		id, ok := codexAccounts(r, model)
+		if !ok {
+			id, ok = codexSealedFor(r, model, body)
+		}
+		if ok {
+			// through magpie's accounts, Codex's compaction is the codex
+			// provider's to decide as a magpie model's is: sealed natively
+			// only with its native compaction on, as only the account that
+			// sealed it can read it; off, magpie's summary, which any of
+			// them reads (#2582, #2642: one of Codex's own models compacted
+			// natively whatever the setting, and the conversation was held
+			// to that account)
+			body, compact := codexInputAs(withModel(body, id), true, s.nativeCompactionFor(id))
+			if compact {
+				s.codexCompact(w, r, body)
+				return
+			}
+			s.serveAgent(w, r, provider.Responses, body)
 			return
 		}
+		body, _ = codexInput(body, false)
 		if r.Header.Get(AccountHeader) != "" {
 			// relayed as it came, it would go to Codex's own sign-in only
 			writeError(w, provider.Responses, 400, AccountHeader+" names one of magpie's Codex accounts, and Codex isn't signed in to ChatGPT here with any on in magpie")
@@ -190,9 +225,12 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost && rest == "/responses" {
 		withGatewaySession(w, r)
-		var recorded func()
+		var recorded, hooked func()
 		w, recorded = recordConversation(w, r, provider.Responses, body)
 		defer recorded()
+		// Codex's own sign-in: the request hooks, not the middleware
+		w, body, hooked = gatewayHooks(w, r, provider.Responses, body)
+		defer hooked()
 	}
 	s.codexUpstream(w, r, rest, body)
 }
@@ -274,7 +312,7 @@ func (s *Server) sealedReader(p provider.Provider, model string, sealers []strin
 }
 
 // sealedReaders keeps of cands those that can read a sealed subagent task,
-// pl's order with them.
+// pl's order, held, capped and unlisted with them.
 func (s *Server) sealedReaders(cands []candidate, pl planned, sealers []string) ([]candidate, planned) {
 	var kept []candidate
 	var order []Weighed
@@ -287,6 +325,17 @@ func (s *Server) sealedReaders(cands []candidate, pl planned, sealers []string) 
 	cands, pl.order = kept, order
 	pl.held = slices.DeleteFunc(slices.Clone(pl.held), func(c candidate) bool { return !s.sealedReader(c.p, c.model, sealers) })
 	pl.capped = slices.DeleteFunc(slices.Clone(pl.capped), func(c candidate) bool { return !s.sealedReader(c.p, c.model, sealers) })
+	// the accounts whose list lacks the model, which a native compaction's
+	// writer is taken back from (checkpointReaders), are narrowed alike
+	var unlisted []candidate
+	var unlistedW []Weighed
+	for i, c := range pl.unlisted {
+		if s.sealedReader(c.p, c.model, sealers) {
+			unlisted = append(unlisted, c)
+			unlistedW = append(unlistedW, pl.unlistedW[i])
+		}
+	}
+	pl.unlisted, pl.unlistedW = unlisted, unlistedW
 	return cands, pl
 }
 
@@ -587,6 +636,13 @@ func compactHeldError(who access.Identity, model string) string {
 		model, who.KeyName, keyAccountNames(who))
 }
 
+// sealedCompactHeldError is compactHeldError for a compact sealed by
+// writer, another of Codex's accounts, which only it can read (#2727).
+func sealedCompactHeldError(who access.Identity, model string, writer *provider.Provider) string {
+	return fmt.Sprintf("This conversation's native compaction for %s was sealed by %s, and only that account can read it; the gateway key %q may not use it; it may use %s. Add %s to the key in magpie's Gateway page, or start a new conversation.",
+		model, writer.Account.User, who.KeyName, keyAccountNames(who), writer.Account.User)
+}
+
 // compactOn is the account a native compaction of one of Codex's own
 // models goes to in place of the ChatGPT sign-in it would relay on: one of
 // Codex's other accounts on in magpie while the sign-in is paused there
@@ -663,6 +719,89 @@ func codexAccounts(r *http.Request, model string) (string, bool) {
 		return "", false
 	}
 	return id, true
+}
+
+// codexSealedFor is codexAccounts for a request magpie would relay as it
+// came to Codex's own sign-in, the one account on, that carries a native
+// compaction magpie recorded the writer of: it goes through routing,
+// which sends it only to that writer or answers why not
+// (checkpointReaders, checkpointError). Relayed, it reached the sign-in
+// whoever sealed it, and was refused there (#2642: the account that
+// compacted it switched off, the one left was sent it).
+func codexSealedFor(r *http.Request, model string, body []byte) (string, bool) {
+	if model == "" || strings.Contains(model, "/") || apiKey(r.Header) {
+		return "", false
+	}
+	if _, sealed := checkpointOf(body); !sealed {
+		return "", false
+	}
+	id := "codex/" + model
+	if p, _, ok := provider.Resolve(id); !ok || p.Account == nil || p.Account.Agent != "codex" {
+		return "", false
+	}
+	return id, true
+}
+
+// sealedCompact judges a legacy compact whose input carries a seal magpie
+// recorded the writer of (#2727): the writer on in magpie answers it,
+// signed as the writer — a seal only its writer reads (#1099, #2271), and
+// relayed as it came the compact reaches the sign-in, which another
+// account's seal refuses, its reason unread. A writer gone (signed out,
+// lapsed, paused, switched off, kept from the model) is refused here with
+// the same words the same request on /responses gets (checkpointError,
+// #2642). The sign-in's pause (compactOn) changes the signature, not the
+// judgment. judged is false for what goes as it came: a seal a magpie
+// key's candidate wrote, a request signing with its own
+// chatgpt-account-id (a Codex on WSL or another CODEX_HOME — codexServed's
+// caution), a provider or sign-in state magpie cannot read, and the
+// sign-in's own seal while the sign-in can still be asked (the backend
+// takes its own).
+func sealedCompact(r *http.Request, model string, body []byte) (writer *provider.Provider, gone string, judged bool) {
+	cp, ok := checkpointOf(body)
+	if !ok || strings.Contains(cp.Who, "#") {
+		return nil, "", false
+	}
+	if acct := r.Header.Get("chatgpt-account-id"); acct != "" && acct != provider.CodexSignedInAccount() {
+		return nil, "", false
+	}
+	p, err := provider.Find(cp.Provider)
+	if err != nil || p.Account == nil || p.Account.User == "" {
+		return nil, "", false
+	}
+	if len(provider.Logins(func() string {
+		if p.Account.Agent != "" {
+			return p.Account.Agent
+		}
+		return cp.Provider
+	}())) == 0 {
+		// the accounts aren't readable here (discovery off): not judged
+		return nil, "", false
+	}
+	// whether the writer can be asked is checkpointGone's walk: for a
+	// writer gone it answers with the reason, for one on and serving the
+	// seal's model its answer is checkpointNotRouted — its own words for a
+	// healthy writer (native_compaction.go)
+	why, _ := checkpointGone(model, "account", cp)
+	healthy, _ := checkpointNotRouted(model, "")
+	if why != healthy {
+		return nil, checkpointError(model, cp), true
+	}
+	user := strings.TrimPrefix(cp.Who, cp.Provider+"@")
+	// the writer is matched by its email, as the record holds the account
+	// user: two Team seats of one email read as one here, and a compact
+	// sealed by either relays as it came — the old forwarding, not worse
+	// (only the sign-in's own tokens go out unchanged)
+	if strings.EqualFold(p.Account.User, user) {
+		return nil, "", true // the sign-in's own: relayed as it came
+	}
+	others := p.AlsoOn()
+	for i := range others {
+		if o := others[i]; o.Account != nil && strings.EqualFold(o.Account.User, user) {
+			return &others[i], "", true
+		}
+	}
+	// on and serving, yet not among the accounts on: goes as it came
+	return nil, "", false
 }
 
 // withModel is a request body asking for another model.
@@ -753,6 +892,17 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				replyDigest = titleReplyDigest(titleReply.buf.Bytes(), nil)
 			}
 			prompt := promptRead() // outside the trace's lock, which reading it takes
+			// the window Codex holds the conversation to, not models.dev's
+			// for the id, which is OpenAI's API's (netube on Discord: 922K
+			// on Routing for a Codex Plus account's 272K)
+			window := 0
+			if prompt != nil {
+				user := ""
+				if on != nil && on.Account != nil {
+					user = on.Account.User
+				}
+				window = cmp.Or(provider.CodexWindow(user, model), catalog.ContextOf(model))
+			}
 			s.trace.update(tr, func(t *Route) {
 				t.Tries[0].Done, t.Tries[0].Status, t.Tries[0].Millis, t.Tries[0].Error = true, status, ms, msg
 				t.Tries[0].TTFT, t.Tries[0].FirstText = ttft, text
@@ -769,7 +919,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				t.Flow, t.Tries[0].Flow = flow, flow
 				t.Usage = routeUsage("openai", model, uu)
 				if prompt != nil {
-					t.Prompt = prompt.calibrated(promptCounted(t.Usage), catalog.ContextOf(model))
+					t.Prompt = prompt.calibrated(promptCounted(t.Usage), window)
 				}
 				t.Tries[0].Served, t.Tries[0].Swapped = served, swapped(model, served)
 				t.Served, t.Swapped = t.Tries[0].Served, t.Tries[0].Swapped
@@ -1158,7 +1308,8 @@ func codexHeader(k string) bool {
 // makes on a hidden thread of its own goes without x-openai-subagent: its
 // x-codex-turn-metadata names the thread's source instead — "thread_title"
 // for the title of a new chat (#314), "guardian_review". A web search
-// magpie runs for a model that can't search is "web_search".
+// magpie runs for a model that can't search is "web_search". DSH marks its
+// compaction with x-deepseek-harness-compact: "compact" too.
 func callKind(h http.Header) string {
 	v := strings.TrimSpace(h.Get("x-openai-subagent"))
 	if v == "" && h.Get("x-openai-memgen-request") != "" {
@@ -1166,6 +1317,9 @@ func callKind(h http.Header) string {
 	}
 	if v == "" {
 		v = threadSource(h.Get("x-codex-turn-metadata"))
+	}
+	if v == "" && dshCompacts(h) {
+		v = "compact" // DSH's compaction of its context
 	}
 	if v == "" && h.Get("User-Agent") == SearchAgent {
 		v = "web_search"

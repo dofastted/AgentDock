@@ -114,6 +114,8 @@ test("ordinary Linux still selects its CLI or desktop build", (t) => {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.requests, desktop ? /magpie-linux-arm64/ : /magpie-cli-linux-arm64/);
     assert.equal(existsSync(join(r.share, "applications/magpie.desktop")), desktop);
+    // the dock binds the window (app_id/WM_CLASS "magpie") to the entry (#2626)
+    if (desktop) assert.match(readFileSync(join(r.share, "applications/magpie.desktop"), "utf8"), /^StartupWMClass=magpie$/m);
   }
 });
 

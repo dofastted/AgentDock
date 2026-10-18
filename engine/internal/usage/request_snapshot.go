@@ -62,6 +62,9 @@ func (c *rowChunk) pack() *rowChunk {
 		put(uint64(p.Status))
 		put(uint64(p.Flags))
 		put(uint64(p.Tries))
+		if p.Flags&rowCredits != 0 {
+			put(math.Float64bits(p.Credits))
+		}
 	}
 	archive := s2.Encode(nil, data)
 	if int64(len(archive)) >= c.Bytes {
@@ -157,6 +160,10 @@ func (c *rowChunk) unpackInto(into []packedRow) *rowChunk {
 		p.FirstReasoning = int64(take())
 		p.Cost, p.Status, p.Flags = math.Float64frombits(take()), int32(take()), uint16(take())
 		p.Tries = int32(take())
+		p.Credits = 0
+		if p.Flags&rowCredits != 0 {
+			p.Credits = math.Float64frombits(take())
+		}
 	}
 	if !valid || len(data) != 0 {
 		return nil

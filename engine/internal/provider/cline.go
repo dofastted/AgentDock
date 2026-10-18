@@ -160,12 +160,8 @@ func (p Provider) clineFreeModel(model string) bool {
 	if strings.HasPrefix(model, clineFreePrefix) {
 		return true
 	}
-	if ms, _, ok := p.live(); ok {
-		for _, m := range ms {
-			if m.ID == model {
-				return m.Free
-			}
-		}
+	if ms := p.liveByID(model); len(ms) > 0 {
+		return ms[0].Free
 	}
 	return isClineFree(model)
 }

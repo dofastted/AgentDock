@@ -28,7 +28,14 @@ import (
 // codexZstd is level 3 (klauspost's SpeedDefault, "roughly equivalent to
 // the default Zstandard mode (level 3)"), without the frame checksum,
 // which libzstd leaves off by default. EncodeAll is safe to share.
-var codexZstd, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderCRC(false))
+// Codex's codex-rs/http-client/src/request.rs uses
+// zstd::stream::encode_all(.., 3), whose unknown-size stream has a 2 MiB
+// window. Keep turns within that client envelope too.
+var codexZstd, _ = zstd.NewWriter(nil,
+	zstd.WithEncoderLevel(zstd.SpeedDefault),
+	zstd.WithEncoderCRC(false),
+	zstd.WithWindowSize(2<<20),
+)
 
 // codexZstdOff leaves turns plain, for tests alone: the fake backends of
 // most of the gateway's and provider's tests read the body as it comes, so

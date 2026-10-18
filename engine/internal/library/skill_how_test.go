@@ -151,11 +151,22 @@ func TestSkillRelinkKeepsUnreadableCopy(t *testing.T) {
 	ok(t)(SetSkillHow("", HowCopy))
 	p := filepath.Join(h, ".claude/skills/pdf")
 	write(t, filepath.Join(p, "notes.md"), "my notes\n")
+	// The library's skill written long ago and hashed, as a run under load
+	// finds it past the memo's settleFor: a mode alone doesn't change what
+	// the memo stamps, so blocked.txt is written again as it's made
+	// unreadable, as an edit that leaves it so would.
+	age(t, src)
+	hashDir(realDir(skillDir("pdf")))
 	for _, dir := range []string{filepath.Join(src, "pdf"), p} {
-		if err := os.Chmod(filepath.Join(dir, "blocked.txt"), 0); err != nil {
+		f := filepath.Join(dir, "blocked.txt")
+		if err := os.Chmod(f, 0); err != nil {
 			t.Fatal(err)
 		}
-		if hashDir(dir) != "" {
+		now := time.Now()
+		if err := os.Chtimes(f, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if hashDir(realDir(dir)) != "" {
 			t.Fatal("the unreadable file didn't prevent hashing", dir)
 		}
 	}

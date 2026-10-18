@@ -38,14 +38,36 @@ type liveFile struct {
 	// merged into Models. A base that can't be asked keeps its own part
 	// from the list saved before (#904).
 	Sides map[string][]Model `json:"sides,omitempty"`
+	// byID is the chat models by their id, in the list's order, made
+	// once a read: asked for every model of a list, a copy and a scan of
+	// the list each time cost 2,500 models' /v1/models seconds (K.Liu on
+	// Discord)
+	byID map[string][]Model
 }
 
 func readLive(provider string) (liveFile, error) {
 	return filememo.Read("live models", LivePath(provider), func(b []byte) (liveFile, error) {
 		var f liveFile
-		err := json.Unmarshal(b, &f)
-		return f, err
+		if err := json.Unmarshal(b, &f); err != nil {
+			return f, err
+		}
+		f.byID = map[string][]Model{}
+		for _, m := range Chat(f.Models) {
+			f.byID[m.ID] = append(f.byID[m.ID], m)
+		}
+		return f, nil
 	})
+}
+
+// LiveByID are the models of Live with this id, in the list's order
+// (a list may name one twice): what a look through Live finds, without
+// the list copied for each model asked about.
+func LiveByID(provider, model string) []Model {
+	f, err := readLive(provider)
+	if err != nil {
+		return nil
+	}
+	return slices.Clone(f.byID[model])
 }
 
 // Live returns the model list last fetched from the provider, if any: the

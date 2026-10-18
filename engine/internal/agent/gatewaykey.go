@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/gateway"
 )
@@ -62,4 +64,20 @@ func ourKey(k string) bool {
 func gatewayTakes(k string) bool {
 	_, ok := access.Authenticate(k)
 	return ok
+}
+
+// gatewayKey says want is a key magpie gives an agent for its gateway:
+// gateway.Token, the LAN sharing key, or one naming the agent
+// (gateway.TokenFor).
+func gatewayKey(want string) bool {
+	return ourKey(want) || strings.HasPrefix(want, gateway.Token+"-") && !strings.ContainsAny(want, "/:")
+}
+
+// keyHolds says the value v an agent's config has where magpie wrote want
+// still reaches magpie: want itself, or, where want is magpie's key for its
+// gateway, a key of the gateway's own the user put there instead (Gateway
+// keys), which the gateway takes just the same (PaulT on Discord: Hermes
+// with a key of his own was said not to go through magpie).
+func keyHolds(v, want string) bool {
+	return v == want || v != "" && gatewayKey(want) && gatewayTakes(v)
 }

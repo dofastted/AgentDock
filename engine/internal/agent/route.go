@@ -68,7 +68,8 @@ func viaMagpie(agent, prefix string) []Option {
 		}
 		return u
 	}
-	fast := provider.FastPicks(agent)
+	fast, ultra := provider.FastPicks(agent), provider.UltraPicks(agent)
+	var tiered map[string]bool // provider.UltraModels, read at the first fast model
 	for _, e := range shown {
 		if e.Group != "" {
 			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
@@ -86,6 +87,12 @@ func viaMagpie(agent, prefix string) []Option {
 		if provider.CanFast(e.Provider, e.Model) {
 			o.FastFor, o.Fast = agent, slices.Contains(fast, e.ID)
 			o.OwnFast = provider.OwnFast(e.Provider, e.Model)
+			if tiered == nil {
+				tiered = provider.UltraModels()
+			}
+			if provider.UltraOn(e.Provider, e.Model, tiered) {
+				o.UltraOK, o.Ultra = true, o.Fast && slices.Contains(ultra, e.ID)
+			}
 		}
 		out = append(out, o)
 	}

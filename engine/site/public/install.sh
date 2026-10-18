@@ -138,6 +138,7 @@ Name=magpie
 Comment=Every agent's model. One place.
 Exec=$bin/magpie %u
 Icon=magpie
+StartupWMClass=magpie
 Categories=Development;Utility;
 MimeType=x-scheme-handler/magpie;
 Terminal=false

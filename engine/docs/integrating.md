@@ -54,7 +54,8 @@ app.
 **Models.** `GET /v1/models` lists what the user has turned on: `id`
 (`provider/model`, or a routing group's name, which you send as it is),
 `display_name`, `owned_by` (the provider), `reasoning` and
-`supported_reasoning_levels` (`[{"effort":"low"},…]`), `context_window`
+`supported_reasoning_levels` (`[{"effort":"low"},…]`, and the same as
+plain names in `reasoning_levels`), `context_window`
 and `max_output_tokens` when known, `modalities` when magpie knows whether
 it takes images. List them from there rather than shipping a list: the
 user adds and removes providers in magpie. Reasoning is asked in your
@@ -140,7 +141,7 @@ kinds ([plugin guide](https://usemagpie.ai/docs/plugins)):
   source of models, such as a subscription magpie doesn't sign in to
   itself. They sign in, list models and make requests.
 - **Gateway middleware**: rewrites requests and replies as they pass
-  (`onRequest`, `onEvent`, `onResponse`).
+  (`onRequest`, `onProvider`, `onEvent`, `onResponse`).
 
 A plugin can't add a row to the Agents page or write another app's
 config, so it is not how an app registers itself.

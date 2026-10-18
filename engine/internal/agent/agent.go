@@ -70,6 +70,11 @@ type Option struct {
 	// by its address (provider.OwnFast, #1615), asked for there as OpenAI's
 	// priority, which the provider may or may not serve
 	OwnFast bool `json:"ownFast,omitempty"`
+	// UltraOK: an account offers the model as Ultrafast (provider.CanUltra,
+	// #1954), so the fast switch has a third setting; Ultra is whether it
+	// is on (provider.IsUltraPick)
+	UltraOK bool `json:"ultraOk,omitempty"`
+	Ultra   bool `json:"ultra,omitempty"`
 
 	// own: served on the agent's own sign-in (viaMagpie), for Same
 	own bool

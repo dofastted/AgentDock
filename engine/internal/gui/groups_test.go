@@ -141,3 +141,53 @@ func TestGroupsDeleteSeveral(t *testing.T) {
 		t.Fatalf("%d %v", code, shown(st))
 	}
 }
+
+// The tray panel's pick (#2489) switches a Manual group's member and
+// answers with the groups' state, its picked member the new one; a model
+// not in the group is refused.
+func TestGroupsPick(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	for _, id := range []string{"a", "b"} {
+		if err := provider.Save(provider.Provider{ID: id, Name: id, Key: "k" + id, Chat: "http://127.0.0.1:1/v1", Models: []string{"gpt-6-astra"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := provider.SaveGroup(provider.Group{ID: "hand", Name: "Hand", Members: []string{"a/gpt-6-astra", "b/gpt-6-astra"}, Routing: provider.Manual}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	groupRoutes(mux)
+	post := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/groups/pick", strings.NewReader(body)))
+		return w
+	}
+	w := post(`{"id":"hand","pick":"b/gpt-6-astra"}`)
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	var st struct {
+		Groups []struct{ ID, Picked string }
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	picked := ""
+	for _, g := range st.Groups {
+		if g.ID == "hand" {
+			picked = g.Picked
+		}
+	}
+	if picked != "b/gpt-6-astra" {
+		t.Fatalf("picked %q in %s", picked, w.Body)
+	}
+	if w := post(`{"id":"hand","pick":"c/gpt-6-astra"}`); w.Code < 400 {
+		t.Fatalf("a model not in the group taken: %d", w.Code)
+	}
+	if g, _, _ := provider.FindGroup("group/hand"); g.Pick != "b/gpt-6-astra" {
+		t.Fatalf("%+v", g)
+	}
+}

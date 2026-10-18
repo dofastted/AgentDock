@@ -68,7 +68,7 @@ type packedRow struct {
 	Sent, Flow, FirstReasoning     int64
 	Own, Retried, Queued           int64
 	RouteID                        int64
-	Cost                           float64
+	Cost, Credits                  float64
 	Status, Tries                  int32
 	Flags                          uint16
 }
@@ -87,6 +87,11 @@ const (
 // that, which the block pricer keeps, and reading the row back gives
 // Record.OwnCost again.
 const rowOwnCost = 256
+
+// rowCredits marks a call whose reply said what it cost in its plan's
+// credits (#2512): Credits is that, and reading the row back gives
+// Record.Credits again.
+const rowCredits = 4096
 
 type rowChunk struct {
 	Archive          []byte
@@ -171,6 +176,10 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 		p.Flags |= rowOwnCost
 		p.Cost = *r.OwnCost
 	}
+	if r.Credits != nil {
+		p.Flags |= rowCredits
+		p.Credits = *r.Credits
+	}
 	if r.Compaction != nil {
 		p.Flags |= rowCompactionKnown
 		if *r.Compaction {
@@ -197,6 +206,10 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 func (c *rowChunk) row(i int) Row {
 	p := &c.Rows[i]
 	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time, Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), CacheWrite1h: int(p.Tokens[5]), Reasoning: int(p.Tokens[4]), Millis: p.Millis, TTFT: p.TTFT, FirstText: p.FirstText, FirstReasoning: p.FirstReasoning, ReasoningHidden: p.Flags&rowReasoningHidden != 0, Sent: p.Sent, Flow: p.Flow, Own: p.Own, Retried: p.Retried, Queued: p.Queued, Status: int(p.Status), Tries: int(p.Tries), HandedOn: p.Flags&rowHandedOn != 0, Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
+	if p.Flags&rowCredits != 0 {
+		credits := p.Credits
+		r.Credits = &credits
+	}
 	if p.Flags&rowCompactionKnown != 0 {
 		compacted := p.Flags&rowCompaction != 0
 		r.Compaction = &compacted
@@ -1032,19 +1045,7 @@ func buildRequestBlocksWithCodex(p Period, f Filter, offset, limit int, now time
 			}
 		}
 		for _, d := range Dimensions {
-			g := f
-			if d == "provider" {
-				g.Provider = ""
-			}
-			if d == "agent" {
-				g.Agent = ""
-			}
-			if d == "model" || d == "modelAt" {
-				g.Model = ""
-			}
-			if d == "modelAt" {
-				g.Provider = ""
-			}
+			g := f.Without(d)
 			if f.Day != "" {
 				g.Day = ""
 				if g.keepsRow(r) {
@@ -1222,19 +1223,7 @@ func pageFromLedgerAt(p Period, f Filter, offset, limit int, all Ledgered, now t
 		})
 	}
 	for _, d := range Dimensions {
-		g := f
-		if d == "provider" {
-			g.Provider = ""
-		}
-		if d == "agent" {
-			g.Agent = ""
-		}
-		if d == "model" || d == "modelAt" {
-			g.Model = ""
-		}
-		if d == "modelAt" {
-			g.Provider = ""
-		}
+		g := f.Without(d)
 		out.By[d] = Breakdown(all.Filtered(g).Rows, d)
 		if f.Day != "" {
 			g.Day = ""

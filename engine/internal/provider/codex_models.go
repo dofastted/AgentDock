@@ -586,6 +586,40 @@ func CodexNativeWindow(restore bool) func(slug string) (n, most int, ok bool) {
 	}
 }
 
+// CodexWindow is the context window Codex works in for one of its own
+// models, by the backend's slug, for a request to the ChatGPT backend or
+// OpenAI's API that Codex sent through magpie: the window the user set on
+// the codex provider, else the one the account's own list gives (user, ""
+// for any), else magpie's Codex subscription's, else Codex CLI's
+// models_cache.json's; 0 when none says. models.dev's input limit for the
+// same id is OpenAI's API's (gpt-5.5's 922K), not the window Codex holds
+// a conversation to (272K): netube on Discord saw Routing say 922K for a
+// Codex Plus account.
+func CodexWindow(user, slug string) int {
+	p, _ := find(All(), "codex")
+	if n := p.ContextOf(slug); n > 0 {
+		return n
+	}
+	var lists [][]catalog.Model
+	if user != "" {
+		if live, _, ok := catalog.Live(accountModels("codex", user)); ok {
+			lists = append(lists, live)
+		}
+	}
+	if live, _, ok := catalog.Live("codex"); ok {
+		lists = append(lists, live)
+	}
+	lists = append(lists, catalog.Codex())
+	for _, ms := range lists {
+		for _, m := range ms {
+			if n := catalog.Window(m.Context); m.ID == slug && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
 // codexWindowsTag is the windows the user set on the codex provider, for
 // the ETag of Codex's list: setting one, or taking it away, has Codex ask
 // for the list again.
@@ -631,8 +665,10 @@ func CodexTiers(m *catalog.Model, e Entry, members func(id string) []Member) {
 	// asks for as it is (hsiangron on X)
 	m.OwnTier = e.Group == "" && e.Provider.Preset == "" && e.Provider.Account == nil && e.Provider.ID != ""
 	// another magpie offers the tiers its own Codex is offered on the
-	// model, and is sent the one Codex asks for as it is (#1234)
-	if e.Group == "" && e.Provider.IsRemoteMagpie() {
+	// model, and is sent the one Codex asks for as it is (#1234); a
+	// provider plugin, those it says its vendor serves the model at, and
+	// is sent the one Codex asks for when it is among them (#2514)
+	if e.Group == "" && (e.Provider.IsRemoteMagpie() || e.Provider.IsPlugin() && len(e.Tiers) > 0) {
 		m.Tiers = e.Tiers
 	}
 	if e.Group != "" {

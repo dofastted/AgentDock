@@ -7,7 +7,9 @@
 // now, "As of … — couldn't be read just now", windows' cards too. The menu
 // bar panel's Balances show the same amounts and the "As of". A balance of
 // one amount reads as it did. One the reply hadn't is "—" and says why on
-// hover (#1993). No left-border accent. English and Chinese,
+// hover (#1993). What a vendor says a balance is made of (DeepSeek's
+// granted credit and the money topped up, wwcraft_ on Discord) shows the
+// same way, its labels in the user's language. No left-border accent. English and Chinese,
 // Chromium and WebKit; no backend, the API is faked here.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -21,6 +23,8 @@ const quotas = () => [
   { provider: "relay", name: "My Relay", icon: "generic", windows: [], balance: "$2.00 · Today $2.50 · Used 95%", readAt: ago(3),
     balanceParts: [{ text: "$2.00" }, { label: "Today", text: "$2.50" }, { label: "Used", text: "95%", percent: 95 }, { label: "Week", text: "—", error: "Week: max() of the balance path has nothing to take it of" }] },
   { provider: "other", name: "Other Relay", icon: "generic", windows: [], balance: "$4.20", readAt: ago(120), asOf: ago(120) },
+  { provider: "deepseek", name: "DeepSeek", icon: "deepseek", windows: [], balance: "¥110.00", readAt: ago(0),
+    balanceSplit: [{ label: "Granted", text: "¥10.00" }, { label: "Topped up", text: "¥100.00" }] },
   { provider: "plain", name: "Plain", icon: "generic", windows: [], balance: "¥9.00", readAt: ago(0) },
   { provider: "kimi", name: "Kimi", icon: "kimi-color", asOf: ago(45), windows: [{ name: "Weekly", used: 30 }] },
 ];
@@ -46,8 +50,8 @@ function serve(lang, panel) {
 }
 
 const words = {
-  en: { balance: "Balance", updated: "Updated 3 minutes ago", stale: /^As of .+ — couldn't be read just now$/, asOf: /^As of / },
-  zh: { balance: "余额", updated: "3分钟前更新", stale: /^截至 .+，暂时无法获取最新额度$/, asOf: /^截至 / },
+  en: { granted: "Granted", topped: "Topped up", balance: "Balance", updated: "Updated 3 minutes ago", stale: /^As of .+ — couldn't be read just now$/, asOf: /^As of / },
+  zh: { granted: "赠送余额", topped: "充值余额", balance: "余额", updated: "3分钟前更新", stale: /^截至 .+，暂时无法获取最新额度$/, asOf: /^截至 / },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -102,6 +106,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.deepEqual(await plain.locator(".quota-balance > span, .quota-balance > b").allTextContents(), [w.balance, "¥9.00"]);
       assert.equal(await plain.locator(".bal-part, .quota-track").count(), 0);
       assert.equal(await plain.locator(".quota-read").count(), 1);
+      // a vendor's split: the total first, then each part, in the user's words
+      const ds = page.locator(".subscription-card", { hasText: "DeepSeek" });
+      assert.deepEqual(await ds.locator(".bal-part > span").allTextContents(), [w.balance, w.granted, w.topped]);
+      assert.deepEqual(await ds.locator(".bal-part > b").allTextContents(), ["¥110.00", "¥10.00", "¥100.00"]);
+      assert.equal(await ds.locator(".bal-part.lead").count(), 1, "the total is the one that counts");
       // standing in for one that couldn't be read just now: as of when
       const other = page.locator(".subscription-card", { hasText: "Other Relay" });
       assert.match(await other.locator(".quota-read.stale").textContent(), w.stale);
@@ -122,6 +131,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.deepEqual(await card.locator(".pq-bp > b").allTextContents(), ["$2.50", "95%", "—"]);
       assert.equal(await card.locator(".pq-bp").nth(2).getAttribute("title"), "Week: max() of the balance path has nothing to take it of");
       assert.equal(await width(card.locator(".quota-track.full i")), 95);
+      const dsp = panel.locator(".pq-card.bal", { hasText: "DeepSeek" });
+      assert.equal(await dsp.locator(".pq-amt").textContent(), "¥110.00");
+      assert.deepEqual(await dsp.locator(".pq-bp > span").allTextContents(), [w.granted, w.topped]);
+      assert.deepEqual(await dsp.locator(".pq-bp > b").allTextContents(), ["¥10.00", "¥100.00"]);
       const stale = panel.locator(".pq-card.bal", { hasText: "Other Relay" });
       assert(await stale.evaluate((e) => e.classList.contains("stale")));
       assert.match(await stale.locator(".pq-asof").textContent(), w.asOf);
@@ -130,7 +143,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const pover = await panel.evaluate(() => [...document.querySelectorAll(".pq-card.bal")].filter((c) => c.scrollWidth > c.clientWidth + 1).length);
       assert.equal(pover, 0, "nothing runs out of a balance's card");
 
-      const missing = await page.evaluate(() => ["As of {when}", "Updated {when}", "As of {when} — couldn't be read just now"].filter((k) => !I18N.zh[k]));
+      const missing = await page.evaluate(() => ["As of {when}", "Updated {when}", "As of {when} — couldn't be read just now"].filter((k) => !I18N.zh[k])
+        .concat(Object.keys(I18N).flatMap((l) => ["Granted", "Topped up"].filter((k) => !I18N[l][k]).map((k) => l + ":" + k))));
       assert.deepEqual(missing, [], "every string has its Chinese");
       assert.deepEqual(errors, []);
     });

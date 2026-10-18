@@ -1049,7 +1049,9 @@ func (s *Server) videosContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, 502, err.Error())
 		return
 	}
-	res, err := s.client.Do(req)
+	// the URL is in the vendor's answer, so it is fetched as one a caller
+	// names is: public addresses, or the vendor's own host (vendorClient)
+	res, err := vendorClient(p).Do(req)
 	if err != nil {
 		writeError(w, provider.Chat, 502, fmt.Sprintf("the video couldn't be fetched: %v", err))
 		return

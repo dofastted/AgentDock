@@ -192,12 +192,8 @@ func (p Provider) kiloFreeModel(model string) bool {
 	if !p.IsKilo() {
 		return false
 	}
-	if ms, _, ok := p.live(); ok {
-		for _, m := range ms {
-			if m.ID == model {
-				return m.Free
-			}
-		}
+	if ms := p.liveByID(model); len(ms) > 0 {
+		return ms[0].Free
 	}
 	return isKiloFree(model)
 }

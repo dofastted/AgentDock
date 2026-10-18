@@ -114,6 +114,10 @@ type SubscriptionQuota struct {
 	// BalanceParts are the Balance's amounts each apart, when the balance
 	// field the user wrote has several or a percent (cardParts)
 	BalanceParts []BalancePart `json:"balanceParts,omitempty"`
+	// BalanceSplit is what the Balance is made of, when the vendor tells
+	// it: DeepSeek's granted credit and the money topped up, each a part
+	// labelled SplitGranted or SplitTopUp
+	BalanceSplit []BalancePart `json:"balanceSplit,omitempty"`
 	// BalanceTrend is the Balance over time, as magpie read it, and when
 	// it runs out at that pace (balance_history.go)
 	BalanceTrend *BalanceTrend `json:"balanceTrend,omitempty"`
@@ -419,7 +423,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 	// would be a second card of the same account
 	placed := map[string]bool{}
 	moved := func(id string) bool {
-		if !Moved(id) {
+		if !PluginServes(id) {
 			return false
 		}
 		placed[id] = true
@@ -443,16 +447,10 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 			}
 		}
 	}
-	if !moved("cursor") && !hidden["cursor"] {
-		if user, plan, ok := cursorIdentity(); ok {
-			fetches = append(fetches, withUser(ctx, user, func() SubscriptionQuota { return cursorSubscriptionUsage(viaLogin("cursor", user), plan) }))
-		}
-	}
-	if !moved("grok") && !hidden["grok"] {
-		if _, ok := grokAccount(); ok {
-			fetches = append(fetches, func() SubscriptionQuota { return keepReading(ctx, readNow(grokSubscriptionUsage(via("grok"))), "") })
-		}
-	}
+	// each retired built-in is served by its plugin, whose cards stand
+	// where the built-in's stood
+	moved("cursor")
+	moved("grok")
 	if home, err := os.UserHomeDir(); err == nil {
 		if p, ok := codexAccount(home); ok && !hidden["codex"] {
 			if ls := accountsOf("codex"); len(ls) > 1 {
@@ -473,40 +471,8 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 			fetches = append(fetches, perLogin(via("copilot"), ls, accountCard("copilot"))...)
 		}
 	}
-	if moved("kiro") {
-	} else if key := kiroKey(); key != "" && !hidden["kiro"] {
-		fetches = append(fetches, func() SubscriptionQuota { return keepReading(ctx, readNow(kiroQuotaAt(via("kiro"), key, "")), "") })
-	} else if !hidden["kiro"] {
-		fetches = append(fetches, perLogin(via("kiro"), kiroLoginList(), accountCard("kiro"))...)
-	}
-	if !moved("zcode") && !hidden["zcode"] {
-		fetches = append(fetches, perLogin(via("zcode"), zcodeLoginList(), accountCard("zcode"))...)
-	}
-	for _, w := range []*wbSite{wbCN, wbAI} {
-		if !moved(w.id) && !hidden[w.id] {
-			fetches = append(fetches, perLogin(via(w.id), wbLoginList(w), accountCard(w.id))...)
-		}
-	}
-	if !moved(CommandCodePlanID) && !hidden[CommandCodePlanID] {
-		fetches = append(fetches, perLogin(via(CommandCodePlanID), cmdLoginList(), accountCard(CommandCodePlanID))...)
-	}
-	if !moved("qoder") && !hidden["qoder"] {
-		fetches = append(fetches, perLogin(via("qoder"), loginsOf(qoderLogins()), accountCard("qoder"))...)
-	}
-	if !moved(QoderCNID) && !hidden[QoderCNID] {
-		fetches = append(fetches, perLogin(via(QoderCNID), loginsOf(qoderLoginsOf(QoderCNID)), accountCard(QoderCNID))...)
-	}
-	if !moved("zed") && !hidden["zed"] {
-		fetches = append(fetches, perLogin(via("zed"), zedLoginList(), accountCard("zed"))...)
-	}
-	if !moved("devin") && !hidden["devin"] {
-		fetches = append(fetches, perLogin(via("devin"), devinLoginList(), accountCard("devin"))...)
-	}
-	if !moved("factory") && !hidden["factory"] {
-		fetches = append(fetches, perLogin(via("factory"), factoryLoginList(), accountCard("factory"))...)
-	}
-	if !moved(MiMoID) && !hidden[MiMoID] {
-		fetches = append(fetches, perLogin(via(MiMoID), mimoLoginList(), accountCard(MiMoID))...)
+	for _, id := range []string{"kiro", "zcode", wbCN.id, wbAI.id, CommandCodePlanID, "qoder", QoderCNID, "zed", "devin", "factory", MiMoID} {
+		moved(id)
 	}
 	for _, agent := range []string{"gemini", "antigravity"} {
 		if hidden[agent] {

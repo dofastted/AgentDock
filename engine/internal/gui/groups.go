@@ -427,6 +427,10 @@ func groupRoutes(mux *http.ServeMux) {
 			err = provider.SwitchGroup(in.ID, body.On)
 		case "arrange":
 			err = provider.SetGroupOrder(body.Order)
+		case "pick":
+			// a Manual group's member every request goes to, and nothing
+			// else of it (#2489: the tray panel switches it)
+			err = provider.PickGroup(in.ID, in.Pick)
 		default:
 			http.NotFound(rw, r)
 			return

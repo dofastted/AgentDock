@@ -196,7 +196,7 @@ export const FakePlugin = async ({ client }) => ({
         user: full ? "Full@Fake.example" : undefined,
         until: "2030-01-02T03:04:05Z",
         renew: "auto",
-        resets: full ? { count: 3, byWindow: true, fiveHour: 2, weekly: 1 } : undefined,
+        resets: full ? { count: 3, byWindow: true, fiveHour: 2, weekly: 1, team: true, each: [{ window: "weekly" }, { until: "2031-01-02T00:00:00Z", window: "fiveHour" }, { until: 1924992000, window: "fiveHour" }] } : undefined,
         windows: [
           { name: "5 hours", used: full ? 100 : 25, resetsAt: born + 3600e3, span: 5 * 3600, models: ["fake-claude"] },
           // 80 of its credits are lost in two days, after it resets (#2265)
@@ -273,6 +273,12 @@ export const FakePlugin = async ({ client }) => ({
         const sized = (id, name) => ({ ...p.models["fake-1"], id, name, api: { ...p.models["fake-1"].api, id } })
         p.models["fake-opus@300k"] = { ...sized("fake-opus@300k", "Fake Opus @ 300k"), fast: true }
         p.models["fake-opus@1m"] = sized("fake-opus@1m", "Fake Opus @ 1m")
+      }
+      // $FAKE_TIERS: fake-1 and fake-resp say the service tiers their vendor
+      // serves them at (#2514), one as an object as Codex's catalog writes it
+      if (process.env.FAKE_TIERS) {
+        p.models["fake-1"] = { ...p.models["fake-1"], serviceTiers: ["priority", { id: "ultrafast" }, "", 7, "priority"] }
+        if (p.models["fake-resp"]) p.models["fake-resp"] = { ...p.models["fake-resp"], serviceTiers: ["ultrafast"] }
       }
       // $FAKE_MODELS: the vendor's list, whose answer names one more model
       if (process.env.FAKE_MODELS && auth) {

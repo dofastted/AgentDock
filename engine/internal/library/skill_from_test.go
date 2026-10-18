@@ -24,6 +24,34 @@ func repoIn(t *testing.T) map[string]string {
 	return out
 }
 
+// npx skills add with $XDG_STATE_HOME set (@_yukirock on X): the skills
+// CLI keeps its lock at $XDG_STATE_HOME/skills/.skill-lock.json and the
+// skills in ~/.agents/skills, and each is grouped by the repository that
+// lock names. One the older ~/.agents lock alone names is grouped too.
+func TestSkillRepoFromXDGLock(t *testing.T) {
+	h := sandbox(t)
+	state := filepath.Join(h, "state")
+	t.Setenv("XDG_STATE_HOME", state)
+	for _, n := range []string{"grill-me", "tdd", "old"} {
+		skill(t, filepath.Join(h, ".agents/skills", n), n, n)
+		os.MkdirAll(filepath.Join(h, ".claude/skills"), 0o755)
+		dirLink(filepath.Join(h, ".agents/skills", n), filepath.Join(h, ".claude/skills", n))
+	}
+	write(t, filepath.Join(state, "skills/.skill-lock.json"), `{"version":3,"skills":{
+		"grill-me":{"source":"mattpocock/skills","sourceType":"github","sourceUrl":"https://github.com/mattpocock/skills.git"},
+		"tdd":{"source":"obra/superpowers","sourceType":"github","sourceUrl":"https://github.com/obra/superpowers.git"}}}`)
+	write(t, filepath.Join(h, ".agents/.skill-lock.json"), `{"version":3,"skills":{
+		"tdd":{"source":"stale/repo","sourceType":"github"},
+		"old":{"source":"me/old-skills","sourceType":"github"}}}`)
+	ok(t)(ImportSkills([]string{"grill-me", "tdd", "old"}))
+	got := repoIn(t)
+	for n, r := range map[string]string{"grill-me": "mattpocock/skills", "tdd": "obra/superpowers", "old": "me/old-skills"} {
+		if got[n] != r {
+			t.Errorf("%s: repo %q, want %q", n, got[n], r)
+		}
+	}
+}
+
 // A skill not installed from GitHub is grouped with the repository it
 // came from all the same (White Immortal on Discord): the skills CLI's
 // lock names it, or the git checkout it's in, whatever the remote's form,
@@ -358,5 +386,72 @@ func TestRegroupOlderCopies(t *testing.T) {
 	}
 	if r := repoIn(t)["edited"]; r != "someone/pack" {
 		t.Errorf("edited after a failed regroup: %q", r)
+	}
+}
+
+// A copy in the library's own folder that is a repository's skill to the
+// file is bound to it when that repository is pasted again, and updates
+// from there as one installed from it does (RockyShowlle on X: installed
+// by hand before, now to sync with upstream). One with a file of the
+// user's own beside it, and one linked to the skills CLI's folder, are
+// grouped only: the user's file is never written over, and the skills CLI
+// keeps what it put in ~/.agents.
+func TestPastedRepoBindsSameCopy(t *testing.T) {
+	h := sandbox(t)
+	var rmu sync.Mutex
+	repo := map[string]string{
+		"skills/same/SKILL.md":   "---\nname: same\ndescription: Same\n---\nBody\n",
+		"skills/same/ref.md":     "notes\n",
+		"skills/extra/SKILL.md":  "---\nname: extra\ndescription: Extra\n---\n",
+		"skills/shared/SKILL.md": "---\nname: shared\ndescription: Shared\n---\n",
+	}
+	tar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rmu.Lock()
+		defer rmu.Unlock()
+		w.Write(tarball(t, repo))
+	}))
+	t.Cleanup(tar.Close)
+	oldT := tarballURL
+	tarballURL = func(repo, ref string) string { return tar.URL + "/tar/" + repo }
+	t.Cleanup(func() { tarballURL = oldT })
+
+	write(t, filepath.Join(h, ".claude/skills/same/SKILL.md"), repo["skills/same/SKILL.md"])
+	write(t, filepath.Join(h, ".claude/skills/same/ref.md"), repo["skills/same/ref.md"])
+	write(t, filepath.Join(h, ".claude/skills/extra/SKILL.md"), repo["skills/extra/SKILL.md"])
+	write(t, filepath.Join(h, ".claude/skills/extra/mine.md"), "my own notes\n")
+	write(t, filepath.Join(h, ".agents/skills/shared/SKILL.md"), repo["skills/shared/SKILL.md"])
+	dirLink(filepath.Join(h, ".agents/skills/shared"), filepath.Join(h, ".claude/skills/shared"))
+	ok(t)(ImportSkills([]string{"same", "extra", "shared"}))
+
+	if _, err := ProbeSkills("someone/upstream"); err != nil {
+		t.Fatal(err)
+	}
+	l := mustLoad(t)
+	if s := l.skill("same"); s.Source == nil || s.Source.Kind != "github" || s.Source.Repo != "someone/upstream" || s.Source.Path != "skills/same" || s.Hash == "" || s.From != "" {
+		t.Fatalf("same, the repository's to the file: source %+v hash %q from %q", s.Source, s.Hash, s.From)
+	}
+	if s := l.skill("extra"); s.Source != nil || s.From != "someone/upstream" {
+		t.Errorf("extra, with a file of the user's: source %+v from %q", s.Source, s.From)
+	}
+	if s := l.skill("shared"); s.Source == nil || s.Source.Kind != "folder" || s.From != "someone/upstream" {
+		t.Errorf("shared, the skills CLI's: source %+v from %q", s.Source, s.From)
+	}
+	if got := repoIn(t); got["same"] != "someone/upstream" || got["extra"] != "someone/upstream" || got["shared"] != "someone/upstream" {
+		t.Errorf("grouped: %v", got)
+	}
+
+	// upstream changes: the bound copy updates from there
+	rmu.Lock()
+	repo["skills/same/SKILL.md"] = "---\nname: same\ndescription: Same\n---\nNew body\n"
+	rmu.Unlock()
+	ok(t)(UpdateSkill("same", false))
+	if b, _ := os.ReadFile(filepath.Join(skillDir("same"), "SKILL.md")); !strings.Contains(string(b), "New body") {
+		t.Errorf("same after an update: %q", b)
+	}
+	if _, err := UpdateSkill("extra", false); err == nil {
+		t.Error("extra updated from GitHub")
+	}
+	if b, _ := os.ReadFile(filepath.Join(skillDir("extra"), "mine.md")); string(b) != "my own notes\n" {
+		t.Errorf("extra's own file: %q", b)
 	}
 }

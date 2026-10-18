@@ -217,17 +217,18 @@ func TestPinnedGatewayKeyForEveryWriter(t *testing.T) {
 			agy = m[1]
 		}
 		return map[string]string{
-			"agy":       agy,
-			"alma":      almaKey(),
-			"cindy":     cindy.Auth.APIKey,
-			"copilotjb": jbKey,
-			"cursor":    cursorLocalEnv(gw)[cursorLocalVars[1]],
-			"hanako":    hanakoProvider().APIKey,
-			"pencil":    pencilProviderJSON(gw)["apiKey"].(string),
-			"vscode":    vscodeStable.token(),
-			"vscodium":  vscodiumKind.token(),
-			"workbuddy": buddyModel("codebuddy", "m", "m", 0, 0, false, nil)["apiKey"].(string),
-			"zcode":     zc,
+			"agy":        agy,
+			"alma":       almaKey(),
+			"cindy":      cindy.Auth.APIKey,
+			"copilotjb":  jbKey,
+			"cursor":     cursorLocalEnv(gw)[cursorLocalVars[1]],
+			"hanako":     hanakoProvider().APIKey,
+			"openpencil": openPencilEntry(gw).APIKey,
+			"pencil":     pencilProviderJSON(gw)["apiKey"].(string),
+			"vscode":     vscodeStable.token(),
+			"vscodium":   vscodiumKind.token(),
+			"workbuddy":  buddyModel("codebuddy", "m", "m", 0, 0, false, nil)["apiKey"].(string),
+			"zcode":      zc,
 		}
 	}
 	plain := keys()

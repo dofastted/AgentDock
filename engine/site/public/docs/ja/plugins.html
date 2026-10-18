@@ -83,6 +83,7 @@
     <a href="#ids">プロバイダ id</a>
     <a href="#test">テスト</a>
     <a href="#publish">公開と掲載</a>
+    <a href="#gateway-request">非同期ゲートウェイリクエストフック</a>
     <a href="#middleware">ゲートウェイミドルウェア</a>
     <a href="#tools">すべてのエージェントのツール</a>
     <a href="#agents">エージェントプラグイン</a>
@@ -216,7 +217,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <li><b>更新。</b>
         <ul>
           <li>コミュニティのパッケージ（<code>@magpie-community/*</code>）は、magpie の起動から少し後に自動で更新され、その後は 1 時間ごとに更新されます。</li>
-          <li>そのほかのパッケージは、新しいバージョンがあると <span class="ui">プラグイン</span> にドットが表示され、ユーザーがクリックか <code>magpie plugin update</code> で更新します。</li>
+          <li>そのほかのパッケージは、新しいバージョンがあると <span class="ui">プラグイン</span> にドットが表示され、サイドバーの <span class="ui">インストール済み</span> に「1 件のアップデート」と出ます。このときプラグインを開くとインストール済みが開き、新しいバージョンのあるプラグインが上部に <span class="ui">すべてアップデート</span> と並んで表示されます。ユーザーはクリックか <code>magpie plugin update</code> で更新します。</li>
           <li>バージョンを固定した指定（<code>name@1.2.3</code>）は、ユーザーが更新するまでそのバージョンのままです。<span class="ui">… にアップデート</span>、<span class="ui">すべてアップデート</span>、<code>magpie plugin update</code> は最新版をインストールし、固定を外します。</li>
           <li>git リポジトリには比べるバージョンがありません。ブランチやタグ（<code>#ref</code> がなければデフォルトブランチ）が Bun のインストールしたコミットと違うときだけ、アップデートが表示されます。GitHub のものは GitHub の API に、ほかのホストは <code>git ls-remote</code> で、最大 10 分に 1 回問い合わせ、1 時間ごとのチェックでも問い合わせます。コミットに固定した指定にはアップデートはありません。行にはインストールしたコミットが表示されます。</li>
         </ul></li>
@@ -348,6 +349,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
           <li><code>rateWas</code>：現在実施中の割引の前の倍率。</li>
         </ul>
         モデル選択画面に表示されます。</li>
+      <li><code>serviceTiers</code>（<code>models</code> フックが返すモデルに）：ベンダーがそのモデルを提供するサービス階層を id で、たとえば <code>["priority", "ultrafast"]</code>。Codex のモデル一覧に載り（<code>priority</code> は Fast）、そのどれかを指定した Chat または Responses のリクエストは <code>service_tier</code> 付きで <code>fetch</code> に届きます。magpie がプロトコルを変換するリクエストでは、モデルが挙げていない階層は送られません。</li>
       <li>モデルが推論する場合、<code>variants</code> のキーがそのモデルの推論レベルになります。</li>
     </ul>
     <h3>ベンダーに接続できないとき</h3>
@@ -608,6 +610,13 @@ m plugin logout acme</pre>
         </ul></li>
     </ul>
 
+    <h2 id="gateway-request"><a class="anchor" href="#gateway-request">非同期ゲートウェイリクエストフック</a></h2>
+    <p>プラグインはエージェントのリクエストをルーティングする前に I/O を待てます。package.json に <code>"magpie": { "hooks": "./hooks.js" }</code> を宣言するか、<code>*.hooks.js</code> / <code>.mjs</code> / <code>.ts</code> / <code>.mts</code> を追加し（Bun は TypeScript をビルドなしで実行します）、名前付きの非同期 <code>onRequest(body, ctx)</code> をエクスポートします。専用パッケージに OpenCode main/exports は不要です。</p>
+    <p>任意の非同期 <code>onResponse(reply, ctx)</code> は出力完了後にベストエフォートの通知を受け取ります。応答やライブストリームは変更せず、ツール宣言と実行ループはクライアントが担当します。</p>
+<p>Bun でリクエストごとに一度、JS ゲートウェイミドルウェアの前に実行し、Codex 自身の ChatGPT サインインを含むすべてのプロバイダーに適用します。body はエージェント API のオブジェクトです。ctx は <code>protocol</code>、<code>model</code>、<code>stream</code>、<code>path</code>、<code>agent</code>、<code>session</code>、<code>cwd</code>、<code>query</code>、<code>options</code>、<code>signal</code> を持ちます。query は最後のユーザーテキストで、ツール結果と画像を除きます。ない識別情報は空で、Authorization は渡しません。</p>
+<p>オブジェクトを返すと置き換え、undefined は元を保ちます。モデル、ストリーミング、クライアントのツールやツール選択を変えたフックは取り消され、失敗として扱われ、そのリクエストでは <code>onResponse</code> が呼ばれません。コピーを渡すので失敗や undefined の直接変更は破棄します。成功した変更は有効な順に渡ります。各フックは既定で 1 秒です。<code>gatewayTimeoutMs</code> は 100〜10000 ミリ秒の整数です。全体は合計予算を 2〜10 秒に制限し、起動と RPC を含めて 11 秒です。設定 → プラグインでオプションと呼び出し回数、時間、失敗、最新の結果を確認できます。<code>ctx.report(code, bytes)</code> は ready/empty/unbound/unauthorized/unavailable/invalid/skipped とバイト数のみを受け付けます。私的なテキストは保存せず、再読み込みで統計をリセットします。fetch に <code>ctx.signal</code> を使ってください。例外、不正な戻り値、タイムアウト、起動中のホストは元を保ちます。Bun はホスト権限で動くので信頼できるコードを使ってください。</p>
+<p><code>magpie plugin add ./my-plugin</code> で追加し、<code>magpie plugin options my-plugin '&lbrace;"serverUrl":"http://127.0.0.1:8000"&rbrace;'</code> で設定します。on/off と設定変更は再読み込みします。ソースだけの変更は設定の再読み込みが必要です。内部のタイトルや分類リクエストは対象外です。</p>
+
     <h2 id="middleware"><a class="anchor" href="#middleware">ゲートウェイミドルウェア</a></h2>
     <p>プラグインは<em>ゲートウェイミドルウェア</em>にもなれます。エージェントが magpie のゲートウェイに送るすべてのリクエストに対して、ルーティングの前に実行され、戻ってくる応答に対しても実行されるコードです。モデルに別名を付ける、システムプロンプトに追記する、リクエストを断る、モデルの出力を書き換えたり隠したりする、通ったものを独自に数える、といったことができます。プラグインのものかどうかに関係なく、すべてのプロバイダで動きます。</p>
     <div class="code">
@@ -642,6 +651,7 @@ m plugin logout acme</pre>
       <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/system-prompt"><code>system-prompt</code></a></td><td>すべてのリクエスト（または特定のエージェントやモデルのもの）に自分のシステムプロンプトを、各 API の決まった場所に加えます。リクエストに独自のものがあれば、<code>override</code> を有効にしない限りそのままにします。</td></tr>
       <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/word-guard"><code>word-guard</code></a></td><td>New API の禁止語フィルタ：ユーザーが送る内容にある語やパターンを断るか伏せ字にします。応答も伏せ字にできます。</td></tr>
       <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/think-tags"><code>think-tags</code></a></td><td>応答本文の先頭にある <code>&lt;think&gt;…&lt;/think&gt;</code> を取り除くか、Chat の応答の <code>reasoning_content</code> を本文に入れます（New API の <code>thinking_to_content</code>）。</td></tr>
+      <tr><td><a href="https://github.com/magpie-community/plugins/tree/main/packages/antigravity-cloak"><code>antigravity-cloak</code></a></td><td>Antigravity が Claude Code と Agent SDK のシステムプロンプトを断る理由になる語を、Antigravity に送る分だけで分割します。他のプロバイダには元のプロンプトのまま送ります。</td></tr>
     </table></div>
     <div class="code">
       <span class="lang">shell</span>
@@ -664,13 +674,14 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
     <div class="table-wrap"><table>
       <tr><th>フック</th><th>渡されるもの</th><th>戻り値</th></tr>
       <tr><td><code>onRequest(body, ctx)</code></td><td>ルーティング前のリクエスト本文。<code>model</code> を変えると別の宛先にルーティングされます。</td><td>本文、または何も返さない。<code>ctx.reject(status, message)</code> はリクエストを断り、そのエラーをエージェントの API の形式で返します（ステータスを省くと 403）。</td></tr>
+      <tr><td><code>onProvider(body, ctx)</code></td><td>あるプロバイダに送る直前のリクエスト本文。<code>ctx.provider</code> にはその <code>id</code>、<code>name</code>、<code>account</code>（サブスクリプションの種類。<code>claude</code> や <code>antigravity</code> など。API キーにはありません）と <code>model</code> があります。リクエストを試すプロバイダごとに呼ばれ、毎回 <code>onRequest</code> が残した本文を受け取るので、あるプロバイダ向けの変更は他のプロバイダに届きません。</td><td>本文、または何も返さない。この時点でルーティングは済んでいるので、拒否も行き先の変更もできません。</td></tr>
       <tr><td><code>onEvent(event, ctx)</code></td><td>ストリーム応答の各イベントの <code>data:</code> JSON。</td><td>イベント、何も返さない、またはイベントを落とす <code>null</code>。</td></tr>
       <tr><td><code>onResponse(body, ctx)</code></td><td>ストリームでない応答の全体。<code>ctx.status</code> がそのステータスです。</td><td>本文、または何も返さない。</td></tr>
     </table></div>
     <p><code>export const events = ["content_block_delta"]</code> と書くと、<code>onEvent</code> はその名前のイベントだけで呼ばれます（Anthropic Messages と Responses のイベントには名前があります）。Chat Completions と Gemini のイベントには名前がないので、それらでは <code>events</code> を書かないでください。1 つのイベントは応答の一部なので、1 つの単語が 2 つのイベントに分かれることがあります。<code>data: [DONE]</code> の行とコメントはフックを通らずにそのまま流れます。圧縮された応答もそのまま流れます。</p>
     <p><code>ctx</code> には次のものがあります：<code>protocol</code>（<code>anthropic</code>・<code>chat</code>・<code>responses</code>・<code>gemini</code>）、エージェントが指定した <code>model</code> と <code>stream</code>、<code>path</code>、magpie が把握している場合の <code>agent</code>、<code>options</code>（そのプラグインの<a href="#middleware-options">オプション</a>）、そしてリクエストごとのオブジェクト <code>state</code>。</p>
     <h3>フックが失敗したとき</h3>
-    <p>フックの持ち時間は、リクエストまたは応答全体で 250 ms、1 イベントで 50 ms、読み込みで 1 秒です。例外を投げたフック、時間切れになったフック、想定外の値を返したフックは、なかったものとして扱われます。つまりリクエストやイベントは元のまま送られます。設定 → プラグインには、ミドルウェアごとのフック、呼び出し回数、1 回あたりの平均時間、失敗回数と直近のエラーが表示されます。フックが見るのは、エージェントが送ったものと受け取るものそのものです。送信時は magpie のマスキングより前、受信時はマスク解除の後です。magpie 自身のリクエスト（スレッドのタイトル、ルーターの分類器）はミドルウェアを通りません。</p>
+    <p>フックの持ち時間は、リクエスト、プロバイダへの 1 回の試行、または応答全体で 250 ms、1 イベントで 50 ms、読み込みで 1 秒です。例外を投げたフック、時間切れになったフック、想定外の値を返したフックは、なかったものとして扱われます。つまりリクエストやイベントは元のまま送られます。設定 → プラグインには、ミドルウェアごとのフック、呼び出し回数、1 回あたりの平均時間、失敗回数と直近のエラーが表示されます。フックが見るのは、エージェントが送ったものと受け取るものそのものです。送信時は magpie のマスキングより前、受信時はマスク解除の後です。magpie 自身のリクエスト（スレッドのタイトル、ルーターの分類器）はミドルウェアを通りません。</p>
 
     <h3 id="gateway-points"><a class="anchor" href="#gateway-points">ルーティングと使用量の行</a></h3>
     <p>同じモジュールは <code>strategies</code> と <code>onUsage</code> もエクスポートできます。そのファイルは <code>*.gateway.js</code> と名付けてもよく、パッケージなら <code>"magpie": { "gateway": "./gw.js" }</code> と書けます。</p>
@@ -797,7 +808,10 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
   <span class="s">"name"</span>: <span class="s">"magpie-usage-glance"</span>,
   <span class="s">"version"</span>: <span class="s">"0.1.0"</span>,
   <span class="s">"magpie"</span>: {
-    <span class="s">"page"</span>: { <span class="s">"title"</span>: <span class="s">"Usage glance"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span>, <span class="s">"icon"</span>: <span class="s">"page/icon.svg"</span> },
+    <span class="s">"page"</span>: {
+      <span class="s">"title"</span>: <span class="s">"Usage glance"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span>, <span class="s">"icon"</span>: <span class="s">"page/icon.svg"</span>,
+      <span class="s">"titles"</span>: { <span class="s">"zh"</span>: <span class="s">"用量速览"</span>, <span class="s">"ja"</span>: <span class="s">"使用量の概要"</span> }
+    },
     <span class="s">"permissions"</span>: [<span class="s">"usage:summary"</span>]
   }
 }</pre>
@@ -820,7 +834,8 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
 <span class="k">const</span> opts = <span class="k">await</span> magpie.options.get()            <span class="c">// this plugin's own options</span>
 <span class="k">await</span> magpie.options.set({ ...opts, hideCost: <span class="k">true</span> })</pre>
     </div>
-    <p>プラグインページの行には、オンにする前からページと読めるものが表示されます。<code>page.file</code> と <code>page.icon</code> はプラグイン内のパスです。ページのファイルは <code>file</code> のフォルダにあるものだけで、外を指すパスやリンクは配信されません。1 つのパッケージがページとプロバイダ、ミドルウェア、エージェントを兼ねることもできます。ページだけのプラグインはプラグインホストを起動しません。</p>
+    <p>プラグインページの行には、オンにする前からページと読めるものが表示されます。<code>page.file</code> と <code>page.icon</code> はプラグイン内のパスです。ページのファイルは <code>file</code> のフォルダにあるものだけで、外を指すパスやリンクは配信されません。1 つのパッケージがページとプロバイダ、ミドルウェア、エージェントを兼ねることもできます。ページだけのプラグインはプラグインホストを起動しません。<code>page.titles</code>（パネルでは <code>titles</code>）は、言語コード（<code>zh</code>、<code>zh-TW</code>、<code>ja</code>、<code>de</code>）ごとのタブ名です。ほかの言語では <code>title</code> を使います。</p>
+    <p>ページがスタイルを付けていないところは、最初から magpie の見た目になります。bridge がフォント、色、見出し、ボタン、入力欄、表のスタイルシートを重みなし（<code>:where()</code>）で加えるので、ページ自身のルールが常に勝ちます。自分のスタイルでは <code>--magpie-*</code> 変数を使うとウィンドウに揃います。</p>
     <h3>ページが頼めること</h3>
     <div class="table-wrap"><table>
       <tr><th>フィールド / 呼び出し</th><th>返すもの</th></tr>
@@ -838,6 +853,56 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
       <li>ページが捕まえなかったエラーは、その場所に<span class="ui">このページは動作を停止しました</span>と<span class="ui">再試行</span>を表示します。ページ自身のスクリプトのエラーはページには「Script error.」としか届かないので、詳しくはウィンドウのコンソールを見てください。</li>
     </ul>
 
+    <h3 id="panels"><a class="anchor" href="#panels">magpie 自身のページに入るパネル</a></h3>
+    <p>プラグインは、magpie 自身が描くページにパネルを加えることもできます。パネルはそれぞれプラグインのフォルダーにある小さなページで、ブリッジ、読み取り、オプション、サンドボックスはページと同じです。タイトルの見出しの下のカードに収まり、高さは描いた内容に合わせて決まります。</p>
+    <div class="code">
+      <span class="lang">package.json</span>
+      <button class="copy" data-copy="pn-pkg">コピー</button>
+      <pre id="pn-pkg">{
+  <span class="s">"name"</span>: <span class="s">"magpie-provider-notes"</span>,
+  <span class="s">"version"</span>: <span class="s">"0.1.0"</span>,
+  <span class="s">"magpie"</span>: {
+    <span class="s">"panels"</span>: [
+      { <span class="s">"slot"</span>: <span class="s">"provider"</span>, <span class="s">"file"</span>: <span class="s">"ui/notes.html"</span>, <span class="s">"title"</span>: <span class="s">"Notes"</span> },
+      { <span class="s">"slot"</span>: <span class="s">"usage"</span>, <span class="s">"file"</span>: <span class="s">"ui/spend.html"</span>, <span class="s">"title"</span>: <span class="s">"Top models today"</span> }
+    ],
+    <span class="s">"permissions"</span>: [<span class="s">"usage:summary"</span>]
+  }
+}</pre>
+    </div>
+    <div class="table-wrap"><table>
+      <tr><th><code>slot</code></th><th>パネルが入る場所</th><th><code>magpie.context</code></th></tr>
+      <tr><td><code>agents</code></td><td>「エージェント」ページの末尾</td><td><code>{}</code></td></tr>
+      <tr><td><code>usage</code></td><td>使用量の「概要」の末尾</td><td><code>{}</code></td></tr>
+      <tr><td><code>settings</code></td><td>設定の「<span class="ui">プラグイン</span>」タブ（プラグインがそこにパネルを置いているときだけ表示）</td><td><code>{}</code></td></tr>
+      <tr><td><code>provider</code></td><td>保存した各プロバイダーの編集画面</td><td><code>{ provider: { id, name } }</code></td></tr>
+    </table></div>
+    <p>パネルは 1 つのプラグインにつき 8 個まで。パネルの高さは <code>&lt;html&gt;</code> に合わせて決まる（最大 2400px）ので、ページ自身に高さを任せ、<code>html</code> や <code>body</code> に固定の高さを付けないでください。パネルがエラーを出すか 10 秒以内に応答しないと、その場所に「<span class="ui">{name} は動作を停止しました</span>」と「<span class="ui">再試行</span>」が表示されます。周りのページと隣のパネルはそのまま動き続けます。</p>
+    <h3 id="replaces"><a class="anchor" href="#replaces">組み込みページの代わりになる</a></h3>
+    <p>ページは magpie 自身のページの代わりになれます。<code>magpie.page</code> に <code>"replaces"</code> を加え、<code>sessions</code>、<code>library</code>、<code>routing</code>、<code>usage</code> のどれかを指定します。そのタブが組み込みページのあった場所に入り、そのページへのリンクはプラグインのページを開きます。2 つのプラグインが同じページを指定したときは、プラグイン一覧で先にあるほうが代わりになり、もう一方は独立したページになります。プラグインをオフにすると、組み込みページが元どおりに戻ります。</p>
+    <div class="code">
+      <span class="lang">package.json</span>
+      <button class="copy" data-copy="pg-replaces">コピー</button>
+      <pre id="pg-replaces"><span class="s">"page"</span>: { <span class="s">"title"</span>: <span class="s">"My library"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span>, <span class="s">"replaces"</span>: <span class="s">"library"</span> }</pre>
+    </div>
+    <h3 id="actions"><a class="anchor" href="#actions">magpie のメニューに入る項目</a></h3>
+    <p>ページを持つプラグインは、magpie の行のメニューに項目を加えられます。プロバイダの行（右クリック）とエージェントの行（ハンドル、または右クリック）です。項目は magpie 自身の項目のあとに並び、ページのタイトルと同じくウィンドウの言語で表示されます。項目を選ぶとプラグインのページが開き、どの項目か、その行の id と名前だけが伝えられます。ページは <code>magpie.onAction</code> で受け取ります。ハンドラーを渡す前に選ばれた項目は、渡されるまで待ちます。</p>
+    <div class="code">
+      <span class="lang">package.json</span>
+      <button class="copy" data-copy="pg-actions">コピー</button>
+      <pre id="pg-actions"><span class="s">"page"</span>: { <span class="s">"title"</span>: <span class="s">"Balance"</span>, <span class="s">"file"</span>: <span class="s">"page/index.html"</span> },
+<span class="s">"actions"</span>: [
+  { <span class="s">"id"</span>: <span class="s">"check"</span>, <span class="s">"menu"</span>: <span class="s">"provider"</span>, <span class="s">"title"</span>: <span class="s">"Check balance"</span>, <span class="s">"titles"</span>: { <span class="s">"zh"</span>: <span class="s">"查余额"</span> } }
+]</pre>
+    </div>
+    <div class="code">
+      <span class="lang">page/app.js</span>
+      <button class="copy" data-copy="pg-onaction">コピー</button>
+      <pre id="pg-onaction">magpie.onAction(({ id, provider }) =&gt; {
+  <span class="c">// id: "check"; provider: { id, name }</span>
+});</pre>
+    </div>
+    <p><code>menu</code> は <code>provider</code> か <code>agent</code> です。<code>id</code> は小文字、数字、ハイフンで、40 文字まで。項目はプラグインごとに最大 8 個で、<code>title</code> のない項目はページのタイトルを使います。ページのないプラグインは項目を加えません。「プラグイン」ページには、プラグインがどのメニューに項目を加えるかが表示されます。</p>
     <h2 id="pi"><a class="anchor" href="#pi">pi パッケージ</a></h2>
     <p>magpie は <a href="https://github.com/earendil-works/pi">pi</a> のパッケージも動かします。<code>pi.registerProvider</code> でプロバイダを登録する pi 拡張は、何も変えずに pi と同じように magpie で動き、ほかのプラグインと同じ方法で追加できます（<code>magpie plugin add pi-antigravity</code>）。</p>
     <ul>

@@ -59,7 +59,7 @@ var movedNames = map[string]string{CommandCodePlanID: "Command Code Plan"}
 
 // pluginCard is the name and icon pp's usage cards show.
 func pluginCard(pp plugin.Provider) (string, string) {
-	if c, ok := movedCards[pp.ID]; ok && Moved(pp.ID) {
+	if c, ok := movedCards[pp.ID]; ok && PluginServes(pp.ID) {
 		return c.name, c.icon
 	}
 	name := pp.Name
@@ -141,10 +141,18 @@ func quotaOfPlugin(q SubscriptionQuota, u plugin.Usage) SubscriptionQuota {
 		q.Until = &t
 	}
 	if r := u.Resets; r != nil {
-		q.Resets = &ResetCredits{Count: r.Count, ByWindow: r.ByWindow, FiveHour: r.FiveHour, Weekly: r.Weekly}
+		q.Resets = &ResetCredits{Count: r.Count, ByWindow: r.ByWindow, FiveHour: r.FiveHour, Weekly: r.Weekly, Team: r.Team}
 		if t, err := time.Parse(time.RFC3339, r.Until); err == nil {
 			q.Resets.Until = &t
 		}
+		for _, e := range r.Each {
+			c := ResetCard{Window: e.Window}
+			if t, err := time.Parse(time.RFC3339, e.Until); err == nil {
+				c.Until = &t
+			}
+			q.Resets.Each = append(q.Resets.Each, c)
+		}
+		sortResetCards(q.Resets.Each)
 	}
 	for _, x := range u.Windows {
 		w := QuotaWindow{Name: x.Name, Used: x.Used, ResetSecs: x.ResetSecs, Display: x.Display,

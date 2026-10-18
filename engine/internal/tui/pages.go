@@ -1121,6 +1121,15 @@ func fmtCost(t usage.Totals) string {
 	return "≈" + s
 }
 
+// credits is " · " and what the credited calls cost in their plans'
+// credits, as the replies said (#2512); "" when none said.
+func credits(t usage.Totals) string {
+	if c := usage.FormatCredits(t); c != "" {
+		return " · " + c
+	}
+	return ""
+}
+
 var bars = []rune(" ▁▂▃▄▅▆▇█")
 
 func (m model) viewUsage() string {
@@ -1178,6 +1187,7 @@ func (m model) usageBlock(b *strings.Builder, s usage.Summary, room int, names m
 	if s.Unpriced > 0 { // calls with no known price, not in the cost (#1856)
 		line += sMuted.Render(fmt.Sprintf(" (%d call%s unpriced)", s.Unpriced, plural(s.Unpriced)))
 	}
+	line += sMuted.Render(credits(s.Totals))
 	if s.Errors > 0 {
 		line += sMuted.Render(" · ") + sBad.Render(fmt.Sprintf("%d error%s", s.Errors, plural(s.Errors)))
 	}
@@ -1217,7 +1227,7 @@ func (m model) usageBlock(b *strings.Builder, s usage.Summary, room int, names m
 				break
 			}
 			share := fmt.Sprintf("%3.0f%%", 100*float64(g.Tokens())/float64(max(1, s.Tokens())))
-			b.WriteString(pad + "  " + sText.Render(padRight(name(g), w)) + "  " + sMuted.Render(share) + "  " + sText.Render(padRight(fmtTokens(g.Tokens()), 7)) + "  " + sFaint.Render(padRight(fmt.Sprintf("%d call%s", g.Calls, plural(g.Calls)), 10)) + "  " + sOK.Render(fmtCost(g.Totals)) + "\n")
+			b.WriteString(pad + "  " + sText.Render(padRight(name(g), w)) + "  " + sMuted.Render(share) + "  " + sText.Render(padRight(fmtTokens(g.Tokens()), 7)) + "  " + sFaint.Render(padRight(fmt.Sprintf("%d call%s", g.Calls, plural(g.Calls)), 10)) + "  " + sOK.Render(fmtCost(g.Totals)) + sMuted.Render(credits(g.Totals)) + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -1289,7 +1299,12 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 		}
 		switch {
 		case q.Balance != "" && len(q.Windows) == 0:
-			out = append(out, line+"  "+sText.Render(q.Balance)+sMuted.Render(" left")+ci)
+			c := sText.Render(q.Balance) + sMuted.Render(" left")
+			if len(q.BalanceSplit) > 0 {
+				// what it is made of: DeepSeek's granted credit apart
+				c += sFaint.Render(" (" + provider.SplitWords(q.BalanceSplit) + ")")
+			}
+			out = append(out, line+"  "+c+ci)
 			continue
 		case q.Error != "":
 			out = append(out, line+"  "+sMuted.Render(trunc(q.Error, max(20, width-tw-2-lipgloss.Width(ci))))+ci)

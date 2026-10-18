@@ -1,14 +1,12 @@
 package provider
 
-// PLUGIN-SERVED (see AGENTS.md): WorkBuddy ("workbuddy" and "workbuddy-ai")
-// is a deprecated built-in subscription served by its plugin,
-// @magpie-community/opencode-workbuddy-auth, once moved onto it
-// (provider.Moved; the default for a new sign-in). A moved one's sign-ins,
-// models, requests and usage are all the plugin's, never this code's (only
-// the move, in migrate*.go, still reads its accounts). A fix here alone
-// doesn't reach those users; fix the plugin
-// (github.com/magpie-community/plugins, packages/workbuddy) and raise the
-// mover's min in internal/provider/migrate_workbuddy.go.
+// PLUGIN-SERVED (see AGENTS.md): WorkBuddy ("workbuddy") and WorkBuddy AI
+// ("workbuddy-ai") are retired built-in subscriptions served by their
+// plugin, @magpie-community/opencode-workbuddy-auth. The check-in here
+// presses 签到 for the plugin's accounts, sent through the plugin's fetch,
+// when the plugin doesn't check in itself. A fix to the plugin's own paths
+// belongs in github.com/magpie-community/plugins (packages/workbuddy), with
+// the movers' min raised in internal/provider/migrate_workbuddy.go.
 
 // WorkBuddy's daily check-in (签到): while its event runs, a WorkBuddy
 // (China) account is given a few credits a day for pressing 签到 in the
@@ -38,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -217,16 +216,8 @@ func (c wbCheckiner) checkiner() checkiner {
 // wbCheckin checks a in for the day as WorkBuddy's 签到 does: the event's
 // status first, and a claim only while it runs and today's isn't in.
 func wbCheckin(ctx context.Context, a wbAccount) WorkBuddyCheckin {
-	var h map[string]string
+	var h map[string]string // the plugin's fetch signs the request
 	do := a.via
-	if do == nil {
-		do = http.DefaultClient.Do
-		creds, err := wbFresh(ctx, a)
-		if err != nil {
-			return wbCheckinFailed(err)
-		}
-		h = wbAuthHeaders(a.site, creds)
-	}
 	var st wbCheckinStatus
 	if err := wbCallVia(ctx, do, http.MethodPost, a.site.api()+"/v2/billing/meter/checkin-activity-status", h, map[string]any{}, &st); err != nil {
 		return wbCheckinUnauthorized(ctx, do, a, h, err)
@@ -299,11 +290,18 @@ func wbCheckinRefused(err error) WorkBuddyCheckin {
 
 // wbCheckinFailed is a check-in err kept from an answer: offline when the
 // request got no reply at all (no name lookup, no connection, no answer
-// in time), as a *url.Error from the client says.
+// in time), as a *url.Error from the client says, or, for a check-in sent
+// through a plugin's fetch, as Bun's words for it say: that comes back as
+// text, and a moved WorkBuddy account's "ECONNRESET: The socket connection
+// was closed unexpectedly" waited half an hour (plugins #149).
 func wbCheckinFailed(err error) WorkBuddyCheckin {
 	var ne net.Error
-	return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: err.Error(), Offline: errors.As(err, &ne)}
+	return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: err.Error(), Offline: errors.As(err, &ne) || unanswered.MatchString(err.Error())}
 }
+
+// unanswered is Bun's and Node's words for a fetch that got no reply: no
+// name lookup, no connection, or one closed before the answer.
+var unanswered = regexp.MustCompile(`\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ConnectionRefused|ConnectionClosed|FailedToOpenSocket)\b|Unable to connect|socket connection was closed unexpectedly`)
 
 // CheckInWorkBuddy checks each WorkBuddy (China) account in use in for
 // today now, those not in yet, and says how each stands.
@@ -402,24 +400,14 @@ func markCheckins(qs []SubscriptionQuota, on []checkinCard, st map[string]WorkBu
 func HasWorkBuddy() bool { return len(wbCheckinAccounts()) > 0 }
 
 // wbCheckinAccounts are the WorkBuddy (China) accounts checked in: the
-// plugin's once WorkBuddy is moved onto it, checked in through it; not
-// moved, the built-in's, and the plugin's too where it is signed in under
-// its own id, "workbuddy-plugin" (signed in before the move existed, or
-// moved back), whose cards had their credits by day but no check-in
-// (#694, Dazzle-sys on 0.1.774: 没看到).
+// plugin's, checked in through it, unless the plugin checks them in
+// itself.
 func wbCheckinAccounts() []wbAccount {
-	if Moved(wbCN.id) {
-		pp, ok := PluginOf(wbCN.id)
-		if !ok || pluginChecksIn(pp) {
-			return nil
-		}
-		return wbPluginAccounts(pp)
+	pp, ok := PluginOf(wbCN.id)
+	if !ok || pluginChecksIn(pp) {
+		return nil
 	}
-	out := wbLogins(wbCN)
-	if pp, ok := PluginOf(PluginID(wbCN.id)); ok && pp.ID == wbCN.id && !pluginChecksIn(pp) {
-		out = append(out, wbPluginAccounts(pp)...)
-	}
-	return out
+	return wbPluginAccounts(pp)
 }
 
 // wbPluginAccounts are the WorkBuddy plugin's accounts of pp, each sent

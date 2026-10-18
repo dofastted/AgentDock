@@ -38,6 +38,8 @@ func TestSetFastPick(t *testing.T) {
 	}
 
 	st := settings.Load()
+	// an Ultrafast pick moves with it (#1954)
+	st.UltraPicks = map[string][]string{"codex": {"oa/gpt-6.1-sol"}}
 	if !renameModelPrefs(&st, "oa", "openai") {
 		t.Fatal("the rename moved nothing")
 	}
@@ -48,6 +50,9 @@ func TestSetFastPick(t *testing.T) {
 	if !IsFastPick("codex", "openai/gpt-6.1-sol") || IsFastPick("codex", "oa/gpt-6.1-sol") {
 		t.Fatalf("after the rename: %v", settings.Load().FastPicks)
 	}
+	if !IsUltraPick("codex", "openai/gpt-6.1-sol") || IsUltraPick("codex", "oa/gpt-6.1-sol") {
+		t.Fatalf("after the rename: %v", settings.Load().UltraPicks)
+	}
 
 	// switching off is allowed whatever the model is now, and drops the agent
 	if err := SetFastPick("codex", "openai/gpt-6.1-sol", false); err != nil {
@@ -55,5 +60,8 @@ func TestSetFastPick(t *testing.T) {
 	}
 	if _, ok := settings.Load().FastPicks["codex"]; ok {
 		t.Fatalf("an agent with none kept: %v", settings.Load().FastPicks)
+	}
+	if _, ok := settings.Load().UltraPicks["codex"]; ok {
+		t.Fatalf("Ultrafast kept with fast off: %v", settings.Load().UltraPicks)
 	}
 }

@@ -351,7 +351,7 @@ func qwenIn(at place) *Agent {
 			if c == nil {
 				return ""
 			}
-			if v, ok := edit.GetJSON(path, qwenEnv); !ok || v != at.gwKey() {
+			if v, _ := edit.GetJSON(path, qwenEnv); !keyHolds(v, at.gwKey()) {
 				return "Qwen Code's " + qwenEnv + " (settings.json) no longer is magpie's key, so magpie's models have none"
 			}
 			if v, ok := edit.GetJSON(path, qwenAuth); !ok || v != "openai" {

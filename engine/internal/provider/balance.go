@@ -36,6 +36,9 @@ type balanceSource struct {
 	// failed, when set, words a refusal the vendor is known to give in
 	// place of the status and body as they came (nil when it isn't one)
 	failed func(status int, body []byte) error
+	// split, when set, reads what the balance is made of (granted and
+	// topped up), told under it on the card
+	split func(body []byte) []BalancePart
 }
 
 // balanceSourceOf is the provider's own endpoint when it named one, else
@@ -47,37 +50,37 @@ func balanceSourceOf(p Provider) (balanceSource, bool) {
 		// a token saved beside it (a new-api relay's access token, its
 		// /api/user/self telling the account's quota) is asked with
 		// instead of the key
-		return balanceSource{p.BalanceURL, func(b []byte) (string, error) { return readBalancePath(b, path) }, p.BalanceToken, nil}, true
+		return balanceSource{p.BalanceURL, func(b []byte) (string, error) { return readBalancePath(b, path) }, p.BalanceToken, nil, nil}, true
 	}
 	hosts := []string{hostOf(p.Chat), hostOf(p.Responses), hostOf(p.Anthropic)}
 	for _, h := range hosts {
 		switch h {
 		case "api.deepseek.com":
-			return balanceSource{"https://api.deepseek.com/user/balance", readDeepSeek, "", nil}, true
+			return balanceSource{"https://api.deepseek.com/user/balance", readDeepSeek, "", nil, readDeepSeekSplit}, true
 		case "api.moonshot.cn":
-			return balanceSource{"https://api.moonshot.cn/v1/users/me/balance", readMoonshot("¥"), "", nil}, true
+			return balanceSource{"https://api.moonshot.cn/v1/users/me/balance", readMoonshot("¥"), "", nil, nil}, true
 		case "api.moonshot.ai":
-			return balanceSource{"https://api.moonshot.ai/v1/users/me/balance", readMoonshot("$"), "", nil}, true
+			return balanceSource{"https://api.moonshot.ai/v1/users/me/balance", readMoonshot("$"), "", nil, nil}, true
 		case "openrouter.ai":
-			return balanceSource{"https://openrouter.ai/api/v1/credits", readOpenRouter, "", nil}, true
+			return balanceSource{"https://openrouter.ai/api/v1/credits", readOpenRouter, "", nil, nil}, true
 		case "api.siliconflow.cn":
-			return balanceSource{"https://api.siliconflow.cn/v1/user/info", readSiliconFlow("¥"), "", siliconFlowGone("https://cloud.siliconflow.cn (余额充值 → 代金券)")}, true
+			return balanceSource{"https://api.siliconflow.cn/v1/user/info", readSiliconFlow("¥"), "", siliconFlowGone("https://cloud.siliconflow.cn (余额充值 → 代金券)"), nil}, true
 		case "api.siliconflow.com":
-			return balanceSource{"https://api.siliconflow.com/v1/user/info", readSiliconFlow("$"), "", siliconFlowGone("https://cloud.siliconflow.com")}, true
+			return balanceSource{"https://api.siliconflow.com/v1/user/info", readSiliconFlow("$"), "", siliconFlowGone("https://cloud.siliconflow.com"), nil}, true
 		case "api.stepfun.com":
-			return balanceSource{"https://api.stepfun.com/v1/accounts", readStepFun("¥"), "", nil}, true
+			return balanceSource{"https://api.stepfun.com/v1/accounts", readStepFun("¥"), "", nil, nil}, true
 		case "api.stepfun.ai":
-			return balanceSource{"https://api.stepfun.ai/v1/accounts", readStepFun("$"), "", nil}, true
+			return balanceSource{"https://api.stepfun.ai/v1/accounts", readStepFun("$"), "", nil, nil}, true
 		case "api.commandcode.ai":
-			return balanceSource{"https://api.commandcode.ai/alpha/billing/credits", readCommandCode, "", nil}, true
+			return balanceSource{"https://api.commandcode.ai/alpha/billing/credits", readCommandCode, "", nil, nil}, true
 		case "ollama.com":
 			// the credits bought past the plan's allowance (#1888)
-			return balanceSource{ollamaBalanceURL, readOllamaCredits, "", nil}, true
+			return balanceSource{ollamaBalanceURL, readOllamaCredits, "", nil, nil}, true
 		case "aihubmix.com":
 			if p.BalanceToken != "" {
-				return balanceSource{"https://aihubmix.com/api/user/self", readAiHubMixAccount, p.BalanceToken, nil}, true
+				return balanceSource{"https://aihubmix.com/api/user/self", readAiHubMixAccount, p.BalanceToken, nil, nil}, true
 			}
-			return balanceSource{"https://aihubmix.com/dashboard/billing/remain", readAiHubMix, "", nil}, true
+			return balanceSource{"https://aihubmix.com/dashboard/billing/remain", readAiHubMix, "", nil, nil}, true
 		}
 	}
 	return balanceSource{}, false
@@ -299,29 +302,44 @@ func number(v any) (float64, bool) {
 	return 0, false
 }
 
-// readDeepSeek: {"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.00",…}]}
-func readDeepSeek(b []byte) (string, error) {
+// deepSeekAmount is one currency of a DeepSeek account: its total, and
+// the granted (赠送) and topped-up (充值) amounts it is made of, when the
+// reply tells them.
+type deepSeekAmount struct {
+	code                   string
+	total, granted, topped float64
+	split                  bool
+}
+
+// deepSeekAmounts: {"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.00","granted_balance":"10.00","topped_up_balance":"100.00"}]}
+func deepSeekAmounts(b []byte) ([]deepSeekAmount, error) {
 	var r struct {
 		Infos []struct {
 			Currency string `json:"currency"`
 			Total    any    `json:"total_balance"`
+			Granted  any    `json:"granted_balance"`
+			Topped   any    `json:"topped_up_balance"`
 		} `json:"balance_infos"`
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
-		return "", err
+		return nil, err
 	}
-	type amount struct {
-		code string
-		v    float64
-	}
-	var amts []amount
+	var amts []deepSeekAmount
 	for _, in := range r.Infos {
-		if v, ok := number(in.Total); ok {
-			amts = append(amts, amount{strings.ToUpper(in.Currency), v})
+		v, ok := number(in.Total)
+		if !ok {
+			continue
 		}
+		a := deepSeekAmount{code: strings.ToUpper(in.Currency), total: v}
+		g, gok := number(in.Granted)
+		t, tok := number(in.Topped)
+		if gok && tok {
+			a.granted, a.topped, a.split = g, t, true
+		}
+		amts = append(amts, a)
 	}
 	if len(amts) == 0 {
-		return "", errors.New("no balance in the reply")
+		return nil, errors.New("no balance in the reply")
 	}
 	// DeepSeek lists an account's currencies (CNY, USD) in an order that
 	// changes from one read to the next (gakki on Discord), so they are
@@ -329,20 +347,65 @@ func readDeepSeek(b []byte) (string, error) {
 	// by its code. The first is the one the trend follows and an alert
 	// reads (balanceSeries, BalanceNumber), so it mustn't swap places
 	// between reads either.
-	slices.SortStableFunc(amts, func(a, b amount) int {
-		if (a.v > 0) != (b.v > 0) {
-			if a.v > 0 {
+	slices.SortStableFunc(amts, func(a, b deepSeekAmount) int {
+		if (a.total > 0) != (b.total > 0) {
+			if a.total > 0 {
 				return -1
 			}
 			return 1
 		}
 		return strings.Compare(a.code, b.code)
 	})
+	return amts, nil
+}
+
+func readDeepSeek(b []byte) (string, error) {
+	amts, err := deepSeekAmounts(b)
+	if err != nil {
+		return "", err
+	}
 	parts := make([]string, len(amts))
 	for i, a := range amts {
-		parts[i] = money(currencySign(a.code), a.v)
+		parts[i] = money(currencySign(a.code), a.total)
 	}
 	return strings.Join(parts, " · "), nil
+}
+
+// Split labels: what a balance is made of, each a key the GUI words in
+// the user's language (the TUI and CLI say it in English).
+const (
+	SplitGranted = "Granted"
+	SplitTopUp   = "Topped up"
+)
+
+// SplitWords is a balance's split on one line, in English, for the TUI
+// and the CLI: "granted ¥10.00 · topped up ¥100.00".
+func SplitWords(split []BalancePart) string {
+	out := make([]string, 0, len(split))
+	for _, p := range split {
+		out = append(out, strings.ToLower(p.Label)+" "+p.Text)
+	}
+	return strings.Join(out, " · ")
+}
+
+// readDeepSeekSplit is what each currency's balance is made of: the
+// granted credit apart from the money topped up (wwcraft_ on Discord),
+// for a currency that has some granted. One with none granted is all
+// topped up, its total already that, so it adds nothing.
+func readDeepSeekSplit(b []byte) []BalancePart {
+	amts, err := deepSeekAmounts(b)
+	if err != nil {
+		return nil
+	}
+	var out []BalancePart
+	for _, a := range amts {
+		if !a.split || a.granted == 0 {
+			continue
+		}
+		sign := currencySign(a.code)
+		out = append(out, BalancePart{Label: SplitGranted, Text: money(sign, a.granted)}, BalancePart{Label: SplitTopUp, Text: money(sign, a.topped)})
+	}
+	return out
 }
 
 // readMoonshot: {"code":0,"data":{"available_balance":49.58,…},"status":true}
@@ -1128,7 +1191,7 @@ func balanceSegmentOf(raw, path string) (balanceSegment, error) {
 // false when there is no way to ask it. A key given limits and no quota of
 // its own has what its fullest window has left: what it can spend now.
 func Balance(ctx context.Context, p Provider) (amount string, ok bool, err error) {
-	amount, _, ws, ok, err := balanceRead(ctx, p)
+	amount, _, _, ws, ok, err := balanceRead(ctx, p)
 	if err == nil && amount == "" && len(ws) > 0 {
 		left := ws[0].Limit - ws[0].Amount
 		for _, w := range ws[1:] {
@@ -1140,22 +1203,23 @@ func Balance(ctx context.Context, p Provider) (amount string, ok bool, err error
 }
 
 // balanceRead is what Balance reads, with the amounts of a balance field
-// the user wrote each apart (nil for a vendor magpie reads itself), and the
+// the user wrote each apart (nil for a vendor magpie reads itself), what a
+// vendor's balance is made of when it tells that (split), and the
 // key's own usage windows when its reply tells them (a sub2api key's
 // limits, readSub2APIKeyLimits).
-func balanceRead(ctx context.Context, p Provider) (amount string, parts []BalancePart, ws []QuotaWindow, ok bool, err error) {
+func balanceRead(ctx context.Context, p Provider) (amount string, parts, split []BalancePart, ws []QuotaWindow, ok bool, err error) {
 	ctx = p.Via(ctx)
 	p = keyQueryOf(p)
 	src, ok := balanceSourceOf(p)
 	if !ok || p.Account != nil || p.Key == "" {
-		return "", nil, nil, false, nil
+		return "", nil, nil, nil, false, nil
 	}
 	if src.token != "" && p.BalanceURL != "" {
 		switch balanceURLPath(p.BalanceURL) {
 		case newAPIKeyUsage:
-			return "", nil, nil, true, errKeyUsageWithToken(p.BalanceURL)
+			return "", nil, nil, nil, true, errKeyUsageWithToken(p.BalanceURL)
 		case sub2APIKeyUsage:
-			return "", nil, nil, true, errSub2APIKeyUsageWithToken(p.BalanceURL)
+			return "", nil, nil, nil, true, errSub2APIKeyUsageWithToken(p.BalanceURL)
 		}
 	}
 	method := http.MethodGet
@@ -1163,12 +1227,12 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts []Balanc
 		// the method the user named goes with their own Balance URL only;
 		// a vendor magpie knows is asked as it answers
 		if method, err = balanceMethodOf(p.BalanceMethod); err != nil {
-			return "", nil, nil, true, err
+			return "", nil, nil, nil, true, err
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, withBalanceKey(src.url, p.Key, true), nil)
 	if err != nil {
-		return "", nil, nil, true, err
+		return "", nil, nil, nil, true, err
 	}
 	if src.token != "" {
 		// a named endpoint still gets the provider's headers, which is
@@ -1192,9 +1256,9 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts []Balanc
 	if err != nil {
 		if k := url.QueryEscape(p.Key); k != "" && strings.Contains(err.Error(), k) {
 			// the URL in the error has the key in it: not shown on a card
-			return "", nil, nil, true, errors.New(strings.ReplaceAll(err.Error(), k, Mask(p.Key)))
+			return "", nil, nil, nil, true, errors.New(strings.ReplaceAll(err.Error(), k, Mask(p.Key)))
 		}
-		return "", nil, nil, true, err
+		return "", nil, nil, nil, true, err
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -1205,23 +1269,23 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts []Balanc
 		if res.StatusCode >= 300 {
 			msg = res.Status + ": " + msg
 		}
-		return "", nil, nil, true, errors.New(msg)
+		return "", nil, nil, nil, true, errors.New(msg)
 	}
 	if res.StatusCode >= 300 && src.failed != nil {
 		if err := src.failed(res.StatusCode, b); err != nil {
-			return "", nil, nil, true, err
+			return "", nil, nil, nil, true, err
 		}
 	}
 	if res.StatusCode >= 300 {
 		// what a JSON reply says, on one line; a page of HTML says nothing
 		msg := strings.Join(strings.Fields(string(b)), " ")
 		if !strings.HasPrefix(msg, "{") {
-			return "", nil, nil, true, errors.New(res.Status)
+			return "", nil, nil, nil, true, errors.New(res.Status)
 		}
 		if r := []rune(msg); len(r) > 200 {
 			msg = string(r[:200]) + "…"
 		}
-		return "", nil, nil, true, fmt.Errorf("%s: %s", res.Status, msg)
+		return "", nil, nil, nil, true, fmt.Errorf("%s: %s", res.Status, msg)
 	}
 	if p.BalanceURL != "" {
 		if sub2APIKeyLimits(p) {
@@ -1232,14 +1296,17 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts []Balanc
 			if len(ws) > 0 && strings.TrimSpace(p.BalancePath) == "" {
 				// a key given limits and no quota of its own has no
 				// "remaining": its windows are what it has left
-				return "", nil, ws, true, nil
+				return "", nil, nil, ws, true, nil
 			}
-			return "", nil, nil, true, err
+			return "", nil, nil, nil, true, err
 		}
-		return joinBalanceParts(parts), parts, ws, true, nil
+		return joinBalanceParts(parts), parts, nil, ws, true, nil
 	}
 	amount, err = src.read(b)
-	return amount, nil, nil, true, err
+	if err == nil && src.split != nil {
+		split = src.split(b)
+	}
+	return amount, nil, split, nil, true, err
 }
 
 // balanceMethodOf is the HTTP method a Balance URL is asked with: GET
@@ -1402,7 +1469,7 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 				out[i] = keepReading(ctx, q, keyTag("balance", j.p.Key))
 				return
 			}
-			amount, parts, ws, _, err := balanceRead(ctx, j.p)
+			amount, parts, split, ws, _, err := balanceRead(ctx, j.p)
 			if errors.Is(err, errNoBalance) {
 				return // a reply with no balance for this key: no card
 			}
@@ -1411,6 +1478,7 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 			} else {
 				q.Balance = amount
 				q.BalanceParts = cardParts(parts)
+				q.BalanceSplit = split
 				q.Windows = append(q.Windows, ws...)
 				now := time.Now()
 				q.ReadAt = &now

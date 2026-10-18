@@ -459,7 +459,7 @@ func (s *server) generate(raw json.RawMessage) (string, error) {
 				continue
 			}
 		case d.URL != "":
-			if img, mt, err = gateway.FetchImage(context.Background(), http.DefaultClient, d.URL); err != nil {
+			if img, mt, err = gateway.FetchImage(context.Background(), gateway.PublicClient(), d.URL); err != nil {
 				lost = append(lost, fmt.Sprintf("image %d was drawn but couldn't be downloaded (%v); the vendor keeps it at %s for a while: download it from there", i+1, err, d.URL))
 				continue
 			}

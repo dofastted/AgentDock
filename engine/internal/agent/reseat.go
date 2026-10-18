@@ -130,9 +130,10 @@ func served(ref string) bool {
 // sameModel is the option for ref's model from another provider still
 // serving it: the same id, else one that differs only in how it is spelt
 // (claude-sonnet-4.5 and claude-sonnet-4-5-20250929). For a group magpie
-// found (group/auto-…), gone as found groups are turned off or its model is
-// down to one provider, it is that model from the first provider still
-// serving it; none for any other routing group, which is nobody else's.
+// found (group/auto-…), gone as found groups are turned off or its model
+// is down to one provider magpie has, it is that model from the first
+// provider still serving it; none for any other routing group, which is
+// nobody else's.
 func sameModel(opts []Option, ref string) Option {
 	// a group's id carries Claude Code's [1m] mark as a model's does, and
 	// this ref comes from the agent's own settings

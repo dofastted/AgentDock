@@ -3,10 +3,15 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/png"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -49,6 +54,75 @@ func TestCodexCompressed(t *testing.T) {
 	req.Header.Set("Content-Encoding", "gzip")
 	if n := CodexCompressed(req, body); n != len(body) || req.Header.Get("Content-Encoding") != "gzip" {
 		t.Error("an encoded body encoded again")
+	}
+}
+
+// Large turns stay within Codex's client's 2 MiB window. The repeated
+// image is farther back than 4 MiB, as inline screenshots in a history
+// can be, so the encoder's default 8 MiB window would reach it.
+func TestCodexCompressedLargeImageTurn(t *testing.T) {
+	t.Cleanup(CodexZstdForTests(true))
+	img := image.NewGray(image.Rect(0, 0, 2048, 2048))
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rng.Uint64())
+	}
+	var encoded bytes.Buffer
+	pngEncoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := pngEncoder.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	imageURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(encoded.Bytes())
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-6.1-sol", "stream": true, "store": false,
+		"input": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_text", "text": "Inspect this screenshot."},
+				map[string]any{"type": "input_image", "image_url": imageURL},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "output_text", "text": strings.Repeat("The screenshot shows a test pattern. ", 4000)},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_text", "text": "Compare it with this screenshot."},
+				map[string]any{"type": "input_image", "image_url": imageURL},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 8<<20 || !json.Valid(body) {
+		t.Fatalf("fixture must be valid JSON larger than 8 MiB, got %d bytes", len(body))
+	}
+	req, err := http.NewRequest("POST", CodexBase+"/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	CodexCompressed(req, body)
+	wire, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer req.Body.Close()
+	var header zstd.Header
+	if err := header.Decode(wire); err != nil {
+		t.Fatal(err)
+	}
+	window := header.WindowSize
+	if header.SingleSegment {
+		window = header.FrameContentSize
+	}
+	if window > 2<<20 {
+		t.Errorf("zstd frame window = %d bytes, want at most 2 MiB", window)
+	}
+	d, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if out, err := d.DecodeAll(wire, nil); err != nil || !bytes.Equal(out, body) {
+		t.Fatalf("decoded %d bytes, want original %d bytes, err %v", len(out), len(body), err)
 	}
 }
 

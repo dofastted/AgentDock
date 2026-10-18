@@ -20,7 +20,7 @@ import (
 )
 
 const pluginUsage = `usage: magpie plugin [list] [--json]
-       magpie plugin add <npm | git | path>        install an OpenCode provider plugin, a pi package or a gateway middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js)
+       magpie plugin add <npm | git | path>        install an OpenCode provider plugin, a pi package or a gateway hook/middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js, ./recall.hooks.ts)
        magpie plugin rm <name>                     remove one
        magpie plugin update                        install the newest version of each
        magpie plugin on|off <name>                 turn one on or off
@@ -29,7 +29,6 @@ const pluginUsage = `usage: magpie plugin [list] [--json]
        magpie plugin login <provider> [<method>]   sign in to a provider a plugin adds
        magpie plugin logout <provider>             forget the sign-in
        magpie plugin move|migrate <subscription>   run a built-in subscription's accounts on its community plugin
-       magpie plugin move-back|unmigrate <subscription>   go back to the built-in, with its accounts
        magpie plugin builtin [on|off <id>]         list magpie's built-in plugins (Sessions, Library, routing groups…), or turn one on or off
        magpie plugin preset essentials|all         start the built-in plugins from the Essentials preset, or from all of them
        magpie plugin dump [--json]                 what plugins.yml comes to: each built-in plugin, its config, and the layer each value is from`
@@ -68,14 +67,14 @@ func pluginCmd(args []string) error {
 			return errors.New(pluginUsage)
 		}
 		rest[0] = installedName(rest[0])
-		back := provider.MovedOnto(rest[0])
+		moved := provider.MovedOnto(rest[0])
 		if err := provider.RemovePlugin(ctx, rest[0]); err != nil {
 			return err
 		}
-		for _, id := range back {
-			fmt.Println(green.Render("✓"), id, "is back on its built-in")
-		}
 		fmt.Println(green.Render("✓"), "removed", rest[0])
+		for _, id := range moved {
+			fmt.Println(faint.Render("  " + id + " is off until the plugin is added again; its accounts are kept"))
+		}
 		return nil
 	case "update", "upgrade":
 		if err := plugin.Update(ctx); err != nil {
@@ -89,17 +88,15 @@ func pluginCmd(args []string) error {
 			return errors.New(pluginUsage)
 		}
 		rest[0] = installedName(rest[0])
-		var back []string
-		if sub == "off" {
-			back = provider.MovedOnto(rest[0])
-		}
 		if err := provider.SetPluginOff(ctx, rest[0], sub == "off"); err != nil {
 			return err
 		}
-		for _, id := range back {
-			fmt.Println(green.Render("✓"), id, "is back on its built-in")
-		}
 		fmt.Println(green.Render("✓"), rest[0], "is", sub)
+		if sub == "off" {
+			for _, id := range provider.MovedOnto(rest[0]) {
+				fmt.Println(faint.Render("  " + id + " is off with it; its accounts are kept"))
+			}
+		}
 		return nil
 	case "options", "config":
 		if len(rest) < 1 || len(rest) > 2 {
@@ -151,20 +148,11 @@ func pluginCmd(args []string) error {
 		if err := provider.Move(ctx, rest[0]); err != nil {
 			return fmt.Errorf("%s stays built-in: %w", rest[0], err)
 		}
-		fmt.Println(green.Render("✓"), rest[0], "runs on", provider.MovePackage(rest[0]), muted.Render("(magpie plugin move-back "+rest[0]+" to undo)"))
+		fmt.Println(green.Render("✓"), rest[0], "runs on", provider.MovePackage(rest[0]))
 		return nil
 	case "move-back", "moveback", "unmigrate":
-		if len(rest) != 1 {
-			return errors.New(pluginUsage)
-		}
-		if !provider.Moved(rest[0]) {
-			return fmt.Errorf("%s isn't on its plugin", rest[0])
-		}
-		if err := provider.MoveBack(ctx, rest[0]); err != nil {
-			return err
-		}
-		fmt.Println(green.Render("✓"), rest[0], "is built-in again")
-		return nil
+		// the built-ins are retired: there is no going back to one
+		return errors.New("magpie's built-in subscriptions are retired: their community plugins run them")
 	case "builtin", "builtins", "built-in":
 		return builtinCmd(rest)
 	case "preset":
@@ -235,6 +223,9 @@ func listPlugins(ctx context.Context, asJSON bool) error {
 			what += " " + muted.Render("("+strings.TrimSpace(n+" "+plugin.Installed(e.Spec))+")")
 		}
 		fmt.Printf("%s  %s\n", what, state)
+		if plugin.Gateway(plugin.Target(e.Spec)) != "" {
+			fmt.Println("  " + muted.Render("async gateway hook") + "  onRequest")
+		}
 		// its calls are counted in the gateway's process, not this one
 		if m, ok := mws[e.Spec]; ok && !e.Off {
 			if m.Error != "" {
@@ -249,8 +240,13 @@ func listPlugins(ctx context.Context, asJSON bool) error {
 		if ts := toolsLine(toolNames[e.Spec]); ts != "" {
 			fmt.Printf("  %s  %s\n", muted.Render("tools"), ts)
 		}
-		if pg, _ := plugin.WindowPage(plugin.Target(e.Spec)); pg != nil {
-			fmt.Printf("  %s  %s\n", muted.Render("page"), pageLine(pg))
+		if w, _ := plugin.Window(plugin.Target(e.Spec)); w != nil {
+			if w.Page != nil {
+				fmt.Printf("  %s  %s\n", muted.Render("page"), pageLine(w, w.Page))
+			}
+			if len(w.Panels) > 0 {
+				fmt.Printf("  %s  %s\n", muted.Render("panels"), panelsLine(w))
+			}
 		}
 		for _, p := range ps {
 			if p.Spec != e.Spec {
@@ -625,11 +621,33 @@ func toolsLine(names map[string]string) string {
 	return strings.Join(out, ", ")
 }
 
-// pageLine is a plugin's page: its title and what it may read of magpie's.
-func pageLine(pg *plugin.PageSpec) string {
-	reads := "reads nothing"
-	if len(pg.Reads) > 0 {
-		reads = "reads " + strings.Join(pg.Reads, ", ")
+// pageLine is a plugin's page: its title, the built-in page it takes the
+// place of, and what it may read of magpie's.
+func pageLine(w *plugin.WindowSpec, pg *plugin.PageSpec) string {
+	s := pg.Title
+	if pg.Replaces != "" {
+		s += " " + muted.Render("in place of "+pg.Replaces)
 	}
-	return pg.Title + " " + muted.Render("("+reads+")")
+	return s + " " + muted.Render("("+readsText(w.Reads)+")")
+}
+
+// panelsLine is the panels a plugin adds to magpie's own pages: the page
+// each is in, and what they may read of magpie's.
+func panelsLine(w *plugin.WindowSpec) string {
+	var at []string
+	for _, p := range w.Panels {
+		s := p.Slot
+		if p.Title != "" {
+			s = p.Title + " on " + p.Slot
+		}
+		at = append(at, s)
+	}
+	return strings.Join(at, ", ") + " " + muted.Render("("+readsText(w.Reads)+")")
+}
+
+func readsText(reads []string) string {
+	if len(reads) == 0 {
+		return "reads nothing"
+	}
+	return "reads " + strings.Join(reads, ", ")
 }

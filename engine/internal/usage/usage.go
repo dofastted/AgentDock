@@ -8,10 +8,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -194,6 +196,9 @@ type Record struct {
 	// said nothing: the call is then priced at magpie's own prices, as the
 	// gateway's calls are, and priced again when those change.
 	OwnCost *float64 `json:"cost,omitempty"`
+	// Credits is what the vendor said the call cost in its plan's own
+	// credits (WorkBuddy's usage.credit, #2512), nil when it said none
+	Credits *float64 `json:"credits,omitempty"`
 	// Watched is a row of a request an Observer watched (observe.go): it
 	// has the request's attempts already, so it can pass the row over.
 	// Never persisted.
@@ -393,6 +398,10 @@ type Totals struct {
 	Reasoning    int     `json:"reasoning"`
 	Cost         float64 `json:"cost"`     // USD at the effective price, for the priced calls
 	Unpriced     int     `json:"unpriced"` // calls with tokens but no known price
+	// Credits are what the vendors said Credited of the calls cost in
+	// their plans' own credits (Record.Credits): the rest said nothing
+	Credits  float64 `json:"credits,omitempty"`
+	Credited int     `json:"credited,omitempty"`
 	// Timed: the answered calls whose first token was timed (streamed),
 	// TTFT the sum of their ttft_ms; DecodeMs the time from it to the end
 	// of those that wrote any, over which DecodeOut tokens came (a
@@ -551,6 +560,18 @@ func (r Record) Decode() (tokens int, w int64) {
 	return DecodeOf(r.Output, r.Reasoning, r.Millis, r.TTFT, r.FirstText, r.Flow, r.FirstReasoning)
 }
 
+// FormatCredits is what t's credited calls cost in their plans' credits,
+// as their replies said (#2512): "" when none said.
+func FormatCredits(t Totals) string {
+	switch {
+	case t.Credited == 0:
+		return ""
+	case t.Credits > 0 && t.Credits < 0.01:
+		return "<0.01 credits"
+	}
+	return strconv.FormatFloat(math.Round(t.Credits*100)/100, 'f', -1, 64) + " credits"
+}
+
 // FormatCost renders an effective-price cost, kept in USD everywhere it's
 // stored, as the CLI and TUI show it: at amountUSD's own price when
 // currency isn't "cny", else converted at rate (CNY per one USD, from
@@ -613,6 +634,11 @@ const LoopErrType = "reply_loop"
 // count counts r as the request it ends: failed, answered on a retry, or
 // answered; a try handed on to another is no request of its own.
 func (t *Totals) count(r Record) {
+	// a try handed on is billed its credits too, though it is no request
+	if r.Credits != nil {
+		t.Credits += *r.Credits
+		t.Credited++
+	}
 	if r.HandedOn {
 		return
 	}
@@ -965,6 +991,10 @@ type Via struct {
 	Calls    int       `json:"calls"`
 	Tokens   int       `json:"tokens"` // in and out, as Totals counts them
 	Last     time.Time `json:"last"`
+	// Credits are what Credited of the calls cost in the plan's own
+	// credits, as their replies said (Record.Credits)
+	Credits  float64 `json:"credits,omitempty"`
+	Credited int     `json:"credited,omitempty"`
 }
 
 // Vias is what the gateway sent each session's calls to since a time, by
@@ -987,6 +1017,10 @@ func buildVias(snapshot *logSnapshot, since time.Time) map[string][]Via {
 		}
 		vs[i].Calls++
 		vs[i].Tokens += r.Input + r.Output
+		if r.Credits != nil {
+			vs[i].Credits += *r.Credits
+			vs[i].Credited++
+		}
 		if r.Time.After(vs[i].Last) {
 			vs[i].Last = r.Time
 		}

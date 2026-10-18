@@ -24,10 +24,10 @@ work got wrong and the rule that would have caught it.
 
 ## Built-in subscriptions that a plugin serves
 
-Some built-in subscriptions are deprecated. Reaching them can break their
-vendors' terms, so they are moving out of magpie into community OpenCode
-plugins, which keeps magpie itself from being banned. Each one has a plugin
-that does the same job:
+These built-in subscriptions are retired. Reaching them can break their
+vendors' terms, so they moved out of magpie into community OpenCode plugins,
+which keeps magpie itself from being banned. Each one has a plugin that does
+the same job:
 
 | Subscription | id | Plugin (npm) | Mover |
 | --- | --- | --- | --- |
@@ -58,17 +58,33 @@ Two cases decide it:
   (`unusedSub` in app.js), so it is installed from the Plugins page. A user
   who installs the plugin themselves is moved too
   (`provider.HandOver`): at once when the built-in has no accounts, from the
-  gateway's hourly loop (`KeepRetiringMoved`) when it has, unless they moved
-  back or the plugin is signed in under its own `-plugin` id already. Until
+  gateway's hourly loop (`KeepRetiringMoved`) when it has, unless the
+  plugin is signed in under its own `-plugin` id already. Until
   then the Add sheet shows the plugin's tile only (`replacedSub` in app.js).
-- **Not moved:** the user is still signed in through the built-in.
+  Since 10-16 the built-ins are being retired: the hourly loop's
+  `MoveRetiring` moves every subscription with a mover that still has
+  built-in accounts, a user who moved back included, and there is no way
+  back. Turning the plugin off turns the subscription off with it; removing
+  it records `removed` (accounts kept with the plugin's sign-ins), and
+  installing it again gives the subscription back.
+- **Not moved:** the user still has accounts from the built-in: the move
+  hasn't run yet, or it failed (tried again after six hours). Nothing
+  serves them until it runs.
+- **Retired:** the built-in's code is gone (`retiredBuiltins` in
+  `internal/provider/migrate.go`; `provider.BuiltinRetired(id)`). The
+  plugin serves it, moved or not. Accounts not moved yet are served by
+  nothing; a line over the Providers list says so, with why and a Move
+  (`providers.unmoved`, `unmovedLine` in app.js). With no row of its own,
+  the Add sheet leaves it to the Plugins page (`unusedSub`). Every
+  subscription in the table above is retired (10-17); gates ask
+  `provider.PluginServes(id)` (moved or retired).
 
-For a moved subscription, the plugin does everything: sign-in, refresh,
-models, requests, usage and errors. It runs in the plugin host
-(`internal/plugin`). The built-in's code in `internal/provider/<name>*.go`,
-`internal/gateway/<name>.go`, `internal/zed` and `internal/qoder` doesn't run
-for it at all. The gateway sends its requests to the plugin's fetch, not to
-the built-in's translator.
+The plugin does everything: sign-in, refresh, models, requests, usage and
+errors. It runs in the plugin host (`internal/plugin`). The built-ins'
+sign-in, models, usage and gateway translators are gone. What is left of
+them in `internal/provider` (and `internal/qoder/endpoints.go`) reads the
+built-in's saved accounts so the mover can carry them over. The gateway
+sends every request to the plugin's fetch.
 
 So a bug report about one of these subscriptions is usually about the
 plugin:
@@ -82,9 +98,6 @@ plugin:
    at `~/workspace/projects/magpie-commuity-plugins`). Publish a new version.
 3. Raise the mover's `min` to that version. `keepMovedCurrent` then updates
    every moved user's plugin.
-4. Make the same fix in the built-in only if it should also reach users who
-   haven't moved. A fix made only in the built-in does nothing for moved
-   users.
 
 This magpie-side code still runs for moved subscriptions:
 
@@ -95,5 +108,5 @@ This magpie-side code still runs for moved subscriptions:
 - the GUI's plugin paths in `internal/gui/assets/app.js`: `subOf`,
   `pluginSubs` and `startPluginSignIn`.
 
-A test against the built-in alone doesn't prove anything for moved users. To
-compare the two, use the parity tests: `internal/gateway/plugin_*_test.go`.
+The parity tests, `internal/gateway/plugin_*_test.go`, hold each plugin to
+what its built-in did.

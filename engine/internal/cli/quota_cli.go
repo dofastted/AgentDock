@@ -156,6 +156,10 @@ func printQuotas(qs []provider.Quota) {
 		}
 		if q.Balance != "" {
 			line += "  " + balanceCell(q.Balance, q.Provider, q.User)
+			if len(q.BalanceSplit) > 0 {
+				// what it is made of: DeepSeek's granted credit apart
+				line += muted.Render(" (" + provider.SplitWords(q.BalanceSplit) + ")")
+			}
 		}
 		if q.Resets != nil {
 			line += "  " + resetsCell(q.Resets, q.Provider, q.User)

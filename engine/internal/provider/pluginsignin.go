@@ -77,7 +77,7 @@ var pluginRunsCLI = map[string]bool{"grok": true}
 // through and this machine lacks: a moved built-in's, or one in
 // pluginRunsCLI.
 func pluginCLI(id string) (agentCLI, bool) {
-	if Moved(PluginID(id)) {
+	if PluginServes(PluginID(id)) {
 		return missingCLI(PluginID(id))
 	}
 	if pluginRunsCLI[id] {
@@ -140,6 +140,10 @@ func (s *signInFlow) pluginBegin(id string, method int, inputs map[string]string
 		// a browser that can't reach the plugin's port here ends on a page
 		// that won't load: its address finishes it
 		s.st.PasteCallback, s.pluginPorts = true, loopbackPorts(a.URL)
+	} else if m, keys, ok := pluginKeyMethod(id); ok && m != method {
+		// its page posts where nothing can be pasted: a key made on the
+		// keys page finishes it
+		s.st.PasteKey, s.st.KeysURL, s.pluginKey = true, keys, &pluginKeyWay{id: id, method: m}
 	}
 	s.mu.Unlock()
 	if a.Method == "code" {
