@@ -1943,7 +1943,6 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	// one in a shared ~/.agents/skills (or a link into it) stays there,
 	// linked to: the shared folder is the user's, never emptied. A native
 	// WSL folder is never moved into the Windows library.
-	keep := f.Link != "" || f.Shared != "" || nativeWSLSkill(f) || withinAnyShared(f.real)
 	switch {
 	case f.Library != "":
 		// in the library's folder already (#595): listed where it is, a
@@ -1951,7 +1950,7 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 		if !linked(f.Library) {
 			src = nil
 		}
-	case f.Link != "" || shared:
+	case f.Link != "" || f.Shared != "":
 		// linked through the way the agent's own link goes, not to where
 		// it ends today: an app that keeps its skills in a versioned
 		// folder points its own link at the new one when it updates
