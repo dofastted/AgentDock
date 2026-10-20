@@ -20681,6 +20681,16 @@ function renderImages(s, keep) {
     "the least it has", (e) => savePrefs({ ...keep, visionEffort: e }));
   r.append(who, val);
   box.append(r);
+  const fit = el("div", "row pref");
+  fit.id = "imageFitRow";
+  const fwho = el("div", "who");
+  fwho.append(el("div", "name", t("Fit large images")), el("div", "sub",
+    t("Off by default: images stay as sent, so Anthropic's prompt cache holds. On, each image sent to Anthropic is scaled to at most 2000px on its long side, from the first one, so a later image does not rewrite the ones already sent.")));
+  const fval = el("div", "val");
+  fval.append(segs([["off", t("Off")], ["on", t("On")]], s.imageFit ? "on" : "off",
+    (v) => savePrefs({ ...keep, imageFit: v === "on" })));
+  fit.append(fwho, fval);
+  box.append(fit);
   renderImageGen(s, keep, box);
   // the same image recognition as an MCP server of the gateway's (JonahFu
   // on X), for an agent to mount as its analyze_image tool
@@ -22158,7 +22168,7 @@ function prefsKeep(s) {
     codexWarmAts: warmTimes(s.codexWarmAts, s.codexWarmAt), claudeWarmAts: warmTimes(s.claudeWarmAts, s.claudeWarmAt), workbuddyCheckin: !!s.workbuddyCheckin, traeCheckin: !!s.traeCheckin, minimaxCheckin: !!s.minimaxCheckin, qoderCheckin: !!s.qoderCheckin, noStats: !!s.noStats, noUsageStats: !!s.noUsageStats,
     memberModel: !!s.memberModel, noLoopGuard: !!s.noLoopGuard, claudeLeanPrompt: !!s.claudeLeanPrompt, refusalRetries: s.refusalRetries ?? null,
     noUpdatePill: !!s.noUpdatePill, noAutoUpdate: !!s.noAutoUpdate, updateEvery: s.updateEvery || 360, autoRestart: !!s.autoRestart, noAutoDownload: !!s.noAutoDownload,
-    trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, trayPace: !!s.trayPace, trayNoCost: !!s.trayNoCost, vision: s.vision || "", visionEffort: s.visionEffort || "", searcherEffort: s.searcherEffort || "", imageGen: s.imageGen || "", searcher: s.searcher || "", searchFirst: s.searchFirst || "", currency: s.currency || "usd",
+    trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, trayPace: !!s.trayPace, trayNoCost: !!s.trayNoCost, vision: s.vision || "", visionEffort: s.visionEffort || "", searcherEffort: s.searcherEffort || "", imageGen: s.imageGen || "", imageFit: !!s.imageFit, searcher: s.searcher || "", searchFirst: s.searchFirst || "", currency: s.currency || "usd",
     chineseUnits: !!s.chineseUnits, usageAlert: s.usageAlert || 0, balanceAlert: s.balanceAlert || 0, resetReminder: s.resetReminder || 0,
     turnDoneAlert: s.turnDoneAlert || 0 };
 }

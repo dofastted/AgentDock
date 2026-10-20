@@ -32,8 +32,11 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/appdir/appdir_test.go` | data-dir isolation |
 | `internal/appdir/env.go` | inherited CLI env is not rewritten to the engine dir |
 | `internal/appdir/env_test.go` | data-dir isolation |
-| `internal/gui/api.go` | `environmentRoutes`; native routes |
-| `internal/gui/assets/i18n.js` | Environments name/sub in zh, zh-TW, ja, de |
+| `internal/gui/api.go` | `environmentRoutes`; native routes; a settings save that omits `imageFit` keeps it |
+| `internal/gateway/gateway.go` | calls `anthropicImagesFit` on the final Anthropic body |
+| `internal/gui/assets/app.js` | Settings › Models › Images › Fit large images, default Off |
+| `internal/gui/assets/i18n.js` | Environments name/sub in zh, zh-TW, ja, de; Fit large images |
+| `docs/subsystems/gateway-routing.md` | why Fit large images defaults to off |
 | `internal/gui/assets/icons/favicon.svg` | AgentDock icon |
 | `internal/gui/assets/index.html` | AgentDock title, Environments nav, plugin tags |
 | `internal/gui/assets/plugins/library/client.js` | WSL chip reason; native inventory UI |
@@ -52,7 +55,7 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/library/targets.go` | WSL shared/private/profile roots and capabilities; `targetKind` strips `@wsl` and profile. 2026-10-16 pull also kept upstream `SharedName` |
 | `internal/library/wsl_test.go` | target regression |
 | `internal/sessions/wsl.go` | a distro turned off lists no sessions |
-| `internal/settings/settings.go` | `WSLDistrosOff`, kept in `KeepOwn` |
+| `internal/settings/settings.go` | `WSLDistrosOff`, kept in `KeepOwn`; `ImageFit`, off when unset |
 | `internal/testenv/testenv.go` | tests see the isolated data dir |
 | `internal/wslrun/wslrun.go` | `Find` skips distros turned off |
 | `internal/wslrun/wslrun_test.go` | `TestFindSkipsDistroOff` |
@@ -63,6 +66,8 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 No upstream counterpart at split `422d057`.
 
 - `AGENTDOCK_PATCHES.md`
+- `internal/gateway/anthropic_images.go` — scale oversized Anthropic images only when `ImageFit` is on
+- `internal/gateway/anthropic_images_test.go` — default-off and the fifth-image gate
 - `internal/agent/environments.go`
 - `internal/agent/wsl_discovery_test.go`
 - `internal/agent/wsl_distros_off_test.go`

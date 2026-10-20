@@ -372,6 +372,26 @@ Covered by `TestPickedSearcherIsNotHandedOn`,
 `TestSearchInPlaceOfAutoSaysWhy`, `TestSearcherFindingNothingGivesWay`,
 `search-instead.test.cjs` and `searcher-pick.test.cjs`.
 
+## Fitting images on a long Anthropic chat
+
+Settings › Models › Images › Fit large images (`imageFit` in
+[settings](../../internal/settings/settings.go)) is off by default.
+Off, an image goes as the agent sent it, through `forwardOnce`.
+On, every inline image whose long side is over 2000px is scaled to 2000
+before it is sent to an Anthropic messages API, PNG as PNG and JPEG as
+JPEG, a GIF as PNG, from the first such image. Anthropic's stricter
+2000px limit applies when a request has more than 20 images, not at 5.
+Starting to scale only after several images have piled up (the report was
+five) rewrites images already in the conversation, so the prompt cache
+misses from the first changed image on. That is why the default is off,
+and why turning it on does not wait for a count.
+`anthropicImagesFit` in
+[`anthropic_images.go`](../../internal/gateway/anthropic_images.go) splices
+only those image bytes; the rest of the JSON is unchanged. A scaled image is
+remembered, so the next turn sends the same bytes.
+`TestGatewayImageBytesSurviveAddingImages` posts four images and then five
+through the gateway and checks the upstream body.
+
 ## How hard a side model thinks
 
 Settings › Models has a chip beside Image recognition's model and the

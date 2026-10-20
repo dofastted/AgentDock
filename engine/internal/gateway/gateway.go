@@ -3806,6 +3806,11 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		m := gjson.GetBytes(body, "model").String()
 		base = provider.MantleBase(base, m, !s.fits(p.ID, mantleRouteKey(m), to))
 	}
+	if to == provider.Anthropic {
+		// off unless Settings asks: scaling an image already sent breaks
+		// Anthropic's prompt cache (anthropicImagesFit)
+		body = anthropicImagesFit(body)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

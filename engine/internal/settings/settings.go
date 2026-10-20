@@ -303,6 +303,12 @@ type Settings struct {
 	// "off" turns the video a request that names no model gets off too
 	// (gateway.videomaker).
 	ImageGen string `json:"imageGen,omitempty"`
+	// ImageFit scales an inline image whose long side is over 2000px down
+	// to 2000 before it is sent to an Anthropic messages API. Off by
+	// default. It does not start only after several images have arrived:
+	// that rewrites images already in the conversation, so Anthropic's
+	// prompt cache misses from the first of them on. Settings › Models › Images.
+	ImageFit bool `json:"imageFit,omitempty"`
 	// Searcher is the provider that searches the web for a model that
 	// can't: "<provider>" with the small model magpie picks of it,
 	// "<provider>/<model>", or empty for the one magpie picks
