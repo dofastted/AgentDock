@@ -177,7 +177,13 @@ func scaleAnthropicImage(b64, media string) (string, string, bool) {
 		return "", "", true
 	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
-	if err != nil || cfg.Width < 1 || cfg.Height < 1 || cfg.Width*cfg.Height > codexImageMaxPixels {
+	if err != nil {
+		return "", "", true
+	}
+	// codexImageMaxPixels left with the pixel cap; a decode is limited by
+	// what the header says it will hold (codexImageMaxBytes).
+	holds, ok := imageHolds(cfg, format)
+	if !ok || len(raw)+holds > codexImageMaxBytes {
 		return "", "", true
 	}
 	w, h := fitLongSide(cfg.Width, cfg.Height, imageFitSide)

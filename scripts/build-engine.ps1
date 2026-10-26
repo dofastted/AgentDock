@@ -15,6 +15,7 @@ $env:CGO_ENABLED = '0'
 Push-Location $engineDir
 try {
     go build -tags nogui -trimpath -o $out .
+    if ($LASTEXITCODE -ne 0) { throw "go build failed: $LASTEXITCODE" }
 } finally {
     Pop-Location
 }

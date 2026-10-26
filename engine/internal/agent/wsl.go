@@ -1424,8 +1424,8 @@ func WSLListError() string {
 // distro, known by the same User-Agent.
 func wslClaudeClassifier(model string) string {
 	set := settings.Load()
+	wslRefreshRunning()
 	wsl.Lock()
-	wslRunningLocked()
 	var ds []distro
 	for _, n := range wsl.names {
 		if d := wsl.seen[n]; d != nil && wsl.running[n] && !set.WSLDistroOff(n) && wslKindOf("claude").found(*d) {
