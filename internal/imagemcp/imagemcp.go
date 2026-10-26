@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Folder is where images go in the project when no path is given, and
@@ -37,11 +38,19 @@ const (
 	VideoFolder = "generated-videos"
 )
 
+// The tools and their arguments are the gateway's image MCP server's too
+// (gateway.ImageMCPPath), but where to save, which only this server can.
 const (
-	tool       = "generate_image"
-	videoTool  = "generate_video"
-	resultTool = "generation_result"
+	tool       = gateway.GenerateImageTool
+	videoTool  = gateway.GenerateVideoTool
+	resultTool = gateway.GenerationResultTool
 )
+
+// withPath is props with path, where to save, said as what.
+func withPath(props map[string]any, what string) map[string]any {
+	props["path"] = map[string]any{"type": "string", "description": what}
+	return props
+}
 
 // answerWithin is how long a tool call waits for its image or video before
 // it answers that it is still being made, with the job's id to ask after
@@ -70,14 +79,8 @@ var videoSchema = map[string]any{
 		"/ unless path says where) and its path is returned; when it is not ready within about 20 seconds, the answer is an id to wait on with " + resultTool + " instead. Describe the subject, the motion and the camera: what moves, how, and what the shot is.",
 	"inputSchema": map[string]any{
 		"type": "object",
-		"properties": map[string]any{
-			"prompt":           map[string]any{"type": "string", "description": "What happens in the video: the subject, its motion, the camera."},
-			"path":             map[string]any{"type": "string", "description": "Where to save it: a file (e.g. assets/intro.mp4) or a folder, relative to the project or absolute. Never written over."},
-			"seconds":          map[string]any{"type": "integer", "minimum": 1, "maximum": 15, "description": "Length in whole seconds (1-15). Default: the model's (about 8)."},
-			"size":             map[string]any{"type": "string", "description": "An aspect ratio (16:9, 9:16, 1:1, 4:3, 3:4, 3:2, 2:3) or WIDTHxHEIGHT (1280x720; its shorter side picks 480p, 720p or 1080p). Default: the model's."},
-			"image":            map[string]any{"type": "string", "description": "An image to animate, the video's first frame: a file path (relative to the project or absolute) or an http(s) URL."},
-			"reference_images": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Images the video's subjects are drawn from: file paths or http(s) URLs."},
-		},
+		"properties": withPath(gateway.VideoToolProps("a file path (relative to the project or absolute) or an http(s) URL", "file paths or http(s) URLs"),
+			"Where to save it: a file (e.g. assets/intro.mp4) or a folder, relative to the project or absolute. Never written over."),
 		"required": []string{"prompt"},
 	},
 }
@@ -87,11 +90,9 @@ var resultSchema = map[string]any{
 	"description": "Wait for an image or video that " + tool + " or " + videoTool + " said is still being made, by the id it gave, and get where it was saved. " +
 		"It answers within about " + strconv.Itoa(int(answerWithin/time.Second)) + " seconds: if it is still not ready, call this again with the same id (don't generate it again).",
 	"inputSchema": map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"id": map[string]any{"type": "string", "description": "The id " + tool + " or " + videoTool + " answered with."},
-		},
-		"required": []string{"id"},
+		"type":       "object",
+		"properties": gateway.ResultToolProps(),
+		"required":   []string{"id"},
 	},
 }
 
@@ -102,15 +103,8 @@ var schema = map[string]any{
 		"reference it from code or docs by that path. Write a detailed prompt: subject, style, composition, colours, any text to render exactly.",
 	"inputSchema": map[string]any{
 		"type": "object",
-		"properties": map[string]any{
-			"prompt":           map[string]any{"type": "string", "description": "What to draw, or how to change the reference images."},
-			"path":             map[string]any{"type": "string", "description": "Where to save it: a file (e.g. assets/hero.png) or a folder, relative to the project or absolute. With n > 1 a number is added to the name."},
-			"size":             map[string]any{"type": "string", "description": "WIDTHxHEIGHT (1024x1024, 1536x1024, 1024x1536) or an aspect ratio (16:9). Default: the model's."},
-			"n":                map[string]any{"type": "integer", "minimum": 1, "maximum": 4, "description": "How many images (default 1)."},
-			"reference_images": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Images to edit or draw from: file paths or http(s) URLs."},
-			"quality":          map[string]any{"type": "string", "description": "low, medium, high or auto, for models that take it."},
-			"background":       map[string]any{"type": "string", "description": "transparent, opaque or auto, for models that take it."},
-		},
+		"properties": withPath(gateway.ImageToolProps("file paths or http(s) URLs"),
+			"Where to save it: a file (e.g. assets/hero.png) or a folder, relative to the project or absolute. With n > 1 a number is added to the name."),
 		"required": []string{"prompt"},
 	},
 }
@@ -209,6 +203,18 @@ func stillGoing(j *job) string {
 // (Codex, Goose) are still given it, as a call's ceiling.
 func ToolTimeout() time.Duration { return videoWait + time.Minute }
 
+// callLongest is the most a call of this server to the gateway may take,
+// and how long a job left running is waited for once the agent has gone.
+// The gateway gives a vendor up to Settings' Image generation timeout to
+// draw (settings.ImageTimeoutMost minutes at the most), and may then fetch
+// what it drew for as long again (gateway.FetchImage): a call is cut only
+// past both. The gateway ends it at the user's own timeout; this server
+// may run where the settings aren't (an agent in WSL), so it never cuts a
+// drawing the setting allows (neighbads on X).
+func callLongest() time.Duration {
+	return max(ToolTimeout(), 2*settings.ImageTimeoutMost*time.Minute+time.Minute)
+}
+
 // Run serves MCP on stdin/stdout until stdin closes.
 func Run(args []string) error {
 	if len(args) > 0 && args[0] != "image" {
@@ -225,17 +231,14 @@ func Run(args []string) error {
 	if base == "" {
 		base = gateway.URL()
 	}
-	// the gateway draws for up to 5 minutes and may then fetch what the
-	// vendor drew for up to 5 more (gateway.ImageLongest): a call to it
-	// is cut only past both
-	s := &server{gateway: base, client: &http.Client{Timeout: ToolTimeout()}, enc: json.NewEncoder(os.Stdout), agent: gateway.DrawAgent, pending: map[string]chan rpc{}}
+	s := &server{gateway: base, client: &http.Client{Timeout: callLongest()}, enc: json.NewEncoder(os.Stdout), agent: gateway.DrawAgent, pending: map[string]chan rpc{}}
 	err := s.serve(os.Stdin)
 	// what is still being made is saved, though the agent has gone
 	done := make(chan struct{})
 	go func() { s.running.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(ToolTimeout()):
+	case <-time.After(callLongest()):
 	}
 	return err
 }
@@ -611,6 +614,14 @@ func reference(project, ref string) (string, error) {
 		return "", fmt.Errorf("reference image %s isn't an image (%s)", ref, mt)
 	}
 	return "data:" + mt + ";base64," + base64.StdEncoding.EncodeToString(b), nil
+}
+
+// Target is where the i-th of n files made from prompt, of extension ext,
+// goes under dir: path as a file (numbered when n > 1) or a folder, else a
+// name from the prompt in dir's generated-images/ (generated-videos/);
+// never a file that is there. `magpie tool` saves what it is given by it.
+func Target(dir, path, prompt, ext string, i, n int) (string, error) {
+	return target(dir, path, prompt, ext, i, n)
 }
 
 var unslug = regexp.MustCompile(`[^a-z0-9]+`)

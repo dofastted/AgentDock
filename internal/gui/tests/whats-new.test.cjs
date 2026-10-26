@@ -35,7 +35,10 @@ const NOTES_604 = [
 ].join("\n");
 const RELEASES = [
   { version: "0.1.604", notes: NOTES_604, url: "https://github.com/yetone/magpie-releases/releases/tag/v0.1.604" },
-  { version: "0.1.603", notes: "## Bug Fixes\n\n- Fixed reading Kimi keys. (#446)" },
+  // the Chinese notes' translation words a heading its own way, or keeps
+  // the English (Wei He on Discord); a heading magpie doesn't know reads as
+  // written
+  { version: "0.1.603", notes: "## 缺陷修复\n\n- Fixed reading Kimi keys. (#446)\n\n## Bug fixes:\n\n- Another.\n\n## Thanks\n\n- @someone" },
 ];
 
 function settingsPayload(lang) {
@@ -71,7 +74,10 @@ function serve(lang, ctl) {
       const all = url.searchParams.has("all");
       ctl.asked.push(all ? "all" : "start");
       const show = ctl.upgraded && !ctl.seen && !all;
-      return json({ show, current: "0.1.604", releases: show || (all && ctl.upgraded) ? RELEASES : all ? [RELEASES[0]] : [] });
+      const releases = show || (all && ctl.upgraded) ? RELEASES : all ? [RELEASES[0]] : [];
+      // Settings' ask: the app puts every release up to the waiting update
+      // first, marked pending (小八: 0.1.1399 to 0.1.1408 were missing)
+      return json({ show, current: "0.1.604", releases: all && ctl.ahead ? [...ctl.ahead, ...releases] : releases });
     }
     if (url.pathname === "/api/whatsnew/seen") { ctl.seen++; return route.fulfill({ status: 204 }); }
     if (url.pathname === "/api/whatsnew/today") { (ctl.today ||= []).push(req.postDataJSON().on); return route.fulfill({ status: 204 }); }
@@ -83,9 +89,12 @@ function serve(lang, ctl) {
   };
 }
 
+// a merged section's heading and how many lines it has
+const heads = (box) => box.locator(".wn-h").evaluateAll((hs) => hs.map((h) => [h.firstChild.textContent, h.querySelector(".wn-n")?.textContent]));
+
 const words = {
-  en: { quiet: "Don't show again today", title: "What's new in v0.1.604", pendingTitle: "What's new in v0.1.605", close: "Close", again: "What's new", open: "Open", pending: "Not installed yet" },
-  zh: { quiet: "今天不再弹出", title: "v0.1.604 更新内容", pendingTitle: "v0.1.605 更新内容", close: "关闭", again: "更新内容", open: "打开", pending: "尚未安装" },
+  en: { span: "2 releases · v0.1.603 – v0.1.604", heads: [["Improvements", "1"], ["Bug Fixes", "4"], ["Thanks", "1"]], span5: "5 releases · v0.1.603 – v0.1.607", headsPending: [["Features", "1"], ["Improvements", "1"], ["Bug Fixes", "4"], ["Changes", "2"], ["Thanks", "1"]], quiet: "Don't show again today", title: "What's new in v0.1.604", pendingTitle: "What's new in v0.1.607", close: "Close", again: "What's new", open: "Open", pending: "Not installed yet" },
+  zh: { span: "2 个版本 · v0.1.603 – v0.1.604", heads: [["改进", "1"], ["错误修复", "4"], ["Thanks", "1"]], span5: "5 个版本 · v0.1.603 – v0.1.607", headsPending: [["新功能", "1"], ["改进", "1"], ["错误修复", "4"], ["更新", "2"], ["Thanks", "1"]], quiet: "今天不再弹出", title: "v0.1.604 更新内容", pendingTitle: "v0.1.607 更新内容", close: "关闭", again: "更新内容", open: "打开", pending: "尚未安装" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -159,15 +168,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-whats-new.png`) });
       }
       assert.equal(await dialog(page).locator(".ehead b").textContent(), w.title);
-      assert.deepEqual(await dialog(page).locator(".wn-ver b").allTextContents(), ["v0.1.604", "v0.1.603"]);
+      // the releases merged (the owner): one heading per kind with how
+      // many, each line with the version it came in, newest first
+      assert.equal(await dialog(page).locator(".wn-span").textContent(), w.span);
+      assert.equal(await dialog(page).locator(".wn-ver").count(), 0, "a release each, not merged");
       const notes = dialog(page).locator(".wn-rel").first();
-      assert.deepEqual(await notes.locator(".wn-h").allTextContents(), ["Bug Fixes", "Improvements"]);
-      assert.equal(await notes.locator("li").count(), 3);
+      // every release's headings in the page's language, however its notes say them
+      assert.deepEqual(await heads(notes), w.heads);
+      assert.deepEqual(await notes.locator("li .wn-v").allTextContents(), ["v0.1.604", "v0.1.604", "v0.1.604", "v0.1.603", "v0.1.603", "v0.1.603"]);
+      assert.equal(await notes.locator("li").count(), 6);
       assert.equal(await notes.locator("li b").first().textContent(), "model picks");
       assert.equal(await notes.locator("li code").first().textContent(), "providers.json");
       // HTML is text
       assert.equal(await dialog(page).locator("img, li > b:has-text('raw')").count(), 0, "no HTML from the notes");
-      assert((await notes.locator("li").nth(1).textContent()).startsWith('<img src=x onerror="window.__pwned=1"> <b>raw</b> tags stay text.'));
+      assert((await notes.locator("li", { hasText: "tags stay text" }).textContent()).startsWith('<img src=x onerror="window.__pwned=1"> <b>raw</b> tags stay text.'));
       // links: issues, markdown http(s) links; javascript: is text
       const issue = notes.getByRole("link", { name: "#464" });
       assert.equal(await issue.getAttribute("href"), "https://github.com/yetone/magpie/issues/464");
@@ -211,7 +225,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await dialog(page).count(), 0, "shown once");
 
       // Settings → What's new → Open opens them again, the waiting update's first
-      ctl.update = { state: "ready", current: "0.1.604", latest: "0.1.605", notes: "## New Features\n\n- A new thing. (#470)", url: "https://github.com/yetone/magpie-releases/releases/tag/v0.1.605" };
+      ctl.update = { state: "ready", current: "0.1.604", latest: "0.1.607", notes: "## New Features\n\n- A new thing. (#470)", url: "https://github.com/yetone/magpie-releases/releases/tag/v0.1.607" };
+      ctl.ahead = [
+        { version: "0.1.607", notes: ctl.update.notes, url: ctl.update.url, pending: true },
+        { version: "0.1.606", notes: "- Six.", pending: true },
+        { version: "0.1.605", notes: "- Five.", pending: true },
+      ];
       await watchSettingsReads(page);
       await page.goto("http://magpie.test/?view=settings&tab=about");
       await settingsDrawn(page); // rows found are the ones that stay (#1659)
@@ -235,8 +254,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await dialog(page).waitFor();
       assert.equal(await view.evaluate((v) => v.scrollTop), at, "the click moved the page");
       assert.equal(await dialog(page).locator(".ehead b").textContent(), w.pendingTitle);
-      assert.deepEqual(await dialog(page).locator(".wn-ver b").allTextContents(), ["v0.1.605", "v0.1.604", "v0.1.603"]);
-      assert.equal(await dialog(page).locator(".wn-rel").first().locator(".badge").textContent(), w.pending);
+      assert.equal(await dialog(page).locator(".wn-span").textContent(), w.span5);
+      assert.deepEqual(await dialog(page).locator(".wn-ver").allTextContents(), ["v0.1.605 – v0.1.607" + w.pending], "every release up to the update is not installed yet");
+      assert.deepEqual(await heads(dialog(page).locator(".wn-rel").first()), w.headsPending);
       assert.equal(ctl.asked.at(-1), "all");
       assert.equal(ctl.seen, 1, "asking again isn't a first showing");
       assert.equal(await dialog(page).getByRole("checkbox").count(), 0, "Settings' notes have no \"don't show again today\"");
@@ -246,7 +266,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.keyboard.press("Escape");
       await page.locator("#modal").waitFor({ state: "hidden" });
 
-      const missing = await page.evaluate(() => ["What's new", "What's new in {v}", "The release notes since the last update", "Not installed yet", "Couldn't load the release notes", "Don't show again today"].filter((k) => !I18N.zh[k]));
+      const missing = await page.evaluate(() => ["What's new", "What's new in {v}", "The release notes since the last update", "Not installed yet", "Couldn't load the release notes", "Don't show again today", ...Object.keys(NOTE_HEADINGS)].filter((k) => !I18N.zh[k]));
       assert.deepEqual(missing, [], "every string has its Chinese");
       assert.deepEqual(errors, []);
     });

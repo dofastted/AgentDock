@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy masking · magpie docs</title>
+<meta name="description" content="How to turn on magpie's local privacy masking: what it masks before a request leaves your computer, how values come back in replies, how to check it worked, and its limits.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fafafa">
+<script>
+(() => {
+  let mode = "system";
+  try { mode = localStorage.getItem("theme") || "system"; } catch {}
+  const q = matchMedia("(prefers-color-scheme: dark)");
+  const apply = () => {
+    const t = mode === "system" ? (q.matches ? "dark" : "light") : mode;
+    document.documentElement.dataset.theme = t;
+    document.querySelector('meta[name="theme-color"]').content = t === "dark" ? "#0b0b0c" : "#fafafa";
+    document.querySelectorAll("button.theme").forEach((b) => { b.dataset.mode = mode; b.title = "Theme: " + mode; });
+  };
+  q.addEventListener("change", () => mode === "system" && apply());
+  window.setTheme = (m) => { mode = m; try { m === "system" ? localStorage.removeItem("theme") : localStorage.setItem("theme", m); } catch {} apply(); };
+  window.themeMode = () => mode;
+  apply();
+})();
+</script>
+<script>try{if(/Linux/.test(navigator.userAgent)&&!/Android/.test(navigator.userAgent)||localStorage.getItem("omarchy")||/[?&]omarchy=/.test(location.search))document.write('<script src="/omarchy.js"><\/script>')}catch(e){}</script>
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="/img/icon-256.png">
+<link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/masking">
+<link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/masking">
+<link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/masking">
+<link rel="stylesheet" href="/docs.css">
+<meta property="og:title" content="Privacy masking">
+<meta property="og:description" content="Keep keys, passwords and personal data on your computer: masked before a request leaves it, restored in the reply.">
+<meta property="og:image" content="https://usemagpie.ai/img/og.png">
+<meta property="og:url" content="https://usemagpie.ai/docs/masking">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="brand" href="/"><img class="bird" src="/img/magpie-small.svg" alt="">magpie <small>Docs</small></a>
+  <div class="links">
+    <a href="/">Home</a>
+    <a href="/docs/start">Get started</a>
+    <a href="/docs/intent">Intent routing</a>
+    <a href="/docs/plugins">Plugins</a>
+    <a class="toc-only" href="/docs/remote">Remote magpie</a>
+    <a class="toc-only" href="/docs/docker">Docker</a>
+    <a class="toc-only" href="/docs/privacy">Privacy</a>
+    <a class="toc-only" href="/docs/masking">Privacy masking</a>
+    <a href="/docs/import">Add to magpie</a>
+    <a href="/docs/integrate">Integrate</a>
+    <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
+  </div>
+  <div class="langs">
+    <button class="icon-btn lang" type="button" aria-label="Language" title="Language" aria-haspopup="true" aria-expanded="false" aria-controls="langs"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M1.75 8h12.5M8 1.75c1.7 1.75 2.55 3.83 2.55 6.25S9.7 12.5 8 14.25M8 1.75C6.3 3.5 5.45 5.58 5.45 8S6.3 12.5 8 14.25"/></svg></button>
+    <div class="lang-menu" id="langs" hidden>
+      <a href="/docs/masking" hreflang="en" lang="en">English</a>
+      <a href="/docs/zh/masking" hreflang="zh" lang="zh">中文</a>
+      <a href="/docs/ja/masking" hreflang="ja" lang="ja">日本語</a>
+    </div>
+  </div>
+  <a class="icon-btn" href="https://discord.gg/vGSnD3ZKQF" aria-label="magpie on Discord" title="Join us on Discord"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a>
+  <a class="icon-btn" href="https://github.com/yetone/magpie" aria-label="magpie on GitHub" title="Source on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></a>
+  <button class="icon-btn theme" type="button" aria-label="Theme" title="Theme: system"><svg class="i-system" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.25V14"/></svg><svg class="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1 1M12 12l1 1M3 13l1-1M12 4l1-1"/></svg><svg class="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/></svg></button>
+  <a class="btn small" href="/#get">Download</a>
+</div></nav>
+
+<main class="wrap doc">
+  <aside class="toc">
+    <p>Privacy masking</p>
+    <a href="#overview">Overview</a>
+    <a href="#on">Turn it on</a>
+    <a href="#what">What is masked</a>
+    <a href="#example">An example</a>
+    <a href="#check">Check that it works</a>
+    <a href="#found">When a value is found</a>
+    <a href="#limits">What it leaves alone, and limits</a>
+  </aside>
+
+  <article>
+    <p class="eyebrow" id="overview">Docs · Privacy masking</p>
+    <h1>Privacy masking</h1>
+    <p class="lede">magpie can mask what your agents send before it leaves this computer. API keys, passwords and tokens, and when you ask, emails, phone numbers and words of your own, go to the vendor as placeholders such as <code>{{API_KEY_es6eu6jk}}</code>. In the reply each placeholder turns back into its value, so your agent and your files keep the real thing and the vendor never sees it. It runs on this computer, in magpie’s gateway, and is <b>off by default</b>.</p>
+
+    <div class="callout"><b>It covers what goes through magpie.</b> An agent <a href="/docs/start">connected to magpie</a> sends its requests through the gateway, and they are masked whichever provider or account answers. An agent that calls a vendor directly, not through magpie, is not covered.</div>
+
+    <h2 id="on"><a class="anchor" href="#on">Turn it on</a></h2>
+    <ol class="steps">
+      <li><b>Open the page</b>Go to <span class="ui">Settings</span> → <span class="ui">Privacy</span>.</li>
+      <li><b>Mask secrets</b>Under <span class="ui">What to mask</span>, set <span class="ui">Mask secrets</span> to <span class="ui">On</span>: API keys, private keys, tokens and passwords.</li>
+      <li><b>Personal data, if you want it</b>Set <span class="ui">Mask personal data</span> to <span class="ui">On</span> for emails, phone numbers, ID and bank card numbers. Each further kind of personal data then gets its own switch below it.</li>
+      <li><b>Your own words</b>In <span class="ui">Masked words</span>, list names, codenames or hosts to keep from vendors, separated by commas. <span class="ui">Masked words in any case</span> makes <em>Nightjar</em> mask <em>NIGHTJAR</em> too. A secret magpie doesn’t know, such as your gateway’s own keys, goes under <span class="ui">Masking rules</span>: what it starts with, or a regular expression.</li>
+      <li><b>Try it</b>Paste a text into <span class="ui">Try it</span> to see exactly what the vendor would get. What you paste there isn’t kept.</li>
+    </ol>
+    <p>It applies from the next request, with no restart and nothing to change in your agent. The work is done by the built-in plugin <span class="ui">Privacy masking</span> (<code>redact</code>, in <span class="ui">Settings</span> → <span class="ui">Plugins</span>), which is on whenever any masking is asked for.</p>
+    <p>There is no CLI command for it. Without the window (<code>magpie serve</code>, <a href="/docs/docker">Docker</a>), open the same page with <code>magpie web</code>, or set it in <code>~/.config/magpie/settings.json</code> (<code>/config/magpie/settings.json</code> in Docker). The masker reads the file on every request:</p>
+    <div class="code">
+      <span class="lang">settings.json</span>
+      <button class="copy" data-copy="ex-settings">Copy</button>
+      <pre id="ex-settings">{
+  <span class="s">"redact"</span>: true,
+  <span class="s">"redactPersonal"</span>: true,
+  <span class="s">"redactWords"</span>: [<span class="s">"Nightjar"</span>, <span class="s">"db.acme-corp.cn"</span>]
+}</pre>
+    </div>
+
+    <h2 id="what"><a class="anchor" href="#what">What is masked</a></h2>
+    <div class="table-wrap"><table>
+      <tr><th>Switch</th><th>What it finds</th></tr>
+      <tr><td><span class="ui">Mask secrets</span></td><td>Private key blocks (<code>-----BEGIN … PRIVATE KEY-----</code>). API keys by their shape: <code>sk-…</code> (OpenAI, Anthropic, OpenRouter), <code>ghp_</code>/<code>github_pat_</code>, <code>glpat-</code>, <code>AIza…</code>, <code>xox…-</code>, <code>sk_live_</code>, <code>AKIA</code>/<code>ASIA</code>, <code>hf_</code>, <code>gsk_</code>, <code>xai-</code>, <code>npm_</code>, <code>pypi-</code>, <code>dop_v1_</code>, <code>SG.</code>, and relay keys like <code>oc_sk_…</code>. JWTs. The password in <code>user:password@host</code>. The value of a field named for a secret, as <code>.env</code> files and configs have them: <code>DB_PASSWORD=…</code>, <code>api_key: …</code>, <code>client_secret</code>, <code>token</code>, <code>credential</code>. Your own <span class="ui">Masking rules</span>.</td></tr>
+      <tr><td><span class="ui">Mask personal data</span></td><td>Emails, mainland China mobile numbers, Chinese ID numbers and bank card numbers whose checksum adds up. Also on by default: US Social Security numbers, passport numbers (after <em>passport</em>, 护照 or パスポート), IBANs, birthdays (next to <em>birthday</em>, <em>DOB</em> or 生日, and over a year ago, so today&rsquo;s date stays), MAC addresses and serial numbers (after <em>S/N</em>). Off until you turn them on, since agents send them in nearly every request: the user name in home folders, user and computer names (<code>user@host</code>), public IP addresses and cloud storage buckets.</td></tr>
+      <tr><td><span class="ui">Masked words</span></td><td>Each word you listed, exactly, as <code>{{TERM_…}}</code>.</td></tr>
+      <tr><td><span class="ui">Find with a local model</span></td><td>Under <span class="ui">How it’s found</span>. A model on this computer finds what no rule can: a name or an address in free text. It needs <span class="ui">Mask secrets</span> or <span class="ui">Mask personal data</span> on, and finds under the same switches. The menu beside it picks the model: AstrLink Guard (Chinese and English, a 39 MB download, few false alarms in code; the default) or OpenAI’s Privacy Filter (1.6 GB, uses the GPU, masks more ordinary values in code).</td></tr>
+    </table></div>
+    <p>A placeholder is the kind plus eight characters of a keyed hash. The same value gets the same placeholder every time, so the conversation reads the same turn after turn and the vendor’s prompt cache stays valid. The values are held in memory only.</p>
+
+    <h2 id="example"><a class="anchor" href="#example">An example</a></h2>
+    <p>With <span class="ui">Mask secrets</span> and <span class="ui">Mask personal data</span> on and <em>Nightjar</em> in <span class="ui">Masked words</span>, your agent sends:</p>
+    <div class="code">
+      <span class="lang">Your agent sends</span>
+      <pre>Deploy Nightjar with OPENAI_API_KEY=sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd, then mail li.wei@acme-corp.cn or call 13800138000.</pre>
+    </div>
+    <div class="code">
+      <span class="lang">The vendor gets</span>
+      <pre>Deploy {{TERM_5hmsrhdc}} with OPENAI_API_KEY={{API_KEY_srhjgvja}}, then mail {{EMAIL_eh5um6mb}} or call {{PHONE_uf7iy2qq}}.</pre>
+    </div>
+    <p>When the model answers <em>“I set OPENAI_API_KEY to {{API_KEY_srhjgvja}} in .env”</em>, your agent reads the real key there, in streamed text and tool-call arguments alike, so the file it writes has the real key. A placeholder the model rewrote a little (spaces inside the braces, another case) is still turned back.</p>
+
+    <h2 id="check"><a class="anchor" href="#check">Check that it works</a></h2>
+    <ul>
+      <li><b>Before:</b> <span class="ui">Try it</span> on <span class="ui">Settings</span> → <span class="ui">Privacy</span> shows the text as the vendor would get it, with each value’s kind.</li>
+      <li><b>Each request:</b> a shield badge with a count appears on the request in the <span class="ui">Gateway</span> page’s recent calls and in the <span class="ui">Routing</span> log. Point at it for the kinds; click it to open the request’s record.</li>
+      <li><b>Over time:</b> <span class="ui">Insights</span> → <span class="ui">Masking</span> (also <span class="ui">What was masked</span> on the Privacy page) shows the values masked over 7 or 30 days by kind, agent and provider, and each request’s text as the vendor saw it, placeholders marked.</li>
+    </ul>
+    <p>The records are kept in <code>~/.config/magpie/masking</code> for 30 days: the agent, provider, model, and each placeholder’s kind, length and first characters, never the value.</p>
+
+    <h2 id="found"><a class="anchor" href="#found">When a value is found</a></h2>
+    <p>Under <span class="ui">When a value is found</span>, choose per kind:</p>
+    <ul>
+      <li><span class="ui">Mask</span> (the default): sent as a placeholder.</li>
+      <li><span class="ui">Warn</span>: sent as written, and the badge counts it in amber.</li>
+      <li><span class="ui">Block</span>: the request is held back with a 400, <em>“magpie held this request back: Settings › Privacy blocks API_KEY, and it has one (sk-…, 33 characters). Nothing was sent.”</em> The message never has the value.</li>
+    </ul>
+    <p>A value the task needs as it is, such as a team address or a test key, goes in <span class="ui">Never mask</span>: it is sent as written wherever it is found whole.</p>
+
+    <h2 id="limits"><a class="anchor" href="#limits">What it leaves alone, and limits</a></h2>
+    <ul>
+      <li><b>Thinking stays as the vendor wrote it.</b> A thinking block with its signature, Gemini’s thoughts and Responses’ encrypted reasoning are sealed by the vendor and go back unchanged, so the signature still matches. Only values already masked elsewhere in the request are swapped in them.</li>
+      <li><b>Ids and tool definitions go as written:</b> model ids, message and call ids, UUIDs, tool names, MCP server names, and tool schemas (their descriptions are masked), so a vendor or a tool can still check them.</li>
+      <li><b>Images and file data are sent as they are.</b> Text inside a screenshot is not masked.</li>
+      <li><b>It fails closed.</b> If masking is on and can’t run (the <span class="ui">Privacy masking</span> plugin turned off by hand, or the local model is on and can’t answer), the request gets a 503 that says nothing was sent. It is never sent unmasked instead.</li>
+      <li><b>Local models can skip it.</b> <span class="ui">Send requests unmasked</span> on a provider whose every address is on this computer or your local network (Ollama, LM Studio) sends its requests as written; <code>magpie provider set ollama unmasked=yes</code> does the same. The logs keep the masked body.</li>
+      <li><b>The model sees placeholders.</b> It can’t read or reason about a masked value; it can only pass it on. Put a value it must read under <span class="ui">Never mask</span>.</li>
+      <li><b>Rules find shapes.</b> A phone number in another country’s format or a name in free text needs <span class="ui">Find with a local model</span>, or your own <span class="ui">Masked words</span> and <span class="ui">Masking rules</span>. Try your own text in <span class="ui">Try it</span> first.</li>
+    </ul>
+    <p>See also <a href="/docs/privacy">Privacy</a> for everything magpie sends by itself. The code is <a href="https://github.com/yetone/magpie/tree/main/internal/redact">internal/redact</a> and <a href="https://github.com/yetone/magpie/blob/main/internal/masking/masking.go">internal/masking</a>.</p>
+  </article>
+</main>
+
+<footer><div class="wrap">
+  <span>© 2026 magpie · MIT</span>
+  <div class="links">
+    <a href="/">Home</a>
+    <a href="/docs/start">Get started</a>
+    <a href="/docs/intent">Intent routing</a>
+    <a href="/docs/plugins">Plugins</a>
+    <a href="/docs/remote">Remote magpie</a>
+    <a href="/docs/docker">Docker</a>
+    <a href="/docs/privacy">Privacy</a>
+    <a href="/docs/masking">Privacy masking</a>
+    <a href="/docs/import">Add to magpie</a>
+    <a href="/docs/integrate">Integrate</a>
+    <a href="https://github.com/yetone/magpie">GitHub</a>
+    <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
+  </div>
+</div></footer>
+
+<script>
+(() => {
+  const next = { system: "light", light: "dark", dark: "system" };
+  document.querySelectorAll("button.theme").forEach((b) => {
+    b.dataset.mode = themeMode();
+    b.title = "Theme: " + themeMode();
+    b.addEventListener("click", () => setTheme(next[themeMode()]));
+  });
+
+  document.querySelectorAll(".copy").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
+      b.textContent = "Copied"; setTimeout(() => (b.textContent = "Copy"), 1400);
+    } catch {}
+  }));
+})();
+</script>
+<script src="/docs.js"></script>
+</body>
+</html>

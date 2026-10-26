@@ -49,6 +49,7 @@
     <a class="toc-only" href="/docs/ja/remote">リモート magpie</a>
     <a class="toc-only" href="/docs/ja/docker">Docker</a>
     <a class="toc-only" href="/docs/ja/privacy">プライバシー</a>
+    <a class="toc-only" href="/docs/ja/masking">プライバシーマスキング</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
@@ -79,6 +80,7 @@
     <a href="#requests">リクエスト</a>
     <a href="#signin-state">サインイン状態</a>
     <a href="#usage">使用量</a>
+    <a href="#checkin">チェックイン</a>
     <a href="#input">プラグインに渡されるもの</a>
     <a href="#ids">プロバイダ id</a>
     <a href="#test">テスト</a>
@@ -105,6 +107,7 @@
         <li><code>provider.models</code> はアカウントごとのモデルを列挙します。</li>
         <li><code>auth.usage</code> はプランをどれだけ使ったかを返します。magpie 独自のフックで、OpenCode は無視します。</li>
         <li><code>auth.refresh</code> はアカウントのトークンを期限切れ前に、一度にひとつずつ更新します。これも magpie 独自のフックです。</li>
+        <li><code>auth.checkin</code> はアカウントのためにベンダーの毎日のチェックインを押します。これも magpie 独自の hook です。</li>
       </ul>
       エージェントはどの API で送ってきても構いません。ゲートウェイはリクエストをモデルが話す API（chat completions、Responses、Anthropic Messages、Gemini）に変換し、プラグインの <code>fetch</code> に渡して、応答をストリームで返します。</div>
 
@@ -362,7 +365,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     <p>失敗の原因がサインインなら、<code>signIn: "expired"</code> を付けたエラーを投げてください。するとアカウントは再サインインが必要と記録されます（<a href="#signin-state">サインイン状態</a>を参照）。</p>
 
     <h2 id="signin"><a class="anchor" href="#signin">サインイン</a></h2>
-    <p><code>auth</code> フックは <code>{ provider, methods, loader, usage?, refresh?, refreshLead?, icon?, maxConcurrency? }</code> です。各メソッドはユーザーが選べるサインイン方法です。アプリではメソッドがボタンになり、ターミナルでは <code>magpie plugin login &lt;id&gt; [&lt;method&gt;]</code> がどれを使うか尋ねます。</p>
+    <p><code>auth</code> フックは <code>{ provider, methods, loader, usage?, refresh?, refreshLead?, checkin?, icon?, maxConcurrency? }</code> です。各メソッドはユーザーが選べるサインイン方法です。アプリではメソッドがボタンになり、ターミナルでは <code>magpie plugin login &lt;id&gt; [&lt;method&gt;]</code> がどれを使うか尋ねます。</p>
     <h3>API キー</h3>
     <div class="code">
       <span class="lang">api メソッド</span>
@@ -538,6 +541,32 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     </div>
     <p>時刻は ISO 文字列か、秒またはミリ秒のエポック数値です。<code>signIn</code> がない場合、再サインインを求める <code>error</code> はアカウントに記録を付け、問題なく読み取れれば記録は消えます。</p>
 
+    <h2 id="checkin"><a class="anchor" href="#checkin">チェックイン</a></h2>
+    <p>毎日のチェックインでクレジットをくれるベンダーなら、プラグインが <code>auth.checkin</code> で押せます。magpie 独自の hook です（OpenCode は無視します）。ユーザーがそのプロバイダーのチェックインをオンにしている間、magpie はサインイン済みの各アカウントについて北京時間の 1 日に 1 回呼び、結果をアカウントの使用量カードと設定に表示します。</p>
+    <div class="code">
+      <span class="lang">auth hook</span>
+      <pre>auth: {
+  provider: <span class="s">"acme"</span>,
+  <span class="k">async</span> checkin(getAuth, provider) {
+    <span class="k">const</span> auth = <span class="k">await</span> getAuth()
+    <span class="k">const</span> r = <span class="k">await</span> claim(auth.access)
+    <span class="k">if</span> (r.already) <span class="k">return</span> { outcome: <span class="s">"done"</span> }
+    <span class="k">return</span> { outcome: <span class="s">"claimed"</span>, credit: r.points, streak: r.days, message: r.text }
+  },
+}</pre>
+    </div>
+    <p>返すのは <code>{ outcome, credit?, streak?, message? }</code> です：</p>
+    <div class="table-wrap"><table>
+      <tr><th><code>outcome</code></th><th>意味</th></tr>
+      <tr><td><code>claimed</code></td><td>今チェックインした。<code>credit</code> はもらえた量。</td></tr>
+      <tr><td><code>done</code></td><td>今日はチェックイン済み。受け取るものがなく 2xx を返すベンダーは <code>failed</code> ではなく <code>done</code> です。</td></tr>
+      <tr><td><code>ineligible</code></td><td>このアカウントは参加できない。</td></tr>
+      <tr><td><code>inactive</code></td><td>チェックインが実施されていない。</td></tr>
+      <tr><td><code>captcha</code></td><td>ベンダーが CAPTCHA を求めている。解かないでください：ユーザーがベンダー自身のアプリでチェックインします。</td></tr>
+      <tr><td><code>failed</code></td><td>うまくいかなかった。magpie はその日のうちにもう一度試します。</td></tr>
+    </table></div>
+    <p><code>streak</code> は連続日数、<code>message</code> はそのまま表示されます。例外を投げた hook や、上の表にない outcome を返したものは <code>failed</code> です。アカウントのスコープで実行されるので、<code>client.auth.set</code> で更新したトークンはそのアカウントに保存されます。</p>
+
     <h2 id="input"><a class="anchor" href="#input">プラグインに渡されるもの</a></h2>
     <p>magpie は OpenCode の <code>PluginInput</code> の内容を、OpenCode サーバーなしで意味をなす範囲でプラグインに渡します：</p>
     <div class="table-wrap"><table>
@@ -552,7 +581,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <tr><td><code>$</code></td><td>Bun のシェル。</td></tr>
       <tr><td><code>serverUrl</code></td><td>プレースホルダーです。背後に OpenCode サーバーはありません。</td></tr>
     </table></div>
-    <p>magpie が呼び出すフックは <code>config</code>、<code>auth</code>（そのメソッド、<code>loader</code>、<code>usage</code>）、<code>provider.models</code>、<code>chat.headers</code> です。プラグインのほかのフック（<code>tool</code>、<code>event</code>、<code>chat.params</code>、…）は呼び出されません。ツールはエージェント自身が実行します。</p>
+    <p>magpie が呼び出すフックは <code>config</code>、<code>auth</code>（そのメソッド、<code>loader</code>、<code>usage</code>、<code>refresh</code>、<code>checkin</code>）、<code>provider.models</code>、<code>chat.headers</code> です。プラグインのほかのフック（<code>tool</code>、<code>event</code>、<code>chat.params</code>、…）は呼び出されません。ツールはエージェント自身が実行します。</p>
 
     <h2 id="ids"><a class="anchor" href="#ids">プロバイダ id</a></h2>
     <ul>
@@ -788,7 +817,7 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
       <tr><td><code>library</code></td><td><span class="ui">ライブラリ</span>が渡すものをエージェントがどこで読むか：<code>instructions</code>（毎回の会話の前に読む Markdown ファイル）、<code>mcp</code>（MCP サーバーのファイル）とその書き方を表す <code>mcpFormat</code>（どのエージェントのファイルと同じ形か：<code>alma</code>, <code>antigravity</code>, <code>claude</code>, <code>cline</code>, <code>codex</code>, <code>commandcode</code>, <code>copilot</code>, <code>crush</code>, <code>cursor</code>, <code>devin</code>, <code>gemini</code>, <code>goose</code>, <code>grok</code>, <code>hermes</code>, <code>kimi</code>, <code>omp</code>, <code>opencode</code>, <code>zed</code>。<code>claude</code> は <code>{"mcpServers": {…}}</code>）、<code>skills</code>（<code>SKILL.md</code> のフォルダを置くフォルダ）。どれも省略でき、<code>~</code> と <code>$VAR</code> は展開されます：<code>library: { instructions: "~/.toy/AGENTS.md", mcp: "~/.toy/mcp.json", mcpFormat: "claude", skills: "~/.toy/skills" }</code>。書かなければライブラリからは何も渡されず、渡そうとするとプラグインが書くべきキーを示して断られます。</td></tr>
     </table></div>
     <h3>connect</h3>
-    <p><code>connect(input)</code> はモデルの横に書き込む他のキーを、キーのパスと値で返します。<code>async</code> でも構いません。受け取るのは <code>gateway</code>（<code>url</code>、<code>/v1</code> で終わる URL の <code>v1</code>、エージェント専用のキー <code>key</code>。リクエストはその id で数えられます）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>）、<code>models</code>（magpie がエージェントに出すすべてのモデル、同じ形）、<code>agent</code>（<code>id</code>、<code>config</code>）です。<code>connect</code> がないプラグインはモデルだけを書きます。magpie のモデルが変わると <code>connect</code> がもう一度呼ばれるので、書いたモデル一覧は最新のまま保たれます。</p>
+    <p><code>connect(input)</code> はモデルの横に書き込む他のキーを、キーのパスと値で返します。<code>async</code> でも構いません。受け取るのは <code>gateway</code>（<code>url</code>、<code>/v1</code> で終わる URL の <code>v1</code>、エージェント専用のキー <code>key</code>。リクエストはその id で数えられます）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>、そして <code>/v1/models</code> と同じ名前の <code>native_endpoints</code>（リクエストが変換されずにそのまま通るゲートウェイのパス、例えば <code>["/v1/chat/completions"]</code>）と <code>pricing</code>（1 トークンあたりの USD、10 進の文字列：<code>prompt</code>、<code>completion</code>、<code>input_cache_read</code>、<code>input_cache_write</code>。分からないものは含まれず、空や 0 にはなりません））、<code>models</code>（magpie がエージェントに出すすべてのモデル、同じ形）、<code>agent</code>（<code>id</code>、<code>config</code>）です。<code>connect</code> がないプラグインはモデルだけを書きます。magpie のモデルが変わると <code>connect</code> がもう一度呼ばれるので、書いたモデル一覧は最新のまま保たれます。</p>
     <h3>magpie がすること</h3>
     <ul>
       <li><b>書き込み。</b>各キーをその場で書き換え、ユーザーのコメントや他のキーは残します。最初に書く前に、各キーの元の値を型ごと（数値は数値のまま）取っておきます。</li>
@@ -960,6 +989,7 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
     <a href="/docs/ja/remote">リモート magpie</a>
     <a href="/docs/ja/docker">Docker</a>
     <a href="/docs/ja/privacy">プライバシー</a>
+    <a href="/docs/ja/masking">プライバシーマスキング</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

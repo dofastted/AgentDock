@@ -78,6 +78,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test(`${width}x${height}, open`, async () => {
         const context = await browser.newContext({ viewport: { width, height } });
         const page = await context.newPage();
+        // the block grid, the look these cells are drawn in (the map is the default)
+        await page.addInitScript(() => { try { localStorage.setItem("magpie.ctxLook", "grid"); } catch {} });
         page.setDefaultTimeout(5000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
@@ -164,6 +166,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test(`${width}x${height}, folded`, async () => {
         const context = await browser.newContext({ viewport: { width, height } });
         const page = await context.newPage();
+        // the block grid, the look these cells are drawn in (the map is the default)
+        await page.addInitScript(() => { try { localStorage.setItem("magpie.ctxLook", "grid"); } catch {} });
         await page.addInitScript(() => { try { localStorage.setItem("magpie.ctxShut", "1"); } catch {} });
         page.setDefaultTimeout(5000);
         const errors = [];
@@ -200,7 +204,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           }
         }
         // the folded head waits for a prompt in its place, then tells of it
-        const bar = (f, r, c) => `3.31%,4.41%,0%,${f}%,${r}%,${c}%`;
+        // system, tools, skills, memory, then files, results and chat
+        const bar = (f, r, c) => `3.31%,4.41%,0%,0%,${f}%,${r}%,${c}%`;
         assert.deepEqual(said, [
           "114K / 272K · 42% #103 " + bar(15.44, 9.56, 9.19),
           ...Array(3).fill("122K / 272K · 45% #104 " + bar(16.91, 10.29, 9.93)),

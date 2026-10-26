@@ -15,6 +15,8 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,7 +66,21 @@ func DevinCredentialsPath() string {
 	return filepath.Join(base, "devin", "credentials.toml")
 }
 
-var devinStatus = &cliIdentity{name: "devin", exe: func() string { return DevinExecutable() }, ask: askDevinStatus}
+var devinStatus = &cliIdentity{name: "devin", exe: func() string { return DevinExecutable() }, ask: askDevinStatus, mark: devinSignInMark}
+
+// devinSignInMark is the key credentials.toml keeps, hashed, as the mark
+// cliIdentity asks again on a change of; "" when it can't be read.
+func devinSignInMark() string {
+	b, err := readAccountFile(DevinCredentialsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return "none"
+	}
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
 
 // devinIdentity is who Devin's CLI says is signed in; see cliIdentity.
 func devinIdentity() (user, plan string, ok bool) {

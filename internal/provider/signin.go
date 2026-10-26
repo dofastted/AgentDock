@@ -75,6 +75,9 @@ type SignInState struct {
 	PasteKey     bool   `json:"pasteKey,omitempty"`
 	KeysURL      string `json:"keysURL,omitempty"`
 	Instructions string `json:"instructions,omitempty"` // a plugin's words for its page
+	// Opened is a page the plugin's own CLI opened already (Grok Build's
+	// `grok login`), shown but not opened a second time
+	Opened bool `json:"opened,omitempty"`
 	// Installing is the CLI being installed before the sign-in can start
 	Installing string `json:"installing,omitempty"`
 	User       string `json:"user,omitempty"`  // the account, once done
@@ -918,7 +921,7 @@ func addLogin(l savedLogin) (using bool, err error) {
 		// agent's own is an older sign-in, and gives way
 		forgetClaudeDir(l.User)
 	}
-	loginsSeenAt = time.Time{}
+	loginsSeenAt.Store(0)
 	forgetAccountCaches()
 	return using, nil
 }

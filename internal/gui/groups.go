@@ -31,6 +31,11 @@ type groupsJSON struct {
 	// Templates: groups for common needs made of the user's own models,
 	// which the page adds in a click (provider.Templates)
 	Templates []provider.Template `json:"templates"`
+	// Clock: this computer's time zone, which the gateway reads a rule's
+	// hours on when they name no zone of their own; the page tells a rule's
+	// zone beside its hours when the two differ (gaubeebangeel on X: magpie
+	// on a server in UTC, its user in Beijing)
+	Clock clockJSON `json:"clock"`
 	// Shared: share's answer, the group as text to paste into another
 	// magpie (provider.ShareGroup)
 	Shared string `json:"shared,omitempty"`
@@ -58,6 +63,9 @@ type groupJSON struct {
 	// Decides: it is a group of decision models, asked at /v1/systemone
 	// and by a group's classifier, never by an agent
 	Decides bool `json:"decides,omitempty"`
+	// Ref: the id agents pick it by (provider.Group.Ref): auto/<model> for
+	// a group magpie found, group/<id> for any other
+	Ref string `json:"ref"`
 	// ClassifierFailed: its classifier couldn't say the last time it was
 	// asked, and why (gateway.ClassifierFailure), which its card says
 	// (#1929): otherwise only each request's details did
@@ -173,12 +181,13 @@ func seesImages(e provider.Entry) bool { return e.Images && (e.ImageInput == nil
 // list saying it takes none, and the page says unknown rather than text-only.
 func imagesUnknown(e provider.Entry) bool { return e.ImageInput == nil && !e.Images }
 
-// onOf is who a provider's requests spread over: its accounts, or keys.
+// onOf is who a provider's requests spread over: its accounts, by the
+// name the user gave each (provider.AccountShown), or keys.
 func onOf(p provider.Provider) (kind string, who []string) {
 	if p.Account != nil {
-		who = append(who, p.Account.User)
+		who = append(who, p.AccountShown(p.Account.User))
 		for _, q := range p.AlsoOn() {
-			who = append(who, q.Account.User)
+			who = append(who, p.AccountShown(q.Account.User))
 		}
 		return "account", who
 	}
@@ -217,8 +226,17 @@ func keyPools(p provider.Provider) []poolJSON {
 	return out
 }
 
+// clockJSON is a computer's time zone: its IANA name when it has one,
+// and how far ahead of UTC it is now, in seconds.
+type clockJSON struct {
+	Zone   string `json:"zone,omitempty"`
+	Offset int    `json:"offset"`
+}
+
 func groupsState() groupsJSON {
-	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}, Deciders: []modelRef{}, Found: provider.AutoGroupsOn(), Templates: provider.Templates()}
+	_, offset := time.Now().Zone()
+	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}, Deciders: []modelRef{}, Found: provider.AutoGroupsOn(), Templates: provider.Templates(),
+		Clock: clockJSON{Zone: provider.LocalZone(), Offset: offset}}
 	for i := range out.Templates {
 		if out.Templates[i].Group.Members == nil {
 			out.Templates[i].Group.Members = []string{} // one that can't be made has none
@@ -256,13 +274,14 @@ func groupsState() groupsJSON {
 		}
 		gj.Patterns = append(gj.Patterns, provider.PatternHits(g)...)
 		gj.Decides = g.Decides()
+		gj.Ref = g.Ref()
 		if g.Classifier != "" {
 			if why, at, ok := classifierFailure(g.Classifier); ok {
 				gj.ClassifierFailed = &classifierFailedJSON{Error: why, At: at}
 			}
 		}
 		for _, e := range served {
-			if e.ID == provider.GroupPrefix+g.ID {
+			if e.Group == g.ID {
 				gj.Offers, gj.Shared = append(gj.Offers, e.Efforts...), append(gj.Shared, e.Shared...)
 				break
 			}
@@ -282,7 +301,7 @@ func groupsState() groupsJSON {
 				// a group in the group: what agents see of it
 				m.Group = true
 				for _, e := range served {
-					if e.ID == id {
+					if e.Group == gid {
 						_, ms, _ := find(id)
 						m.Ready, m.Name, m.Icon, m.On = true, e.Name, e.Provider.Icon, len(ms)
 						m.Context, m.Images, m.ImagesUnknown = e.Context, seesImages(e), imagesUnknown(e)

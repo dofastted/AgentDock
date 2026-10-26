@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本地脱敏 · magpie 文档</title>
+<meta name="description" content="怎么打开 magpie 的本地脱敏：请求离开电脑前会遮掉什么、回复里怎么还原、怎么确认生效，以及它的限制。">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fafafa">
+<script>
+(() => {
+  let mode = "system";
+  try { mode = localStorage.getItem("theme") || "system"; } catch {}
+  const q = matchMedia("(prefers-color-scheme: dark)");
+  const apply = () => {
+    const t = mode === "system" ? (q.matches ? "dark" : "light") : mode;
+    document.documentElement.dataset.theme = t;
+    document.querySelector('meta[name="theme-color"]').content = t === "dark" ? "#0b0b0c" : "#fafafa";
+    document.querySelectorAll("button.theme").forEach((b) => { b.dataset.mode = mode; b.title = "Theme: " + mode; });
+  };
+  q.addEventListener("change", () => mode === "system" && apply());
+  window.setTheme = (m) => { mode = m; try { m === "system" ? localStorage.removeItem("theme") : localStorage.setItem("theme", m); } catch {} apply(); };
+  window.themeMode = () => mode;
+  apply();
+})();
+</script>
+<script>try{if(/Linux/.test(navigator.userAgent)&&!/Android/.test(navigator.userAgent)||localStorage.getItem("omarchy")||/[?&]omarchy=/.test(location.search))document.write('<script src="/omarchy.js"><\/script>')}catch(e){}</script>
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="/img/icon-256.png">
+<link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/masking">
+<link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/masking">
+<link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/masking">
+<link rel="stylesheet" href="/docs.css">
+<meta property="og:title" content="本地脱敏">
+<meta property="og:description" content="密钥、密码和个人信息留在你的电脑上：请求发出前脱敏，回复里还原。">
+<meta property="og:image" content="https://usemagpie.ai/img/og.png">
+<meta property="og:url" content="https://usemagpie.ai/docs/zh/masking">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="brand" href="/zh/"><img class="bird" src="/img/magpie-small.svg" alt="">magpie <small>文档</small></a>
+  <div class="links">
+    <a href="/zh/">首页</a>
+    <a href="/docs/zh/start">快速上手</a>
+    <a href="/docs/zh/intent">意图路由</a>
+    <a href="/docs/zh/plugins">插件开发</a>
+    <a class="toc-only" href="/docs/zh/remote">远程 magpie</a>
+    <a class="toc-only" href="/docs/zh/docker">Docker</a>
+    <a class="toc-only" href="/docs/zh/privacy">隐私</a>
+    <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/import">Add to magpie</a>
+    <a href="/docs/zh/integrate">接入应用</a>
+    <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
+  </div>
+  <div class="langs">
+    <button class="icon-btn lang" type="button" aria-label="语言" title="语言" aria-haspopup="true" aria-expanded="false" aria-controls="langs"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M1.75 8h12.5M8 1.75c1.7 1.75 2.55 3.83 2.55 6.25S9.7 12.5 8 14.25M8 1.75C6.3 3.5 5.45 5.58 5.45 8S6.3 12.5 8 14.25"/></svg></button>
+    <div class="lang-menu" id="langs" hidden>
+      <a href="/docs/masking" hreflang="en" lang="en">English</a>
+      <a href="/docs/zh/masking" hreflang="zh" lang="zh">中文</a>
+      <a href="/docs/ja/masking" hreflang="ja" lang="ja">日本語</a>
+    </div>
+  </div>
+  <a class="icon-btn" href="https://discord.gg/vGSnD3ZKQF" aria-label="magpie on Discord" title="Join us on Discord"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a>
+  <a class="icon-btn" href="https://github.com/yetone/magpie" aria-label="magpie on GitHub" title="Source on GitHub"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></a>
+  <button class="icon-btn theme" type="button" aria-label="Theme" title="Theme: system"><svg class="i-system" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.25V14"/></svg><svg class="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1 1M12 12l1 1M3 13l1-1M12 4l1-1"/></svg><svg class="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/></svg></button>
+  <a class="btn small" href="/#get">下载</a>
+</div></nav>
+
+<main class="wrap doc">
+  <aside class="toc">
+    <p>本地脱敏</p>
+    <a href="#overview">概览</a>
+    <a href="#on">打开它</a>
+    <a href="#what">会遮掉什么</a>
+    <a href="#example">一个例子</a>
+    <a href="#check">怎么确认生效</a>
+    <a href="#found">发现敏感值时</a>
+    <a href="#limits">不处理的内容与限制</a>
+  </aside>
+
+  <article>
+    <p class="eyebrow" id="overview">文档 · 本地脱敏</p>
+    <h1>本地脱敏</h1>
+    <p class="lede">magpie 可以在 Agent 发出的请求离开这台电脑之前先做脱敏。API Key、密码和 Token，以及你选择的邮箱、手机号和自定义词，会以 <code>{{API_KEY_es6eu6jk}}</code> 这样的占位符发给模型厂商；回复里的占位符再换回原值，所以 Agent 和你的文件里始终是真值，厂商看不到。脱敏在这台电脑上、在 magpie 的网关里完成，<b>默认关闭</b>。</p>
+
+    <div class="callout"><b>只覆盖经过 magpie 的请求。</b><a href="/docs/zh/start">接入 magpie</a> 的 Agent 通过网关发请求，不管由哪个供应商或账号回答都会脱敏。绕过 magpie、直接请求厂商的 Agent 不在范围内。</div>
+
+    <h2 id="on"><a class="anchor" href="#on">打开它</a></h2>
+    <ol class="steps">
+      <li><b>打开页面</b>进入 <span class="ui">设置</span> → <span class="ui">隐私</span>。</li>
+      <li><b>脱敏密钥</b>在 <span class="ui">要遮什么</span> 下把 <span class="ui">脱敏密钥</span> 设为 <span class="ui">开启</span>：API Key、私钥、Token 和密码。</li>
+      <li><b>个人信息（按需）</b>把 <span class="ui">脱敏个人信息</span> 设为 <span class="ui">开启</span>，邮箱、手机号、身份证号和银行卡号也一并脱敏。打开后，下面会列出其他各类个人信息，每类有自己的开关。</li>
+      <li><b>自定义词</b>在 <span class="ui">脱敏词</span> 里填不想让厂商看到的人名、项目代号或主机名，用逗号分隔。<span class="ui">脱敏词不区分大小写</span> 打开后，<em>Nightjar</em> 也会遮掉 <em>NIGHTJAR</em>。magpie 不认识的密钥（比如你自己网关的 key）加到 <span class="ui">自定义脱敏规则</span>：填它的开头，或一个正则表达式。</li>
+      <li><b>试一试</b>把一段文字粘到 <span class="ui">试一试</span>，就能看到厂商实际会收到什么。粘进去的内容不会保存。</li>
+    </ol>
+    <p>改动从下一个请求开始生效，不用重启，Agent 那边也不用改。实际做脱敏的是内置插件 <span class="ui">隐私遮盖</span>（<code>redact</code>，在 <span class="ui">设置</span> → <span class="ui">插件</span>），只要设置里要求了任何脱敏，它就是开着的。</p>
+    <p>没有专门的命令行命令。没有窗口时（<code>magpie serve</code>、<a href="/docs/zh/docker">Docker</a>），可以用 <code>magpie web</code> 打开同一个页面，或者直接写 <code>~/.config/magpie/settings.json</code>（Docker 里是 <code>/config/magpie/settings.json</code>）。每个请求都会重新读这个文件：</p>
+    <div class="code">
+      <span class="lang">settings.json</span>
+      <button class="copy" data-copy="ex-settings">复制</button>
+      <pre id="ex-settings">{
+  <span class="s">"redact"</span>: true,
+  <span class="s">"redactPersonal"</span>: true,
+  <span class="s">"redactWords"</span>: [<span class="s">"Nightjar"</span>, <span class="s">"db.acme-corp.cn"</span>]
+}</pre>
+    </div>
+
+    <h2 id="what"><a class="anchor" href="#what">会遮掉什么</a></h2>
+    <div class="table-wrap"><table>
+      <tr><th>开关</th><th>能找到什么</th></tr>
+      <tr><td><span class="ui">脱敏密钥</span></td><td>私钥块（<code>-----BEGIN … PRIVATE KEY-----</code>）。按格式识别的 API Key：<code>sk-…</code>（OpenAI、Anthropic、OpenRouter）、<code>ghp_</code>/<code>github_pat_</code>、<code>glpat-</code>、<code>AIza…</code>、<code>xox…-</code>、<code>sk_live_</code>、<code>AKIA</code>/<code>ASIA</code>、<code>hf_</code>、<code>gsk_</code>、<code>xai-</code>、<code>npm_</code>、<code>pypi-</code>、<code>dop_v1_</code>、<code>SG.</code>，以及 <code>oc_sk_…</code> 这类中转站的 key。JWT。<code>user:password@host</code> 里的密码。<code>.env</code> 和配置文件里以密钥命名的字段的值：<code>DB_PASSWORD=…</code>、<code>api_key: …</code>、<code>client_secret</code>、<code>token</code>、<code>credential</code>。以及你的 <span class="ui">自定义脱敏规则</span>。</td></tr>
+      <tr><td><span class="ui">脱敏个人信息</span></td><td>邮箱、中国大陆手机号、校验位对得上的身份证号和银行卡号。默认也开着的：美国社会安全号、护照号（跟在 <em>passport</em>、护照或パスポート后面）、IBAN、生日（旁边有 <em>birthday</em>、<em>DOB</em> 或「生日」，且是一年以前的日期，所以今天的日期不动）、MAC 地址、序列号（跟在 <em>S/N</em> 后面）。默认关闭、需要自己打开的（Agent 几乎每个请求都会带）：主目录里的用户名、用户名和主机名（<code>user@host</code>）、公网 IP 地址、云存储桶。</td></tr>
+      <tr><td><span class="ui">脱敏词</span></td><td>你填的每个词，精确匹配，换成 <code>{{TERM_…}}</code>。</td></tr>
+      <tr><td><span class="ui">用本地模型查找</span></td><td>在 <span class="ui">怎么找</span> 下面。一个在这台电脑上运行的模型能找出规则找不到的东西：自由文本里的人名、地址。需要先打开 <span class="ui">脱敏密钥</span> 或 <span class="ui">脱敏个人信息</span>，找到的内容按同样的开关处理。旁边的菜单选择模型：AstrLink Guard（中英文，下载 39 MB，代码里很少误判；默认）或 OpenAI 的 Privacy Filter（1.6 GB，可用 GPU，代码里会遮盖更多普通值）。</td></tr>
+    </table></div>
+    <p>占位符是「类型 + 8 位带密钥的哈希」。同一个值每次得到同一个占位符，所以对话每一轮读起来都一样，厂商的提示词缓存也不会失效。原值只保存在内存里。</p>
+
+    <h2 id="example"><a class="anchor" href="#example">一个例子</a></h2>
+    <p>打开 <span class="ui">脱敏密钥</span> 和 <span class="ui">脱敏个人信息</span>，并在 <span class="ui">脱敏词</span> 里填 <em>Nightjar</em>。Agent 发出：</p>
+    <div class="code">
+      <span class="lang">Agent 发出</span>
+      <pre>Deploy Nightjar with OPENAI_API_KEY=sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd, then mail li.wei@acme-corp.cn or call 13800138000.</pre>
+    </div>
+    <div class="code">
+      <span class="lang">厂商收到</span>
+      <pre>Deploy {{TERM_5hmsrhdc}} with OPENAI_API_KEY={{API_KEY_srhjgvja}}, then mail {{EMAIL_eh5um6mb}} or call {{PHONE_uf7iy2qq}}.</pre>
+    </div>
+    <p>模型回复 <em>“我已在 .env 里把 OPENAI_API_KEY 设为 {{API_KEY_srhjgvja}}”</em> 时，Agent 读到的是真实的 key，流式文本和工具调用参数里都一样，所以它写进文件的也是真 key。模型把占位符稍微改了样子（花括号里加了空格、大小写变了）也照样能换回来。</p>
+
+    <h2 id="check"><a class="anchor" href="#check">怎么确认生效</a></h2>
+    <ul>
+      <li><b>事前：</b><span class="ui">设置</span> → <span class="ui">隐私</span> 里的 <span class="ui">试一试</span> 会显示厂商收到的文本，以及每个值的类型。</li>
+      <li><b>每个请求：</b>在 <span class="ui">网关</span> 页的最近调用和 <span class="ui">路由</span> 日志里，被脱敏的请求会带一个盾牌徽标和数字。鼠标指上去看类型，点开看这个请求的记录。</li>
+      <li><b>一段时间：</b><span class="ui">观测</span> → <span class="ui">脱敏</span>（隐私页的 <span class="ui">脱敏记录</span> 也能进）按类型、Agent、供应商显示 7 天或 30 天里遮掉的值，以及每个请求在厂商眼里的原文，占位符会标出来。</li>
+    </ul>
+    <p>记录保存在 <code>~/.config/magpie/masking</code>，保留 30 天：Agent、供应商、模型，以及每个占位符的类型、长度和开头几个字符，从不保存原值。</p>
+
+    <h2 id="found"><a class="anchor" href="#found">发现敏感值时</a></h2>
+    <p>在 <span class="ui">发现敏感值时</span> 下，每种类型可以选：</p>
+    <ul>
+      <li><span class="ui">脱敏</span>（默认）：换成占位符发出。</li>
+      <li><span class="ui">提醒</span>：原样发出，徽标用琥珀色计数。</li>
+      <li><span class="ui">拦截</span>：请求被拦下，返回 400：<em>“magpie held this request back: Settings › Privacy blocks API_KEY, and it has one (sk-…, 33 characters). Nothing was sent.”</em> 消息里不会出现原值。</li>
+    </ul>
+    <p>任务必须原样使用的值（团队邮箱、测试用的 key）加进 <span class="ui">从不脱敏</span>：只要整段匹配，就原样发出。</p>
+
+    <h2 id="limits"><a class="anchor" href="#limits">不处理的内容与限制</a></h2>
+    <ul>
+      <li><b>思考内容保持厂商原样。</b>带签名的 thinking 块、Gemini 的 thoughts、Responses 的加密推理都由厂商签过名，原样发回，签名才对得上。里面只会替换请求其他地方已经遮掉的值。</li>
+      <li><b>ID 和工具定义原样发送：</b>模型 ID、消息和调用 ID、UUID、工具名、MCP 服务名、工具 schema（其中的描述文字会脱敏），这样厂商和工具还能校验它们。</li>
+      <li><b>图片和文件数据原样发送。</b>截图里的文字不会被遮。</li>
+      <li><b>失败即不发送。</b>脱敏已打开却运行不了（手动关掉了 <span class="ui">隐私遮盖</span> 插件，或本地模型开着但没响应），请求返回 503，说明什么都没发出，绝不会退回成不脱敏直接发送。</li>
+      <li><b>本地模型可以跳过。</b>供应商的每个地址都在本机或局域网（Ollama、LM Studio）时，打开它的 <span class="ui">请求不脱敏</span>，请求就原样发出；命令行是 <code>magpie provider set ollama unmasked=yes</code>。日志里保存的仍是脱敏后的内容。</li>
+      <li><b>模型只看到占位符。</b>它无法读懂或推理被遮掉的值，只能原样传递。需要模型读的值放进 <span class="ui">从不脱敏</span>。</li>
+      <li><b>规则按格式匹配。</b>其他国家格式的电话号码、自由文本里的人名，需要 <span class="ui">用本地模型查找</span>，或者自己的 <span class="ui">脱敏词</span> 和 <span class="ui">自定义脱敏规则</span>。先用 <span class="ui">试一试</span> 测一下你自己的文本。</li>
+    </ul>
+    <p>magpie 自己会发出什么，见 <a href="/docs/zh/privacy">隐私</a>。代码在 <a href="https://github.com/yetone/magpie/tree/main/internal/redact">internal/redact</a> 和 <a href="https://github.com/yetone/magpie/blob/main/internal/masking/masking.go">internal/masking</a>。</p>
+  </article>
+</main>
+
+<footer><div class="wrap">
+  <span>© 2026 magpie · MIT</span>
+  <div class="links">
+    <a href="/zh/">首页</a>
+    <a href="/docs/zh/start">快速上手</a>
+    <a href="/docs/zh/intent">意图路由</a>
+    <a href="/docs/zh/plugins">插件开发</a>
+    <a href="/docs/zh/remote">远程 magpie</a>
+    <a href="/docs/zh/docker">Docker</a>
+    <a href="/docs/zh/privacy">隐私</a>
+    <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/import">Add to magpie</a>
+    <a href="/docs/zh/integrate">接入应用</a>
+    <a href="https://github.com/yetone/magpie">GitHub</a>
+    <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
+  </div>
+</div></footer>
+
+<script>
+(() => {
+  const next = { system: "light", light: "dark", dark: "system" };
+  document.querySelectorAll("button.theme").forEach((b) => {
+    b.dataset.mode = themeMode();
+    b.title = "Theme: " + themeMode();
+    b.addEventListener("click", () => setTheme(next[themeMode()]));
+  });
+
+  document.querySelectorAll(".copy").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
+      b.textContent = "已复制"; setTimeout(() => (b.textContent = "复制"), 1400);
+    } catch {}
+  }));
+})();
+</script>
+<script src="/docs.js"></script>
+</body>
+</html>

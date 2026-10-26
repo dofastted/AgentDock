@@ -24,6 +24,7 @@ import (
 func chatgpt(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	setHome(t, t.TempDir()) // no sign-ins but the test's
+	forgetCodexLists(t)
 	up := httptest.NewServer(h)
 	t.Cleanup(up.Close)
 	was := provider.CodexBase
@@ -1137,5 +1138,25 @@ func TestCodexModelListOwnOnlyForFailover(t *testing.T) {
 	New().Handler().ServeHTTP(rec, req)
 	if got := rec.Header().Get("X-Models-Etag"); rec.Code != 200 || !codexcat.Tagged(got, provider.CodexOwnListTag()) {
 		t.Errorf("%d X-Models-Etag %q", rec.Code, got)
+	}
+}
+
+// A lead a provider answered before it was renamed was answered by the
+// id it has now, the one its candidates go by (cybercaius).
+func TestRenamedProviderAnsweredItsLead(t *testing.T) {
+	setHome(t, t.TempDir())
+	if err := provider.Save(provider.Provider{ID: "myrelay", Name: "My relay", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"gpt-5.5"}}); err != nil {
+		t.Fatal(err)
+	}
+	session := "lead-renamed-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	usage.Append(usage.Record{
+		Time: time.Now(), Agent: "codex", Provider: "myrelay", Host: "relay.example.com", ProviderKeyID: "fp",
+		Model: "gpt-5.5", Input: 9, Output: 2, Status: 200, Endpoint: CodexPath + "/responses", Session: session,
+	})
+	if err := provider.Rename("myrelay", "newrelay"); err != nil {
+		t.Fatal(err)
+	}
+	if a := loggedAnswers(session); len(a) != 1 || a[0].provider != "newrelay" || a[0].who != "newrelay#fp" {
+		t.Fatalf("answers %+v", a)
 	}
 }

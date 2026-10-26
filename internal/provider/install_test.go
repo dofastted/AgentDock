@@ -98,7 +98,7 @@ func waitPast(t *testing.T, id, state string) SignInState {
 	return SignInState{}
 }
 
-// magpie's Docker image has bash and busybox's wget but no curl, which every
+// magpie's Docker image had bash and busybox's wget but no curl, which every
 // vendor's one-liner downloads with: there the native installer is used
 func TestShellInstallerNeedsCurl(t *testing.T) {
 	if runtime.GOOS == "windows" {

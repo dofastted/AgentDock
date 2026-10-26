@@ -1,10 +1,10 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -27,8 +27,17 @@ const didNotStream = "did not stream"
 // alone, as the last one left of a plain provider is (passing), while
 // another member is busy too. A streaming agent is kept alive with SSE
 // comments through the pause, as through a held stream. A plain provider,
-// which the agent picked as itself, keeps the retries passing gives the
-// last one left.
+// which the agent picked as itself, is kept the same way once the retries
+// passing gives the last one left are spent, its accounts its members,
+// for its own Patience, unset singlePatience.
+
+// singlePatience is how long a request to one provider, not a group, is
+// kept once it has failed in a way that passes and the same-one retries
+// (passing) are spent: as long as a group that sets no Patience waits
+// (zoecats on Discord), unless the provider sets its own Patience (magpie
+// provider set <id> patience=), which wins. A group's, set or not, is the
+// group's.
+var singlePatience = provider.PatienceDefault * time.Second
 
 // replanRounds is how many times the members are asked again, at most:
 // a backstop that never comes before the patience does. The pauses alone
@@ -59,7 +68,7 @@ func busy(status int, body []byte) bool {
 	switch status {
 	case 408, 500, 502, 503, 504, 529:
 		return failure(status, body) == failOther && !protectionRefused(status, body) &&
-			!strings.Contains(string(body), didNotStream)
+			!bytes.Contains(body, []byte(didNotStream))
 	case 429:
 		return failure(status, body) == failRate && !creditWords.Match(wordsOf(body))
 	}

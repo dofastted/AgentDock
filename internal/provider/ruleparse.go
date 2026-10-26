@@ -1,7 +1,7 @@
 package provider
 
-// A rule as it is typed: use=<model> use-effort=low tokens=200k images effort=high
-// agents=a,b intent="…" compact time=09:00-18:00 days=mon-fri
+// A rule as it is typed: use=<model>[,<model>…] use-effort=low tokens=200k images effort=high
+// agents=a,b intent="…" compact time=09:00-18:00 days=mon-fri tz=Asia/Shanghai
 // folders=~/work,"~/My Project" except-folders=~/work/old, or
 // pause=<model> time=… days=… agents=… folders=… except-folders=… — by
 // magpie group rule and the
@@ -67,17 +67,34 @@ func ParseDays(v string) ([]string, error) {
 	return out, nil
 }
 
-// ParseTimeWindow reads hours of the day: 09:00-18:00, 22:00-08:00.
+// ParseTimeWindow reads hours of the day: 09:00-18:00, 22:00-08:00, and
+// the time zone they are in after an @: 09:00-18:00@Asia/Shanghai.
 func ParseTimeWindow(v string) (*TimeWindow, error) {
-	from, to, ok := strings.Cut(strings.ReplaceAll(strings.TrimSpace(v), "–", "-"), "-")
+	hours, zone, _ := strings.Cut(v, "@")
+	from, to, ok := strings.Cut(strings.ReplaceAll(strings.TrimSpace(hours), "–", "-"), "-")
 	if !ok {
-		return nil, fmt.Errorf("time is hours of the day, local time: time=09:00-18:00 (or 22:00-08:00, past midnight), not %q", v)
+		return nil, fmt.Errorf("time is hours of the day: time=09:00-18:00 (or 22:00-08:00, past midnight; 09:00-18:00@Asia/Shanghai in a time zone), not %q", v)
 	}
-	w := &TimeWindow{From: strings.TrimSpace(from), To: strings.TrimSpace(to)}
+	w := &TimeWindow{From: strings.TrimSpace(from), To: strings.TrimSpace(to), Zone: strings.TrimSpace(zone)}
 	if err := w.clean(); err != nil {
 		return nil, err
 	}
 	return w, nil
+}
+
+// InZoneHere puts a rule's window typed with no time zone in this
+// computer's (LocalZone), as magpie group rule and the TUI read it: the
+// hours are the ones the person typing them means. It stays without one
+// when this computer's zone has no IANA name.
+func (r *Rule) InZoneHere() {
+	if r.Time != nil && r.Time.Zone == "" {
+		r.Time.Zone = LocalZone()
+	}
+}
+
+// zoneErr is what a time zone magpie doesn't know is answered with.
+func zoneErr(v string) error {
+	return fmt.Errorf("tz: %q is not a time zone magpie knows: an IANA name such as Asia/Shanghai, Europe/Berlin or America/New_York", v)
 }
 
 // UnknownRuleWord starts the error for a word ParseRule doesn't know.
@@ -87,22 +104,34 @@ const UnknownRuleWord = "unknown "
 // group's members. classifier is the group's classifier when one was
 // given, at the place asked for (from 1) when one was.
 func ParseRule(g Group, words []string) (r Rule, at int, classifier string, err error) {
+	zone, zoned := "", false // tz=, or time=…@zone
 	for _, w := range words {
 		k, v, hasV := strings.Cut(w, "=")
 		k = strings.ToLower(strings.TrimSpace(k))
 		switch k {
 		case "use", "model", "to":
-			id, err := GroupMember(g, v)
-			if err != nil {
-				return r, 0, "", err
+			// use=a,b: a first, then b when a can't take the request
+			var uses []string
+			for _, m := range strings.Split(v, ",") {
+				if m = strings.TrimSpace(m); m == "" {
+					continue
+				}
+				id, err := GroupMember(g, m)
+				if err != nil {
+					return r, 0, "", err
+				}
+				uses = append(uses, id)
 			}
-			r.Use = id
+			if len(uses) == 0 {
+				return r, 0, "", fmt.Errorf("use=<model> names the model it sends to, or several in order: use=a,b")
+			}
+			r.SetUses(uses)
 		case "pause", "skip":
 			id, err := GroupMember(g, v)
 			if err != nil {
 				return r, 0, "", err
 			}
-			r.Use, r.Pause = id, true
+			r.Use, r.More, r.Pause = id, nil, true
 		case "tokens", "context", "longer":
 			n, err := ParseTokens(v)
 			if err != nil {
@@ -149,10 +178,18 @@ func ParseRule(g Group, words []string) (r Rule, at int, classifier string, err 
 			if err != nil {
 				return r, 0, "", err
 			}
+			if w.Zone != "" {
+				zone, zoned = w.Zone, true
+			}
 			if r.Time != nil {
 				w.Days = r.Time.Days
 			}
 			r.Time = w
+		case "tz", "zone", "timezone", "time-zone":
+			zone, zoned = strings.TrimSpace(v), true
+			if zone == "" || !ValidZone(zone) {
+				return r, 0, "", zoneErr(v)
+			}
 		case "days", "day":
 			days, err := ParseDays(v)
 			if err != nil {
@@ -191,11 +228,20 @@ func ParseRule(g Group, words []string) (r Rule, at int, classifier string, err 
 			}
 			at = n
 		default:
-			return r, 0, "", fmt.Errorf(UnknownRuleWord+"%q (use, use-effort, pause, tokens, images, effort, agents, intent, compact, time, days, folders, except-folders, classifier, at)", w)
+			return r, 0, "", fmt.Errorf(UnknownRuleWord+"%q (use, use-effort, pause, tokens, images, effort, agents, intent, compact, time, days, tz, folders, except-folders, classifier, at)", w)
 		}
+	}
+	if zoned {
+		if r.Time == nil {
+			return r, 0, "", fmt.Errorf("tz= is the time zone of time= or days=: give one of them too")
+		}
+		r.Time.Zone = zone
 	}
 	if r.Use == "" {
 		return r, 0, "", fmt.Errorf("use=<model> (or pause=<model>) is missing: one of %s", strings.Join(g.Members, ", "))
+	}
+	if r.Pause && len(r.More) > 0 {
+		return r, 0, "", fmt.Errorf("pause=<model> names one model: give each its own rule")
 	}
 	if r.Pause && r.UseEffort != "" {
 		return r, 0, "", fmt.Errorf("pause=<model> sends nothing, so it takes no use-effort=")
@@ -274,7 +320,7 @@ func RuleWords(line string) []string {
 
 // Line is the rule as ParseRule reads it back.
 func (r Rule) Line() string {
-	out := []string{"use=" + r.Use}
+	out := []string{"use=" + strings.Join(r.Uses(), ",")}
 	if r.Pause {
 		out[0] = "pause=" + r.Use
 	}
@@ -305,6 +351,9 @@ func (r Rule) Line() string {
 		}
 		if len(r.Time.Days) > 0 {
 			out = append(out, "days="+strings.ReplaceAll(strings.ToLower(r.Time.DaysText()), "–", "-"))
+		}
+		if r.Time.Zone != "" {
+			out = append(out, "tz="+r.Time.Zone)
 		}
 	}
 	folders := func(k string, fs []string) {

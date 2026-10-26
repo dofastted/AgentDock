@@ -48,6 +48,7 @@
     <a class="toc-only" href="/docs/remote">Remote magpie</a>
     <a class="toc-only" href="/docs/docker">Docker</a>
     <a class="toc-only" href="/docs/privacy">Privacy</a>
+    <a class="toc-only" href="/docs/masking">Privacy masking</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -108,6 +109,7 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
       <tr><td><code>/v1/messages</code>, <code>/v1/messages/count_tokens</code></td><td>Anthropic Messages</td></tr>
       <tr><td><code>/v1beta/models/{model}:generateContent</code> (and <code>:streamGenerateContent</code>)</td><td>Google Gemini</td></tr>
       <tr><td><code>/v1/models</code></td><td>the catalog</td></tr>
+      <tr><td><code>/api/version</code>, <code>/api/tags</code>, <code>/api/show</code></td><td>the catalog as an Ollama server lists it, for a client that takes only an Ollama endpoint (Copilot in Visual Studio and VS Code: enter <code>http://127.0.0.1:&lt;port&gt;</code> as the Ollama URL; it chats on <code>/v1/chat/completions</code>, and <code>/api/chat</code> isn’t served)</td></tr>
     </table></div>
 
     <h3>The key names your app</h3>
@@ -153,6 +155,7 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <a href="/docs/remote">Remote magpie</a>
     <a href="/docs/docker">Docker</a>
     <a href="/docs/privacy">Privacy</a>
+    <a href="/docs/masking">Privacy masking</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

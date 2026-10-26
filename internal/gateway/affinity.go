@@ -36,6 +36,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -141,6 +142,69 @@ var sticks = struct {
 // sticksSaving keeps one write of the file at a time, the latest last.
 var sticksSaving sync.Mutex
 
+// sticksFlushAfter is how long a conversation answered waits before the
+// file is written: what is answered meanwhile goes in the same write, so a
+// gateway answering many requests a second writes it once in a while, not
+// once a request (up to 512 conversations marshalled, written and renamed
+// on every answer, each after the last). A crash loses the last moment's;
+// flushSticks, as the gateway ends, loses nothing. In a test binary it is
+// 0, the file written at once, as it was: a write left waiting would
+// outlive the test and write into its temp folder as it is removed.
+var sticksFlushAfter = func() time.Duration {
+	if testing.Testing() {
+		return 0
+	}
+	return 2 * time.Second
+}()
+
+// sticksFlush is the write noteSticks has waiting, for the file at path.
+var sticksFlush struct {
+	sync.Mutex
+	pending bool
+	path    string
+}
+
+// noteSticks has the file written within sticksFlushAfter: what this
+// magpie answered is in memory at once.
+func noteSticks() {
+	if sticksFlushAfter <= 0 {
+		saveSticks()
+		return
+	}
+	path := sticksPath()
+	sticksFlush.Lock()
+	if sticksFlush.pending && sticksFlush.path == path {
+		sticksFlush.Unlock()
+		return
+	}
+	sticksFlush.pending, sticksFlush.path = true, path
+	sticksFlush.Unlock()
+	time.AfterFunc(sticksFlushAfter, func() { flushSticksAt(path) })
+}
+
+// flushSticks writes what noteSticks has waiting: the gateway calls it as
+// it ends, so the magpie it hands over to, or the next start, reads it.
+func flushSticks() { flushSticksAt(sticksPath()) }
+
+// FlushSticks is flushSticks, for magpie ending on a signal before the
+// gateway's own end.
+func FlushSticks() { flushSticks() }
+
+// flushSticksAt writes the file at path when a write for it is waiting:
+// one waiting for another (a test's HOME before this one's) is dropped.
+func flushSticksAt(path string) {
+	sticksFlush.Lock()
+	if !sticksFlush.pending || sticksFlush.path != path {
+		sticksFlush.Unlock()
+		return
+	}
+	sticksFlush.pending = false
+	sticksFlush.Unlock()
+	if path == sticksPath() {
+		saveSticks()
+	}
+}
+
 // savedStick is a stick as the file has it.
 type savedStick struct {
 	Rest      string    `json:"rest"`
@@ -201,6 +265,11 @@ func stickOf(key string) (stick, bool) {
 func saveSticks() {
 	sticksSaving.Lock()
 	defer sticksSaving.Unlock()
+	sticksFlush.Lock()
+	if sticksFlush.path == sticksPath() {
+		sticksFlush.pending = false // this write is the one waiting
+	}
+	sticksFlush.Unlock()
 	now := time.Now()
 	type kept struct {
 		k string
@@ -251,11 +320,8 @@ func saveSticks() {
 // turnOf counts the user's turns in a request's conversation, and says
 // whether it is the agent handing tool results back within one.
 func turnOf(from provider.Protocol, body []byte) (turn int, within bool) {
-	req, err := parse(from, body)
-	if err != nil {
-		return 0, false
-	}
-	return turnIn(req)
+	f := factsOf(from, body)
+	return f.turn, f.within
 }
 
 // turnIn is turnOf for a request already parsed. The last of the user's
@@ -312,7 +378,7 @@ func strictKeep(scope, mode string, in http.Header, body []byte, cs []candidate,
 		return cs, pl, nil
 	}
 	sticks.Lock()
-	st, had := stickOf(scope + "|" + conversationID(in, body))
+	st, had := stickOf(stickKey(scope, in, body))
 	sticks.Unlock()
 	if !had || time.Since(st.at) > stickKeep || slices.ContainsFunc(cs, func(c candidate) bool { return c.who() == st.who }) {
 		return cs, pl, nil
@@ -386,12 +452,36 @@ func strictOnly(cs []candidate, pl planned, at int) ([]candidate, planned) {
 	return out, pl
 }
 
-// affine puts first whoever answered the conversation last, while its
-// affinity says to keep it there.
-func affine(scope, mode string, rotate bool, in http.Header, from provider.Protocol, body []byte, cs []candidate, pl planned) ([]candidate, planned, *Affinity, string) {
+// stickKey is the conversation a stick is kept for: scope's, by the
+// conversation's id, and a Claude Code subagent's apart from its lead's.
+// Claude Code sends its session's id with every request of the session,
+// its subagents' too, which say only by x-claude-code-agent-id that they
+// are one (subagentOf). Under the session's key, a subagent's answer took
+// the lead's stick over: the lead's next turn was judged by the cache of
+// the subagent's conversation, moved to another account as "no-cache" or
+// "cold" or to wherever the subagent had gone, and the lead's whole
+// conversation written to that account's cache again (slkassinthehood on
+// X: two Pro accounts' 5 hours spent in ten minutes). The lead's key is
+// the session's as before, so what is kept of it, and Codex's leadFirst,
+// which reads a lead's stick by its thread id, are as they were.
+func stickKey(scope string, in http.Header, body []byte) string {
 	key := scope + "|" + conversationID(in, body)
+	if sub := subOf(in); sub != "" {
+		key += "|agent:" + sub
+	}
+	return key
+}
+
+// affine puts first whoever answered the conversation last, while its
+// affinity says to keep it there. Its turn is counted in written, the body
+// as the agent wrote it, which the turn's folder is read from too
+// (dirOf): one parse of a held body serves both (factsOf), where counting
+// it in the masked body parsed the conversation a second time, ~27 MB
+// more for each 4 MB Codex request in flight.
+func affine(scope, mode string, rotate bool, in http.Header, from provider.Protocol, body, written []byte, cs []candidate, pl planned) ([]candidate, planned, *Affinity, string) {
+	key := stickKey(scope, in, body)
 	a := &Affinity{Mode: mode}
-	a.Turn, a.Within = turnOf(from, body)
+	a.Turn, a.Within = turnOf(from, written)
 	sticks.Lock()
 	st, had := stickOf(key)
 	sticks.Unlock()
@@ -600,7 +690,7 @@ func answered(key string, c candidate, turn int, u Usage) {
 		}
 	}
 	sticks.Unlock()
-	saveSticks()
+	noteSticks()
 }
 
 // unanswered forgets that c answered a conversation, when its reply to it
@@ -626,7 +716,7 @@ func unanswered(key string, c candidate) {
 	}
 	sticks.Unlock()
 	if ok {
-		saveSticks()
+		noteSticks()
 	}
 }
 
@@ -732,17 +822,17 @@ func withoutRefused(key, who string, body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	var q map[string]json.RawMessage
-	if decodeJSON(body, &q) != nil {
+	if decodeJSONView(body, &q) != nil {
 		return nil, false
 	}
-	var items []json.RawMessage
-	if decodeJSON(q["input"], &items) != nil {
+	items, isList := inputList(q["input"])
+	if !isList {
 		return nil, false
 	}
 	kept := items[:0:0]
 	for _, it := range items {
 		var t sealedItem
-		if decodeJSON(it, &t) == nil && sealedKinds[t.Type] && t.Enc != "" && r.seals[sha256.Sum256([]byte(t.Enc))] {
+		if decodeJSONView(it, &t) == nil && sealedKinds[t.Type] && t.Enc != "" && r.seals[sha256.Sum256([]byte(t.Enc))] {
 			continue
 		}
 		kept = append(kept, it)
@@ -751,7 +841,7 @@ func withoutRefused(key, who string, body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	q["input"], _ = json.Marshal(kept)
-	b, err := json.Marshal(q)
+	b, err := marshalJSON(q)
 	return b, err == nil
 }
 
@@ -786,11 +876,11 @@ func withoutCompaction(body []byte) ([]byte, bool) {
 // types.
 func withoutKinds(body []byte, kinds ...string) ([]byte, bool) {
 	var q map[string]json.RawMessage
-	if decodeJSON(body, &q) != nil {
+	if decodeJSONView(body, &q) != nil {
 		return nil, false
 	}
-	var items []json.RawMessage
-	if decodeJSON(q["input"], &items) != nil {
+	items, isList := inputList(q["input"])
+	if !isList {
 		return nil, false
 	}
 	kept := items[:0:0]
@@ -798,7 +888,7 @@ func withoutKinds(body []byte, kinds ...string) ([]byte, bool) {
 		var t struct {
 			Type string `json:"type"`
 		}
-		if decodeJSON(it, &t) == nil && slices.Contains(kinds, t.Type) {
+		if decodeJSONView(it, &t) == nil && slices.Contains(kinds, t.Type) {
 			continue
 		}
 		kept = append(kept, it)
@@ -807,6 +897,6 @@ func withoutKinds(body []byte, kinds ...string) ([]byte, bool) {
 		return nil, false
 	}
 	q["input"], _ = json.Marshal(kept)
-	b, err := json.Marshal(q)
+	b, err := marshalJSON(q)
 	return b, err == nil
 }

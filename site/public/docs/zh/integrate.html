@@ -48,6 +48,7 @@
     <a class="toc-only" href="/docs/zh/remote">远程 magpie</a>
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
+    <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -108,6 +109,7 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
       <tr><td><code>/v1/messages</code>、<code>/v1/messages/count_tokens</code></td><td>Anthropic Messages</td></tr>
       <tr><td><code>/v1beta/models/{model}:generateContent</code>（以及 <code>:streamGenerateContent</code>）</td><td>Google Gemini</td></tr>
       <tr><td><code>/v1/models</code></td><td>模型目录</td></tr>
+      <tr><td><code>/api/version</code>、<code>/api/tags</code>、<code>/api/show</code></td><td>以 Ollama 服务器的格式列出模型目录，供只接受 Ollama 端点的客户端使用（Visual Studio 和 VS Code 里的 Copilot：Ollama 地址填 <code>http://127.0.0.1:&lt;端口&gt;</code>；对话走 <code>/v1/chat/completions</code>，不提供 <code>/api/chat</code>）</td></tr>
     </table></div>
 
     <h3>用 key 标明你的应用</h3>
@@ -153,6 +155,7 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <a href="/docs/zh/remote">远程 magpie</a>
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
+    <a href="/docs/zh/masking">本地脱敏</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

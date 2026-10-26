@@ -4,9 +4,11 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
 )
 
@@ -26,6 +28,10 @@ type GatewayDayUsage struct {
 	sessions.Tokens
 	Cost   float64
 	Priced bool
+	// first and last bound the day's requests (last includes the request's
+	// own duration), so a session seen from a later midnight is derived
+	// from the one kept projection instead of a second copy (#2776).
+	first, last time.Time
 }
 
 // GatewaySession is a read-only projection of requests served by this
@@ -53,15 +59,110 @@ type GatewayModel struct {
 // GatewaySessions aggregates one usage snapshot without reading routing
 // history or agent files. NativeKeys contains identities already represented
 // by local session files and is used to suppress the duplicate projection.
+//
+// A session's Models and Daily are the kept projection's own, shared by
+// every caller, which reads them and never changes them: each ask cloned
+// every session's days, and the start's first asks together held ~450 MB
+// of copies over ~720k calls (#2776). They are clipped, so an append
+// makes a slice of the caller's own.
 func GatewaySessions(since time.Time, nativeKeys map[string]bool) []GatewaySession {
-	e := gatewayProjection(since)
-	out := make([]GatewaySession, 0, len(e.sessions))
-	for _, s := range e.sessions {
-		if !nativeKeys[s.Agent+"|"+s.ID] {
-			out = append(out, cloneGatewaySession(s))
+	if since.IsZero() {
+		e := gatewayProjection()
+		out := make([]GatewaySession, 0, len(e.sessions))
+		for _, s := range e.sessions {
+			if !nativeKeys[s.Agent+"|"+s.ID] {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if date, ok := localMidnight(since); ok {
+		// a range of whole days is the all-time projection's days from
+		// its first on: no copy of it is kept per range (#2776)
+		e := gatewayProjection()
+		out := make([]GatewaySession, 0, len(e.sessions))
+		for _, s := range e.sessions {
+			if nativeKeys[s.Agent+"|"+s.ID] || !s.Last.After(since) {
+				continue
+			}
+			if w, ok := gatewaySessionFrom(s, date); ok {
+				out = append(out, w)
+			}
+		}
+		return out
+	}
+	// any other start is read from the log, and not kept
+	snapshot := readLogSnapshot()
+	out, _ := buildGatewaySessions(snapshot, since, nativeKeys, provider.UsageAlias())
+	return out
+}
+
+// localMidnight is since's local date when since is that date's start.
+func localMidnight(since time.Time) (string, bool) {
+	date := since.In(time.Local).Format(time.DateOnly)
+	start, err := time.ParseInLocation(time.DateOnly, date, time.Local)
+	return date, err == nil && start.Equal(since)
+}
+
+// gatewaySessionFrom is s as it was read from the start of date on: its
+// days from then, and its models, tokens, cost and times summed from them.
+func gatewaySessionFrom(s GatewaySession, date string) (GatewaySession, bool) {
+	i := sort.Search(len(s.Daily), func(i int) bool { return s.Daily[i].Date >= date })
+	if i == len(s.Daily) {
+		return GatewaySession{}, false
+	}
+	if i == 0 {
+		return s, true
+	}
+	w := GatewaySession{Agent: s.Agent, ID: s.ID, Models: []GatewayModel{}, Daily: s.Daily[i:]}
+	models := map[string]int{} // index in w.Models, which grows
+	for _, d := range w.Daily {
+		if w.Start.IsZero() || d.first.Before(w.Start) {
+			w.Start = d.first
+		}
+		if d.last.After(w.Last) {
+			w.Last = d.last
+		}
+		w.Input += d.Input
+		w.Output += d.Output
+		w.CacheRead += d.CacheRead
+		w.CacheWrite += d.CacheWrite
+		w.CacheWrite1h += d.CacheWrite1h
+		at, ok := models[d.Model]
+		if !ok {
+			at = len(w.Models)
+			w.Models = append(w.Models, GatewayModel{Model: d.Model, Priced: true})
+			models[d.Model] = at
+		}
+		m := &w.Models[at]
+		m.Input += d.Input
+		m.Output += d.Output
+		m.CacheRead += d.CacheRead
+		m.CacheWrite += d.CacheWrite
+		m.CacheWrite1h += d.CacheWrite1h
+		m.Cost += d.Cost
+		m.Priced = m.Priced && d.Priced
+	}
+	finishGatewayModels(&w)
+	return w, true
+}
+
+// finishGatewayModels sums s's models' cost into it, counts those not priced
+// and puts the models in order, the most tokens first.
+func finishGatewayModels(s *GatewaySession) {
+	for _, m := range s.Models {
+		s.Cost += m.Cost
+		if !m.Priced && m.Input+m.Output > 0 {
+			s.Unpriced++
 		}
 	}
-	return out
+	sort.Slice(s.Models, func(i, j int) bool {
+		a, b := s.Models[i], s.Models[j]
+		if a.Input+a.Output != b.Input+b.Output {
+			return a.Input+a.Output > b.Input+b.Output
+		}
+		return a.Model < b.Model
+	})
 }
 
 func GatewaySessionByID(agent, id string, nativeKeys map[string]bool) (GatewaySession, bool) {
@@ -72,7 +173,7 @@ func GatewaySessionByID(agent, id string, nativeKeys map[string]bool) (GatewaySe
 	if nativeKeys[agent+"|"+id] {
 		return GatewaySession{}, false
 	}
-	entry := gatewayProjection(time.Time{})
+	entry := gatewayProjection()
 	i, ok := entry.byID[agent+"|"+id]
 	if !ok {
 		return GatewaySession{}, false
@@ -83,42 +184,41 @@ func GatewaySessionByID(agent, id string, nativeKeys map[string]bool) (GatewaySe
 type gatewayProjectionEntry struct {
 	version  uint64
 	meta     string
-	since    time.Time
+	zone     *time.Location // the zone its days are dates in
 	sessions []GatewaySession
 	byID     map[string]int
 }
 
+// gatewayCache keeps one projection, of all time, not one copy for every
+// native exclusion set or range: a range of days is read out of it. With
+// ~600k calls each range kept was another ~37 MB, four of them at once
+// (#2776). The log snapshot version also detects rewrites and changes of
+// config directory.
 var gatewayCache struct {
 	sync.Mutex
-	entries []gatewayProjectionEntry
+	entry *gatewayProjectionEntry
 }
 
-// Retain a few window projections, not one copy for every native exclusion set.
-// The log snapshot version also detects rewrites and changes of config directory.
-func gatewayProjection(since time.Time) gatewayProjectionEntry {
+func gatewayProjection() gatewayProjectionEntry {
 	snapshot := readLogSnapshot()
 	meta := usagePriceCacheKey(time.Now())
+	// read before the lock: it reads settings.json
+	alias := provider.UsageAlias()
 	gatewayCache.Lock()
 	defer gatewayCache.Unlock()
-	for _, e := range gatewayCache.entries {
-		if e.version == snapshot.version && e.meta == meta && e.since.Equal(since) {
-			return e
-		}
+	if e := gatewayCache.entry; e != nil && e.version == snapshot.version && e.meta == meta && e.zone == time.Local {
+		return *e
 	}
-	ss, _ := buildGatewaySessions(snapshot, since, nil)
-	e := gatewayProjectionEntry{version: snapshot.version, meta: meta, since: since, sessions: ss, byID: make(map[string]int, len(ss))}
+	ss, _ := buildGatewaySessions(snapshot, time.Time{}, nil, alias)
+	e := gatewayProjectionEntry{version: snapshot.version, meta: meta, zone: time.Local, sessions: ss, byID: make(map[string]int, len(ss))}
 	for i, s := range ss {
 		e.byID[s.Agent+"|"+s.ID] = i
+		// handed out as they are: an append is the caller's own
+		ss[i].Models, ss[i].Daily = slices.Clip(s.Models), slices.Clip(s.Daily)
 	}
 	// A failed or partial read must be retried, not published as current.
 	if snapshot.info != nil && snapshot.off == snapshot.info.Size() {
-		gatewayCache.entries = slices.DeleteFunc(gatewayCache.entries, func(old gatewayProjectionEntry) bool {
-			return old.version != e.version || old.meta != e.meta || old.since.Equal(since)
-		})
-		if len(gatewayCache.entries) >= 4 {
-			gatewayCache.entries = gatewayCache.entries[1:]
-		}
-		gatewayCache.entries = append(gatewayCache.entries, e)
+		gatewayCache.entry = &e
 	}
 	return e
 }
@@ -170,7 +270,14 @@ func gatewayDays(ss []GatewaySession) []GatewayDayUsage {
 	return out
 }
 
-func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map[string]bool) ([]GatewaySession, []GatewayDayUsage) {
+// gatewayBuilds counts the projections built from the log, for tests.
+var gatewayBuilds atomic.Int64
+
+// alias is the name each model's usage is counted under (provider.UsageAlias),
+// nil for each its own id: a call is priced by the id it was made under
+// first, then counted under the alias.
+func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map[string]bool, alias func(string) string) ([]GatewaySession, []GatewayDayUsage) {
+	gatewayBuilds.Add(1)
 	priceOf := Pricer()
 	type key struct{ agent, id string }
 	groups := map[key]*GatewaySession{}
@@ -178,11 +285,13 @@ func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map
 	type dayKey struct{ date, agent, model string }
 	daily := map[dayKey]*GatewayDayUsage{}
 	perSession := map[key]map[dayKey]*GatewayDayUsage{}
+	keep := keptStrings{}
 	snapshot.visit(since, func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Session == "" {
 			return
 		}
-		a := ReportedAs(r.Agent)
+		a := keep.of(ReportedAs(r.Agent))
+		r.Session, r.Model = keep.of(r.Session), keep.of(r.Model)
 		k := key{a, r.Session}
 		if nativeKeys != nil && nativeKeys[a+"|"+r.Session] {
 			return
@@ -197,7 +306,8 @@ func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map
 		if s.Start.IsZero() || r.Time.Before(s.Start) {
 			s.Start = r.Time
 		}
-		if end := r.Time.Add(time.Duration(max(0, r.Millis)) * time.Millisecond); end.After(s.Last) {
+		end := r.Time.Add(time.Duration(max(0, r.Millis)) * time.Millisecond)
+		if end.After(s.Last) {
 			s.Last = end
 		}
 		p := priceOf(r)
@@ -210,11 +320,15 @@ func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map
 			}
 		}
 		tokens := sessions.Tokens{Input: r.Input, Output: r.Output, CacheRead: r.CacheRead, CacheWrite: r.CacheWrite, CacheWrite1h: r.CacheWrite1h}
-		dk := dayKey{r.Time.In(time.Local).Format(time.DateOnly), a, r.Model}
+		model := r.Model // priced above by the id it was made under
+		if alias != nil {
+			model = keep.of(alias(model))
+		}
+		dk := dayKey{r.Time.In(time.Local).Format(time.DateOnly), a, model}
 		for _, kept := range []map[dayKey]*GatewayDayUsage{daily, perSession[k]} {
 			d := kept[dk]
 			if d == nil {
-				d = &GatewayDayUsage{Date: dk.date, Agent: a, Model: r.Model, Priced: true}
+				d = &GatewayDayUsage{Date: dk.date, Agent: a, Model: model, Priced: true}
 				kept[dk] = d
 			}
 			d.Input += tokens.Input
@@ -224,20 +338,30 @@ func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map
 			d.CacheWrite1h += tokens.CacheWrite1h
 			d.Cost += cost
 			d.Priced = d.Priced && priced
+			if d.first.IsZero() || r.Time.Before(d.first) {
+				d.first = r.Time
+			}
+			if end.After(d.last) {
+				d.last = end
+			}
 		}
 		s.Input += r.Input
 		s.Output += r.Output
 		s.CacheRead += r.CacheRead
 		s.CacheWrite += r.CacheWrite
 		s.CacheWrite1h += r.CacheWrite1h
-		m := models[k][r.Model]
+		m := models[k][model]
 		if m == nil {
-			m = &GatewayModel{Model: r.Model, Priced: true}
-			models[k][r.Model] = m
+			m = &GatewayModel{Model: model, Priced: true}
+			models[k][model] = m
 		}
 		m.addRecord(r, p)
 	})
 	for k, s := range groups {
+		// of their own size: the projection keeps them, and grown an item
+		// at a time they kept append's spare room, ~40% of them (#2776)
+		s.Daily = make([]GatewayDayUsage, 0, len(perSession[k]))
+		s.Models = make([]GatewayModel, 0, len(models[k]))
 		for _, d := range perSession[k] {
 			s.Daily = append(s.Daily, *d)
 		}
@@ -249,18 +373,8 @@ func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map
 		})
 		for _, m := range models[k] {
 			s.Models = append(s.Models, *m)
-			s.Cost += m.Cost
-			if !m.Priced && m.Input+m.Output > 0 {
-				s.Unpriced++
-			}
 		}
-		sort.Slice(s.Models, func(i, j int) bool {
-			a, b := s.Models[i], s.Models[j]
-			if a.Input+a.Output != b.Input+b.Output {
-				return a.Input+a.Output > b.Input+b.Output
-			}
-			return a.Model < b.Model
-		})
+		finishGatewayModels(s)
 	}
 	out := make([]GatewaySession, 0, len(groups))
 	for _, s := range groups {

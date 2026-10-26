@@ -36,6 +36,7 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudecode"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
@@ -65,11 +66,20 @@ type Account struct {
 	// Code's own while Claude Code is signed out (claude_dirs.go).
 	standIn bool
 
+	// unnamed is Claude Code's own sign-in while it is known by no name:
+	// User is a name made from its plan ("Claude Max") until Claude Code
+	// puts the account's profile in its config, as its first run does.
+	unnamed bool
+
 	// codeAssist is where a Gemini CLI or Antigravity account's requests
 	// go (google.go).
 	codeAssist string
 
-	sign   func(ctx context.Context, req *http.Request, body []byte) error
+	sign func(ctx context.Context, req *http.Request, body []byte) error
+	// renew is set on a ChatGPT account: its sign-in refreshed in place of
+	// stale, the access token the backend just called expired while it
+	// had time left (codexTokenRenewing, renewSavedLogin).
+	renew  func(ctx context.Context, stale string) (tok, accountID string, err error)
 	body   func(body []byte) []byte // request tweaks the backend insists on
 	models func() []catalog.Model
 	fetch  func(ctx context.Context) ([]catalog.Model, error)
@@ -781,13 +791,29 @@ func claudeAccount() (Provider, bool) {
 		}
 		user = claudeSignInOwner(readLogins(), l).User
 	}
-	if user == "" {
+	unnamed := user == ""
+	if unnamed {
 		user = "Claude account"
 		if plan != "" {
 			user = "Claude " + strings.ToUpper(plan[:1]) + plan[1:]
 		}
 	}
-	return claudeProvider(&Account{Agent: "claude", User: user, Plan: plan}), true
+	return claudeProvider(&Account{Agent: "claude", User: user, Plan: plan, unnamed: unnamed}), true
+}
+
+// Unnamed says the account is Claude Code's own sign-in known by no name
+// yet: its User is made from its plan, and it is named by its email once
+// Claude Code's first run has put its profile in Claude Code's config.
+func (a *Account) Unnamed() bool { return a != nil && a.unnamed }
+
+// ClaudeOwnName is the name Claude Code's own sign-in is served by now,
+// and false while it has none (Unnamed) or Claude Code is signed out.
+func ClaudeOwnName() (string, bool) {
+	p, ok := claudeAccount()
+	if !ok || p.Account == nil || !p.Account.AgentsOwn() || p.Account.standIn || p.Account.unnamed {
+		return "", false
+	}
+	return p.Account.User, true
 }
 
 // StandIn says the account is a saved one served in the place of the
@@ -951,7 +977,13 @@ func CodexTokenURLForTest(u string) func() {
 // can point it elsewhere.
 var CodexBase = "https://chatgpt.com/backend-api/codex"
 
-var codexMu sync.Mutex
+// codexMu keeps two refreshes of a Codex sign-in from running at once,
+// in this magpie and across magpies: the refresh token rotates, and the
+// second would send the one the first spent (refresh_token_reused). Two
+// magpies run at once while a restart hands the gateway over (xuanwo on
+// X), and beside a magpie run from a terminal. The sign-in is read after
+// it is taken, so one refreshed meanwhile is used as it is.
+var codexMu = filelock.Mutex{Path: func() string { return loginsPath() + ".codex.lock" }}
 
 type codexAuth struct {
 	AuthMode string `json:"auth_mode"`
@@ -986,6 +1018,9 @@ func codexAccount(home string) (Provider, bool) {
 		acct.User = codexLiveName(acct.User, bytes.TrimSpace(b))
 	}
 	acct.sign = codexSign(func(ctx context.Context) (string, string, error) { return codexToken(ctx, dir) })
+	acct.renew = func(ctx context.Context, stale string) (string, string, error) {
+		return codexTokenRenewing(ctx, dir, stale)
+	}
 	acct.body = codexBody
 	acct.models = catalog.Codex
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
@@ -1007,17 +1042,31 @@ func codexAccount(home string) (Provider, bool) {
 // sign-in (auth.json or the keychain item, codexStore.write) for Codex to
 // find.
 func codexToken(ctx context.Context, dir string) (tok, accountID string, err error) {
+	return codexTokenRenewing(ctx, dir, "")
+}
+
+// codexTokenRenewing is codexToken, and with stale, the access token the
+// backend just answered 401 "token expired" for while its exp was still
+// ahead (willz on Discord, #2973: a Team account's), refreshes the
+// sign-in all the same. Unless the store holds another token by now,
+// refreshed meanwhile by Codex or another request, which is returned
+// instead: its refresh token is the one spent already.
+func codexTokenRenewing(ctx context.Context, dir, stale string) (tok, accountID string, err error) {
 	codexMu.Lock()
 	defer codexMu.Unlock()
-	b, st, err := readCodexLogin(dir, false)
+	// a refresh asked for: the store's own, not a kept read
+	b, st, err := readCodexLogin(dir, stale != "")
 	var a codexAuth
 	if err == nil && json.Unmarshal(b, &a) == nil && a.Tokens.AccessToken != "" {
-		if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
+		if stale != "" {
+			if a.Tokens.AccessToken != stale {
+				return a.Tokens.AccessToken, codexAccountID(a), nil
+			}
+		} else if exp, _ := jwtClaims(a.Tokens.AccessToken)["exp"].(float64); exp == 0 || time.Until(time.Unix(int64(exp), 0)) > 5*time.Minute {
 			return a.Tokens.AccessToken, codexAccountID(a), nil
-		}
-		// about to be refreshed: the store's own, not a kept read, which
-		// Codex may have rotated since (its refresh token spent)
-		if st.keychain {
+		} else if st.keychain {
+			// about to be refreshed: the store's own, not a kept read,
+			// which Codex may have rotated since (its refresh token spent)
 			b, st, err = readCodexLogin(dir, true)
 			a = codexAuth{}
 			if err == nil && json.Unmarshal(b, &a) == nil && a.Tokens.AccessToken != "" {

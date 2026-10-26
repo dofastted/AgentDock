@@ -12,10 +12,13 @@ import (
 
 // The Cline plugin's provider has ClinePass's Upstream tick too (ARNO on
 // Discord): saved on it, a DeepSeek model's request reaches the plugin
-// pinned to DeepSeek's own API, on Chat and Anthropic Messages alike, and
-// its other models' requests go as sent.
-func TestClinePluginPinsDeepSeek(t *testing.T) {
+// pinned to DeepSeek's own API and a GLM model's to Z.ai's (sdytman on
+// Discord), on Chat and Anthropic Messages alike, glm-5.3-flash by
+// OpenRouter's provider.only since Cline sends it there, and its other
+// models' requests go as sent.
+func TestClinePluginPinsDeepSeekAndGLM(t *testing.T) {
 	t.Setenv("FAKE_DEEPSEEK", "1")
+	t.Setenv("FAKE_GLM", "1")
 	var mu sync.Mutex
 	var sent []map[string]any
 	pid := besideFake(t, "cline", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,30 +40,61 @@ func TestClinePluginPinsDeepSeek(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.ClinePinnable() || p.ClinePin("deepseek-v4-pro") != "" {
-		t.Fatalf("the Cline plugin's provider: pinnable %v, pinned unasked %q", p.ClinePinnable(), p.ClinePin("deepseek-v4-pro"))
+	ds, _ := p.ClinePin("deepseek-v4-pro")
+	glm, _ := p.ClinePin("glm-5.3")
+	if !p.ClinePinnable() || ds != "" || glm != "" {
+		t.Fatalf("the Cline plugin's provider: pinnable %v, pinned unasked %q %q", p.ClinePinnable(), ds, glm)
 	}
 	ask := func() []map[string]any {
 		mu.Lock()
 		sent = nil
 		mu.Unlock()
+		tries, last := 0, []int{}
 		for _, req := range []struct{ path, body string }{
 			{"/v1/chat/completions", `{"model":"` + pid + `/deepseek-v4-pro","messages":[{"role":"user","content":"hi"}]}`},
 			{"/v1/messages", `{"model":"` + pid + `/deepseek-v4-pro","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`},
+			{"/v1/chat/completions", `{"model":"` + pid + `/glm-5.3","messages":[{"role":"user","content":"hi"}]}`},
+			{"/v1/messages", `{"model":"` + pid + `/glm-5.3","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`},
 			{"/v1/chat/completions", `{"model":"` + pid + `/fake-1","messages":[{"role":"user","content":"hi"}]}`},
+			{"/v1/chat/completions", `{"model":"` + pid + `/glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}`},
 		} {
-			postProto(t, New(), req.path, req.body)
+			// each ask is one request, unless magpie tried it again: then
+			// it says why, and a try the vendor answered is never sent twice
+			rt := postProto(t, New(), req.path, req.body)
+			tries += len(rt.Tries)
+			mu.Lock()
+			last = append(last, len(sent)-1)
+			mu.Unlock()
+			for i, try := range rt.Tries {
+				if i > 0 {
+					t.Logf("%s %s: tried again after %d %q", req.path, req.body, rt.Tries[i-1].Status, rt.Tries[i-1].Error)
+				}
+				if try.Status == 200 && i < len(rt.Tries)-1 {
+					t.Fatalf("%s %s: a try the vendor answered 200 was sent again: %+v", req.path, req.body, rt.Tries)
+				}
+			}
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		if len(sent) != 3 {
-			t.Fatalf("the plugin sent %d requests", len(sent))
+		if len(sent) != tries {
+			t.Fatalf("the plugin sent %d requests for 6 asks tried %d times", len(sent), tries)
 		}
-		return append([]map[string]any(nil), sent...)
+		// each ask's request as it last went
+		var got []map[string]any
+		for n, i := range last {
+			if i < 0 || (n > 0 && i == last[n-1]) {
+				t.Fatalf("ask %d reached the plugin's vendor with no request", n)
+			}
+			got = append(got, sent[i])
+		}
+		return got
 	}
 	for i, q := range ask() {
 		if q["providerOptions"] != nil {
 			t.Fatalf("request %d pinned with the tick off: %v", i, q["providerOptions"])
+		}
+		if q["provider"] != nil {
+			t.Fatalf("request %d pinned with the tick off: provider %v", i, q["provider"])
 		}
 	}
 
@@ -72,14 +106,36 @@ func TestClinePluginPinsDeepSeek(t *testing.T) {
 	if p, err = provider.Find(pid); err != nil || !p.PinUpstream {
 		t.Fatalf("the tick wasn't kept: %+v, %v", p, err)
 	}
-	got := ask()
-	for i, q := range got[:2] {
-		po, _ := json.Marshal(q["providerOptions"])
-		if string(po) != `{"gateway":{"only":["deepseek"]}}` {
-			t.Fatalf("request %d (DeepSeek) reached the plugin with providerOptions %s", i, po)
+	// ClinePass's own DeepSeek models the plugin pins itself, with the
+	// has filter that holds them on DeepSeek and a way back (0.1.11), and
+	// it keeps a body's own providerOptions: magpie's only alone would
+	// take the plugin's place, so the tick leaves them to it
+	for _, m := range []string{"cline-pass/deepseek-v4-pro", "cline-pass/deepseek-v4.1-flash", "cline-pass/deepseek-v4.1-flash-1017"} {
+		if up, _ := p.ClinePin(m); up != "" {
+			t.Errorf("%s: magpie pinned it to %q ahead of the plugin", m, up)
+		}
+		if has := p.ClinePassHas(m, true); has != nil {
+			t.Errorf("%s: magpie sent has %v ahead of the plugin", m, has)
 		}
 	}
-	if got[2]["providerOptions"] != nil {
-		t.Fatalf("fake-1 pinned: %v", got[2]["providerOptions"])
+	if up, _ := p.ClinePin("cline-pass/glm-5.3"); up != "zai" {
+		t.Errorf("cline-pass/glm-5.3: pinned to %q, want zai", up)
+	}
+	got := ask()
+	for i, q := range got[:4] {
+		want := `{"gateway":{"only":["deepseek"]}}`
+		if i >= 2 {
+			want = `{"gateway":{"only":["zai"]}}`
+		}
+		po, _ := json.Marshal(q["providerOptions"])
+		if string(po) != want {
+			t.Fatalf("request %d reached the plugin with providerOptions %s, want %s", i, po, want)
+		}
+	}
+	if got[4]["providerOptions"] != nil || got[4]["provider"] != nil {
+		t.Fatalf("fake-1 pinned: %v %v", got[4]["providerOptions"], got[4]["provider"])
+	}
+	if po, _ := json.Marshal(got[5]["provider"]); string(po) != `{"only":["z-ai"]}` || got[5]["providerOptions"] != nil {
+		t.Fatalf("glm-5.3-flash reached the plugin with provider %s and providerOptions %v, want provider.only [z-ai] alone", po, got[5]["providerOptions"])
 	}
 }

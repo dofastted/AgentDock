@@ -20,7 +20,10 @@ package agent
 // into every profile's too, so magpie is offered in every bot's picker, not
 // the main one's alone (lijiho96940561 on X). A profile's own model and
 // provider are left as its user set them, and Disconnect takes the provider
-// out of each.
+// out of each. A profile still on the model magpie last set in the
+// connected config (one Hermes seeded or cloned from it) follows the next
+// one magpie sets there (hermesFollow; tjhhhh_84378 on Discord: another
+// bot kept the old model).
 
 import (
 	"errors"
@@ -29,6 +32,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/dirent"
 	"github.com/yetone/magpie/internal/edit"
 )
@@ -41,7 +45,7 @@ func hermes(home string) *Agent { return hermesIn(here(home)) }
 func hermesIn(at place) *Agent {
 	dir := at.hermesHome()
 	path := filepath.Join(dir, "config.yaml")
-	hermesProvider := func(p string) any { return hermesKept(p, hermesProviderAt(at.gw())) }
+	hermesProvider := func(p string) any { return hermesKept(at, p, hermesProviderAt(at.gw())) }
 	// spread puts magpie's provider, as it is now, into every other
 	// profile's config beside the one magpie connects
 	spread := func() error {
@@ -56,6 +60,9 @@ func hermesIn(at place) *Agent {
 		return errors.Join(errs...)
 	}
 	key := "hermes:" + path + ":"
+	// setKey holds the model magpie last set in the connected config,
+	// which the profiles still on it follow
+	setKey := key + "magpie.default"
 	getKey := func(k string) string { v, _ := edit.GetYAML(path, k); return v }
 	onMagpie := func() bool { return getKey("model.provider") == magpieID }
 	// joined: magpie's provider is in providers, though the model is one of
@@ -107,6 +114,7 @@ func hermesIn(at place) *Agent {
 			if joined() {
 				errs = append(errs, edit.DelYAML(path, "providers."+magpieID))
 			}
+			forget(setKey)
 			for _, p := range hermesOthers(at, dir) {
 				errs = append(errs, hermesUnwireProfile(p))
 			}
@@ -116,8 +124,23 @@ func hermesIn(at place) *Agent {
 			if !onMagpie() {
 				return ""
 			}
-			return wiringOff("Hermes", path, func(k string) (string, bool) { return edit.GetYAML(path, "providers."+magpieID+"."+k) },
-				"base_url", at.v1(), "api_key", at.gwKey())
+			get := func(k string) (string, bool) {
+				v, ok := edit.GetYAML(path, "providers."+magpieID+"."+k)
+				if k != "api_key" || !hermesEnvRef.MatchString(v) {
+					return v, ok
+				}
+				// a reference to a variable: the key it names, as Hermes
+				// reads it (PaulT on Discord: "${MAGPIE_API_KEY}" with the
+				// key in Hermes's .env was said not to reach magpie). One
+				// magpie can't see (a variable of the shell's alone) is
+				// unknown, never drift.
+				key, known := hermesKey(at, path, v)
+				if !known {
+					return at.gwKey(), true
+				}
+				return key, true
+			}
+			return wiringOff("Hermes", path, get, "base_url", at.v1(), "api_key", at.gwKey())
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
@@ -139,6 +162,12 @@ func hermesIn(at place) *Agent {
 					return edit.DelYAML(path, "model.default")
 				}
 				if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
+					// the model magpie had set: recorded, or, before the
+					// record was kept, the one the config is on through magpie
+					was := stashLoad()[setKey]
+					if was == "" && onMagpie() {
+						was = getKey("model.default")
+					}
 					if !onMagpie() {
 						stash(map[string]string{
 							key + "model.provider": getKey("model.provider"),
@@ -152,7 +181,8 @@ func hermesIn(at place) *Agent {
 					); err != nil {
 						return err
 					}
-					return spread()
+					stash(map[string]string{setKey: ref})
+					return errors.Join(spread(), hermesFollow(at, dir, was, ref))
 				}
 				if onMagpie() {
 					if err := restore(); err != nil {
@@ -239,6 +269,37 @@ func hermesOthers(at place, dir string) []string {
 	return out
 }
 
+// hermesFollow moves every profile but the one at dir that is on magpie's
+// model was, the one magpie had set in the connected config, onto ref, the
+// one it sets now. Hermes gives a new profile a copy of the launch
+// profile's model (_seed_model_config, or --clone's config.yaml) and never
+// reads it again, so without this each bot stayed on the model magpie set
+// when it was made. A profile on another model, magpie's or its own, was
+// set there by its user and is left alone.
+func hermesFollow(at place, dir, was, ref string) error {
+	if was == "" || was == ref {
+		return nil
+	}
+	var errs []error
+	for _, p := range hermesOthers(at, dir) {
+		if v, _ := edit.GetYAML(p, "model.provider"); v != magpieID {
+			continue
+		}
+		k := "model.default"
+		v, _ := edit.GetYAML(p, k)
+		if v == "" {
+			// Hermes reads model.model when default is unset
+			// (_read_config_model)
+			k = "model.model"
+			v, _ = edit.GetYAML(p, k)
+		}
+		if v == was {
+			errs = append(errs, edit.SetYAML(p, edit.KV{Path: k, Value: ref}))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // hermesUnwireProfile takes magpie's provider out of a profile's config. A
 // profile whose model is on magpie (one cloned from a connected main
 // config, or picked in that bot) would be left naming a provider that is
@@ -284,12 +345,100 @@ func hermesProviderAt(gw string) hermesProviderEntry {
 // key_cmd, request_timeout_seconds, extra_body, context_length, enabled or
 // ssl_* (hermes_cli/config_providers.py _KNOWN_PROVIDER_KEYS). Each stays,
 // as does a name of their own and a header beside magpie's User-Agent; the
-// address, key, API mode and model list are magpie's (#2030).
-func hermesKept(path string, e hermesProviderEntry) any {
+// address, key, API mode and model list are magpie's (#2030), but for a
+// key the user keeps as a reference to a variable (hermesKeptKey).
+func hermesKept(at place, path string, e hermesProviderEntry) any {
+	e.APIKey = hermesKeptKey(at, path, e.APIKey)
 	if name, ok := edit.GetYAML(path, "providers."+magpieID+".name"); ok && strings.TrimSpace(name) != "" {
 		e.Name = name
 	}
 	return yamlKept(path, "providers."+magpieID, e, "base_url", "api_key", "api_mode", "models")
+}
+
+// hermesEnvRef is a reference in a value of Hermes's config.yaml, which
+// Hermes expands as it loads it: ${VAR}, or ${env:VAR}
+// (hermes_cli/config.py _ENV_REF_RE, _env_expand_match).
+var hermesEnvRef = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+// hermesSecretSource starts a reference to a secret source other than the
+// environment (${vault:...}, ${bitwarden:...}), which Hermes leaves as it
+// is in config.yaml (_is_non_env_secret_ref).
+var hermesSecretSource = regexp.MustCompile(`^[a-z][a-z0-9_-]*:`)
+
+// hermesRefVar is the variable the body of a reference reads, "" for
+// another source or an empty ${env:} (_env_ref_var_name).
+func hermesRefVar(body string) string {
+	body = strings.TrimSpace(body)
+	if v, ok := strings.CutPrefix(body, "env:"); ok {
+		return strings.TrimSpace(v)
+	}
+	if hermesSecretSource.MatchString(body) {
+		return ""
+	}
+	return body
+}
+
+// hermesEnvFile is the .env beside the config at path, Hermes's or a
+// profile's own, where Hermes keeps keys (load_hermes_dotenv).
+func hermesEnvFile(path string) string { return filepath.Join(filepath.Dir(path), ".env") }
+
+// hermesKey is the api_key v in the config at path as Hermes sends it, each
+// reference expanded: from the .env beside it, which Hermes loads over its
+// environment, then from the environment, this machine's only. known is
+// false when a reference names a variable magpie can't see there (one only
+// a shell profile sets) or another source; Hermes would expand it, or send
+// it as it is, and magpie can't tell which.
+func hermesKey(at place, path, v string) (key string, known bool) {
+	known = true
+	key = hermesEnvRef.ReplaceAllStringFunc(v, func(ref string) string {
+		name := hermesRefVar(ref[2 : len(ref)-1])
+		if name == "" {
+			known = false
+			return ref
+		}
+		if val, ok := edit.GetEnvFile(hermesEnvFile(path), name); ok {
+			return val
+		}
+		if at.spell == nil {
+			if val, ok := appdir.LookupEnv(name); ok {
+				return val
+			}
+		}
+		known = false
+		return ref
+	})
+	return key, known
+}
+
+// hermesKeptKey is the api_key magpie writes into the config at path, where
+// want is its own key: a reference the user put there stays, whenever the
+// key it names holds (keyHolds) or magpie can't see it. One naming a key
+// the gateway doesn't take stays too, and magpie's key goes into the .env
+// beside the config under its variable, which Hermes reads over the
+// environment; a value with more than the one reference in it is magpie's
+// key again.
+func hermesKeptKey(at place, path, want string) string {
+	raw, _ := edit.GetYAML(path, "providers."+magpieID+".api_key")
+	if !hermesEnvRef.MatchString(raw) {
+		return want
+	}
+	if key, known := hermesKey(at, path, raw); !known || keyHolds(key, want) {
+		return raw
+	}
+	m := hermesEnvRef.FindStringSubmatch(raw)
+	name := hermesRefVar(m[1])
+	if m[0] != strings.TrimSpace(raw) || name == "" {
+		return want
+	}
+	// a .env made here holds a key, so only its owner reads it, as
+	// Hermes writes its own (_write_env_lines)
+	if f, err := os.OpenFile(hermesEnvFile(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
+		f.Close()
+	}
+	if edit.SetEnvFile(hermesEnvFile(path), edit.KV{Path: name, Value: want}) != nil {
+		return want
+	}
+	return raw
 }
 
 // what hermes says after a change (notice.go)

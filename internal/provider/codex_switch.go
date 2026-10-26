@@ -156,7 +156,8 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 		case l.Returns:
 			first = &ls[i]
 		}
-		if !l.Active && l.On && l.Lapsed == "" {
+		// never one Codex keeps signed in in another folder (switchSavedLogin)
+		if !l.Active && l.On && l.Lapsed == "" && l.home == "" {
 			spares = append(spares, l)
 		}
 	}
@@ -323,6 +324,7 @@ var codexWasUsedUp atomic.Bool
 // (#540). Only a change is told.
 func noteCodexUsedUp(now bool) {
 	if codexWasUsedUp.Swap(now) != now {
+		noteCodexAppOut(now)
 		catalog.Touched()
 	}
 }
@@ -334,11 +336,24 @@ func noteCodexUsedUp(now bool) {
 func KeepOnAnAccountWithRoom(ctx context.Context) {
 	t := time.NewTimer(time.Minute)
 	defer t.Stop()
+	live := false
+	defer func() {
+		if live {
+			codexLiveChecks.Add(-1)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+		// a reply's word that the account is out is read at once only
+		// while this loop, which reads the vendor itself, has started
+		// reading and still runs: a test's short-lived gateway never does
+		if !live {
+			live = true
+			codexLiveChecks.Add(1)
 		}
 		for _, agent := range switchedAgents {
 			c, cancel := context.WithTimeout(ctx, time.Minute)

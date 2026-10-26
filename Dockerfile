@@ -12,31 +12,25 @@ RUN CGO_ENABLED=0 go build -tags nogui -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" -o /out/magpie . \
     && mkdir -p /config/home /config/cache /config/data /config/state
 
-# A shell for the container's terminal: NAS panels (Synology, 1Panel,
-# Portainer) open /bin/bash or /bin/sh, and distroless has neither, so a
-# terminal there failed with "stat /bin/bash: no such file or directory".
-# Debian 12's bash (with the libtinfo it links), which runs on the glibc of
-# distroless's own Debian 12, and busybox for ls, cat and the like.
-FROM debian:12-slim AS shell
-RUN mkdir -p /out/bin /out/lib \
-    && cp /bin/bash /out/bin/bash \
-    && cp -L "$(ldd /bin/bash | awk '/libtinfo/ {print $3}')" /out/lib/
+# Debian, not distroless: a subscription's CLI is installed with its
+# vendor's `curl … | bash` (Cursor, Devin, Grok Build), and the CLI it
+# installs is a glibc binary that needs a full system's loader and
+# libraries. distroless with a copied curl ran the installer, but Cursor's
+# cursor-agent then failed with "cannot execute: required file not found".
+# Debian 12 has the glibc, libgcc and libstdc++ the plugins' Bun needs too,
+# and bash for a NAS panel's terminal. nonroot keeps distroless's uid 65532,
+# so a volume made by an older image stays writable.
+FROM debian:12-slim
 
-FROM busybox:1.37-uclibc AS busybox
-
-# cc, not static: plugins run on Bun, which magpie downloads on first use
-# and which needs glibc (static has no libc at all, and Bun's musl build
-# would need musl). cc is static plus glibc, libgcc and libstdc++.
-FROM gcr.io/distroless/cc-debian12:nonroot
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 65532 nonroot \
+    && useradd -u 65532 -g nonroot -d /config/home -s /bin/bash nonroot
 
 COPY --from=build /out/magpie /magpie
-COPY --from=busybox /bin/busybox /bin/busybox
-COPY --from=shell /out/bin/bash /bin/bash
-COPY --from=shell /out/lib/ /usr/lib/
-# busybox's commands, and magpie on PATH, so `magpie accounts add …` works
-# in that terminal
-USER root
-RUN ["/bin/busybox", "sh", "-c", "/bin/busybox --install -s /bin && mkdir -p /usr/local/bin && ln -s /magpie /usr/local/bin/magpie"]
+# magpie on PATH, so `magpie accounts add …` works in that terminal
+RUN ln -s /magpie /usr/local/bin/magpie
 USER nonroot
 COPY --from=build --chown=65532:65532 /config /config
 

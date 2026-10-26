@@ -49,6 +49,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/appdir"
 )
 
 func (k zcodeKey) team() bool { return k.Org != "" && k.Project != "" }
@@ -109,7 +111,7 @@ func zcodeOwnTeam(store map[string]string, secret []byte) (zcodeKey, bool) {
 		} `json:"providerFamilyConnectionSelections"`
 		Legacy map[string]string `json:"modelProviderFamilySelectedKeys"` // before providerFamilyConnectionSelections (migrateLegacyAccountConnectionSettings)
 	}
-	if !readJSON(filepath.Join(home, ".zcode", "v2", "setting.json"), &set) {
+	if !readJSON(filepath.Join(appdir.ZCodeHome(home), ".zcode", "v2", "setting.json"), &set) {
 		return zcodeKey{}, false
 	}
 	families := []string{"zai", "bigmodel"}

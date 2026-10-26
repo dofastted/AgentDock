@@ -45,7 +45,7 @@ func modelNameIn(names map[string]string, pid, model string) (string, bool) {
 // and the model.
 func splitRef(ref string) (*Provider, string, error) {
 	r := strings.TrimPrefix(strings.TrimSpace(ref), "magpie/")
-	if strings.HasPrefix(r, GroupPrefix) {
+	if IsGroupRef(r) {
 		return nil, "", errors.New("that is a routing group, not a provider's model")
 	}
 	pid, model, ok := strings.Cut(r, "/")
@@ -213,7 +213,7 @@ func PriceKey(pid, model string) (string, bool) {
 // reset` over a price still in the file would have the user believe it gone.
 func DropModelPrice(key string) (bool, error) {
 	key = strings.TrimPrefix(strings.TrimSpace(key), "magpie/")
-	if strings.HasPrefix(key, GroupPrefix) {
+	if IsGroupRef(key) {
 		return false, errors.New("that is a routing group, not a provider's model")
 	}
 	pid, model, ok := strings.Cut(key, "/")
@@ -247,26 +247,9 @@ func setModelEfforts(ref string, efforts []string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	all := p.Known(model)
-	var keep []string
-	for _, e := range efforts {
-		e = strings.ToLower(strings.TrimSpace(e))
-		if e == "" {
-			continue
-		}
-		if len(all) == 0 && !slices.Contains(Levels, e) {
-			return false, fmt.Errorf("%q is not a reasoning level (they are %s)", e, strings.Join(Levels, ", "))
-		}
-		if len(all) > 0 && !slices.Contains(all, e) {
-			return false, fmt.Errorf("%s/%s has no reasoning level %q (it has %s)", p.ID, model, e, strings.Join(all, ", "))
-		}
-		if !slices.Contains(keep, e) {
-			keep = append(keep, e)
-		}
-	}
-	keep = effortsKept(all, keep) // in the vendor's order
-	if len(keep) == len(all) {
-		keep = nil
+	keep, err := keptEfforts(p, model, efforts)
+	if err != nil {
+		return false, err
 	}
 	s := settings.Load()
 	key := p.ID + "/" + model
@@ -289,6 +272,35 @@ func setModelEfforts(ref string, efforts []string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// keptEfforts is the levels a user keeps of p's model as ModelEfforts
+// holds them: those given, checked against the model's own (or Levels, for
+// a model with none known), in the vendor's order, and none when they are
+// all of them.
+func keptEfforts(p *Provider, model string, efforts []string) ([]string, error) {
+	all := p.Known(model)
+	var keep []string
+	for _, e := range efforts {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if len(all) == 0 && !slices.Contains(Levels, e) {
+			return nil, fmt.Errorf("%q is not a reasoning level (they are %s)", e, strings.Join(Levels, ", "))
+		}
+		if len(all) > 0 && !slices.Contains(all, e) {
+			return nil, fmt.Errorf("%s/%s has no reasoning level %q (it has %s)", p.ID, model, e, strings.Join(all, ", "))
+		}
+		if !slices.Contains(keep, e) {
+			keep = append(keep, e)
+		}
+	}
+	keep = effortsKept(all, keep) // in the vendor's order
+	if len(keep) == len(all) {
+		keep = nil
+	}
+	return keep, nil
 }
 
 // SetModelReasonless says whether a provider's model, spelt
@@ -621,7 +633,7 @@ func setModelSame(ref, same string) (bool, error) {
 
 // ImageOverride is the user's answer for whether pid's model takes images.
 func ImageOverride(pid, model string) (bool, bool) {
-	return ImageOverrideIn(settings.Load(), pid, model)
+	return ImageOverrideIn(settings.Shared(), pid, model)
 }
 
 // ImageOverrideIn is ImageOverride from settings s already read: a list of
@@ -1166,7 +1178,7 @@ func SetUpstreamName(ref, name string) error {
 // now.
 func DropUpstreamName(key string) (bool, error) {
 	key = strings.TrimPrefix(strings.TrimSpace(key), "magpie/")
-	if strings.HasPrefix(key, GroupPrefix) {
+	if IsGroupRef(key) {
 		return false, errors.New("that is a routing group, not a provider's model")
 	}
 	pid, model, ok := strings.Cut(key, "/")

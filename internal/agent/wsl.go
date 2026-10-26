@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -537,6 +538,10 @@ var wslKinds = []wslKind{
 	{id: "mothx", name: "MothX", dir: ".mothx", bin: "mothx", in: mothxIn,
 		restart: newNotice("{agent} in WSL {distro} reads its settings at start-up — restart open mothx sessions to use this."),
 		asleep:  wslOwnAsleep("mothx", "model")},
+	// PenguinHarness's ~/.penguin/data in the distro: its PENGUIN_HOME
+	// there isn't read; its server reads the file again as it changes
+	{id: "penguin", name: "PenguinHarness", dir: ".penguin", bin: "penguin", in: penguinIn,
+		asleep: wslOwnAsleep("penguin", "model")},
 	{id: "reasonix", name: "Reasonix", bin: "reasonix", in: reasonixIn, version: true,
 		accept: func(d distro) bool {
 			v := d.Versions["reasonix"]
@@ -653,6 +658,19 @@ func wslAgent(k wslKind, d distro) *Agent {
 	a := k.in(d.place(id))
 	a.ID, a.Name, a.Aliases, a.Bin, a.UA, a.WSL = id, k.name+" · WSL "+d.Name, nil, "", nil, d.Name
 	a.Gateway = d.base
+	a.reachFrom = func(base string) (ok, known bool) {
+		if !d.live() {
+			return false, false // never started to be asked
+		}
+		key := "wsl " + d.Name + " " + base
+		return probed(key, func() bool {
+			if !d.live() {
+				return true // stopped since: never started to be asked
+			}
+			ok, told := wslReach(d.Name, base)
+			return ok || !told // can't tell: taken as answering
+		})
+	}
 	if d.Running {
 		a.Home = d.local(d.Home)
 	}
@@ -718,9 +736,18 @@ func wslAgent(k wslKind, d distro) *Agent {
 			return check()
 		}
 	}
-	for _, p := range []*func() bool{&a.Routed, &a.Joined, &a.Beside, &a.Added} {
+	for _, p := range []*func() bool{&a.Routed, &a.Joined, &a.Beside} {
 		if f := *p; f != nil {
 			*p = func() bool { return d.live() && f() }
+		}
+	}
+	// a stopped distro's app can't be read: unknown, not "not added"
+	if f := a.Added; f != nil {
+		a.Added = func() (bool, bool) {
+			if !d.live() {
+				return false, false
+			}
+			return f()
 		}
 	}
 	// what a set leaves is kept at once, in case the distro stops before
@@ -916,6 +943,51 @@ var wslOn = runtime.GOOS == "windows"
 func wslLooks() bool { return wslOn && !settings.Load().NoWSLAgents }
 
 // wslRun runs wsl.exe; a var for tests.
+// wslReachScript asks, inside a distro, whether anything answers at $1
+// (http://host:port) on host $2, port $3: "ok" when it does, "no" when the
+// connection is refused or times out, "?" when the distro has nothing to
+// ask with.
+const wslReachScript = `u="$1"; h="$2"; p="$3"
+if command -v curl >/dev/null 2>&1; then
+  curl -s -o /dev/null -m 3 "$u/v1/models"; c=$?
+  case $c in 0) echo ok;; 7|28) echo no;; *) echo '?';; esac; exit 0
+fi
+if command -v wget >/dev/null 2>&1; then
+  wget -q -O /dev/null -T 3 -t 1 "$u/v1/models"; c=$?
+  case $c in 0|8) echo ok;; 4) echo no;; *) echo '?';; esac; exit 0
+fi
+if command -v bash >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  if timeout 3 bash -c 'exec 3<>/dev/tcp/'"$h"'/'"$p" 2>/dev/null; then echo ok; else echo no; fi; exit 0
+fi
+echo '?'`
+
+// wslReach is whether base answers from inside the running distro name,
+// and whether that could be told.
+func wslReach(name, base string) (ok, known bool) {
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" {
+		return false, false
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"https": "443"}[u.Scheme]
+		if port == "" {
+			port = "80"
+		}
+	}
+	out, err := wslRun(10*time.Second, "-d", name, "-e", "sh", "-c", wslReachScript, "sh", strings.TrimSuffix(base, "/"), u.Hostname(), port)
+	if err != nil {
+		return false, false
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "ok":
+		return true, true
+	case "no":
+		return false, true
+	}
+	return false, false
+}
+
 var wslRun = func(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -1144,6 +1216,28 @@ func wslClaudeStandIn(model string) string {
 		d.mirror(cfg)
 		path := filepath.Join(d.local(d.Home), ".claude", "settings.json")
 		if m := claudeStandInAt(path, model, d.base()); m != "" {
+			return m
+		}
+	}
+	return ""
+}
+
+// wslClaudeClassifier is ClassifierStandIn for a Claude Code in a running
+// distro, known by the same User-Agent.
+func wslClaudeClassifier(model string) string {
+	wsl.Lock()
+	wslRunningLocked()
+	var ds []distro
+	for _, n := range wsl.names {
+		if d := wsl.seen[n]; d != nil && wsl.running[n] && wslKindOf("claude").found(*d) {
+			ds = append(ds, *d)
+		}
+	}
+	wsl.Unlock()
+	cfg := wslConfig()
+	for _, d := range ds {
+		d.mirror(cfg)
+		if m := claudeClassifierIn(d.place("claude@wsl:"+d.Name), model); m != "" {
 			return m
 		}
 	}
@@ -1419,8 +1513,8 @@ func wslSetting(cfg, key string) (val string, ok bool) {
 // what an agent in WSL says after a change, besides its kind's restart
 // (notice.go)
 var (
-	noticeWSLNotMirrored = newNotice("WSL {distro} is in {net} networking, not mirrored, so its {agent} was pointed at Windows ({url}) rather than 127.0.0.1; that answers only while the gateway listens beyond loopback and Windows' firewall lets WSL in. For 127.0.0.1, set networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig and run wsl --shutdown, then pick the model again.")
-	noticeWSLNoMode      = newNotice("magpie couldn't ask WSL {distro} its networking mode (it has no wslinfo) and %UserProfile%\\.wslconfig doesn't set it to mirrored, so its {agent} was pointed at Windows ({url}) rather than 127.0.0.1; that answers only while the gateway listens beyond loopback and Windows' firewall lets WSL in. For 127.0.0.1, set networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig and run wsl --shutdown, then pick the model again.")
+	noticeWSLNotMirrored = newNotice("WSL {distro} is in {net} networking, not mirrored, so its {agent} was pointed at Windows ({url}) rather than 127.0.0.1; magpie listens there for WSL, and it answers once Windows' firewall lets WSL in. For 127.0.0.1, set networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig and run wsl --shutdown, then pick the model again.")
+	noticeWSLNoMode      = newNotice("magpie couldn't ask WSL {distro} its networking mode (it has no wslinfo) and %UserProfile%\\.wslconfig doesn't set it to mirrored, so its {agent} was pointed at Windows ({url}) rather than 127.0.0.1; magpie listens there for WSL, and it answers once Windows' firewall lets WSL in. For 127.0.0.1, set networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig and run wsl --shutdown, then pick the model again.")
 	noticeWSLNoRelay     = newNotice("WSL {distro} is in {net} networking with localhostForwarding=false in %UserProfile%\\.wslconfig, so 127.0.0.1 there, where its {agent} was pointed, isn't relayed to Windows, where magpie listens. Remove localhostForwarding=false under [wsl2] (it is on by default) and run wsl --shutdown.")
 	noticeWSLAsleep      = newNotice("WSL {distro} isn't running: magpie shows what it last saw there, and starts it only to change something.")
 )

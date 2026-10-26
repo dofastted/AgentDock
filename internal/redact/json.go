@@ -10,11 +10,16 @@ import (
 
 // kept are the keys whose strings are left alone: ids, names and kinds the
 // vendor needs as they are, and what is sealed or encoded (a thinking
-// block's signature, reasoning's encrypted content, an image's data).
+// block's signature, reasoning's encrypted content, an image's data). A
+// tool is named by its name and, for an MCP tool, its server's: a
+// Responses function_call's namespace, an mcp_call's server_label,
+// Anthropic's mcp_tool_use server_name. Codex checks a namespace against
+// ^[a-zA-Z0-9_-]+$, so one with a word masked in it was a 400 on every turn
+// that replayed the call (#3143).
 var kept = map[string]bool{
 	"signature": true, "encrypted_content": true, "data": true, "thoughtSignature": true, "thought_signature": true,
 	"model": true, "id": true, "tool_use_id": true, "call_id": true, "item_id": true, "type": true, "role": true,
-	"name": true, "previous_response_id": true, "prompt_cache_key": true, "media_type": true, "mime_type": true,
+	"name": true, "namespace": true, "server_label": true, "server_name": true, "previous_response_id": true, "prompt_cache_key": true, "media_type": true, "mime_type": true,
 	"mimeType": true, "url": true, "image_url": true, "file_id": true, "reasoning_effort": true, "effort": true,
 	"stop_reason": true, "finish_reason": true, "status": true, "object": true, "event": true,
 }
@@ -115,11 +120,16 @@ func scan(body []byte) (signed, args, defs []string) {
 // (Anthropic, Chat Completions, Responses, Gemini) and the choice among
 // them, the output's schema (Chat's response_format, Responses' text,
 // Anthropic's output_format and output_config, Gemini's generationConfig),
-// Responses' reasoning and include.
+// Responses' reasoning and include, how the reply streams
+// (stream_options, whose reasoning_summary_delivery the vendor checks is
+// "sequential" or "sequential_cutoff", #3144), and the client's ids that
+// no model reads (client_metadata: Codex's installation, session, thread,
+// turn and window, as a JSON string in x-codex-turn-metadata, which the
+// vendor and magpie's own sessions match a turn by).
 var defKeys = []string{
 	"tools", "tool_choice", "functions", "function_call", "toolConfig", "tool_config",
 	"response_format", "text", "reasoning", "include", "output_format", "output_config",
-	"generationConfig", "generation_config",
+	"generationConfig", "generation_config", "stream_options", "client_metadata",
 }
 
 // defItems are the Responses input items that carry tools: Responses
@@ -204,7 +214,13 @@ func walk(b []byte, fn func(path, key, s string) string) (out []byte, ok bool) {
 		return b, true
 	}
 	w.out.Write(b[w.last:])
-	return w.out.Bytes(), true
+	out = w.out.Bytes()
+	if cap(out)-len(out) > len(out)/8 {
+		// placeholders longer than what they stand for grew it past the
+		// room made for it: held as it is, a doubled buffer (#3383)
+		out = bytes.Clone(out)
+	}
+	return out, true
 }
 
 type walker struct {
@@ -314,6 +330,12 @@ func (w *walker) value(i int, path, key string) (int, bool) {
 			return i, false
 		}
 		if t := w.fn(path, key, s); t != s {
+			if w.out.Cap() == 0 {
+				// the masked body is about the body's size: grown by
+				// doubling, its buffer was up to twice that, held as the
+				// request's body while it streams (#3383)
+				w.out.Grow(len(w.in) + len(w.in)/16 + 64)
+			}
 			w.out.Write(w.in[w.last:i])
 			w.out.WriteByte('"')
 			w.out.WriteString(jsonEscape(t))
@@ -359,19 +381,35 @@ func jsonEscape(s string) string {
 // placeholder: either way the text no longer matched its signature, and
 // Anthropic answers 400 "Invalid `signature` in `thinking` block".
 func MaskJSON(body []byte, o Options) ([]byte, int) {
+	o.sent = true
 	signed, args, defs := scan(body)
+	masked := func(path, key, s string) bool {
+		return !keepIn(path, key, s, args, defs) && (signed == nil || !under(path, signed))
+	}
+	if o.Model != nil {
+		// the model is asked once, for all of the request's texts
+		var texts []string
+		if _, ok := walk(body, func(path, key, s string) string {
+			if masked(path, key, s) {
+				texts = append(texts, s)
+			}
+			return s
+		}); ok {
+			o = withModel(o, texts)
+		}
+	}
 	total := 0
 	var seen []string // value, placeholder, value, placeholder…
 	put := func(kind, v string) string {
-		p := placeholder(kind, v)
+		p := o.put()(kind, v)
 		seen = append(seen, v, p)
 		return p
 	}
 	out, ok := walk(body, func(path, key, s string) string {
-		if keepIn(path, key, s, args, defs) || signed != nil && under(path, signed) {
+		if !masked(path, key, s) {
 			return s
 		}
-		t, n := mask(s, o, put)
+		t, n := mask(s, o, put, asJSON(key, ""))
 		total += n
 		return t
 	})
@@ -402,7 +440,7 @@ func MaskJSON(body []byte, o Options) ([]byte, int) {
 		// number or an address the vendor wrote of its own can be one
 		// masked in another conversation (13800138000 is in many), and
 		// masked, its text would no longer match its signature
-		t, n := apply(t, knownSpans(t, Options{Secrets: o.Secrets}), placeholder)
+		t, n := apply(t, sentKnownSpans(t, Options{Secrets: o.Secrets}), o.put(), o)
 		total += n
 		return t
 	})
@@ -437,8 +475,11 @@ func asJSON(key, eventType string) bool {
 }
 
 // RestoreJSON puts the values back in a response body.
-func RestoreJSON(body []byte) []byte {
-	if !bytes.Contains(body, []byte("{{")) {
+func RestoreJSON(body []byte) []byte { return restoreJSON(body, nil) }
+
+// restoreJSON is RestoreJSON, counting in put as restore does.
+func restoreJSON(body []byte, put map[string]int) []byte {
+	if !bytes.Contains(body, []byte("{{")) && !hasShapes(body) {
 		return body
 	}
 	typ := ""
@@ -446,10 +487,10 @@ func RestoreJSON(body []byte) []byte {
 		if path == "type" {
 			typ = s
 		}
-		return Restore(s, asJSON(key, typ))
+		return restore(s, asJSON(key, typ), put)
 	})
 	if !ok {
-		return []byte(Restore(string(body), false))
+		return []byte(restore(string(body), false, put))
 	}
 	return out
 }

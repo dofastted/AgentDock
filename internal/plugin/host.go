@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	_ "embed"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -997,6 +999,8 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		"prefer":        l.Prefer,
 		"options":       settings.Load().PluginOptions,
 		"plugins":       items,
+		"loadMillis":    pluginLoadWait.Milliseconds(),
+		"listMillis":    pluginListWait.Milliseconds(),
 	}, &res)
 	if err != nil {
 		crashed := !h.alive()
@@ -1012,6 +1016,16 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	}
 	return h, false, nil
 }
+
+// pluginLoadWait bounds one plugin's load in the host, and
+// pluginListWait one provider's model list in a listing: a plugin stuck on
+// its vendor (a sign-in refused and tried again) is given up on by itself,
+// within init's and refreshDeadline's own bounds, rather than holding up
+// every plugin loaded or listed with it. Tests shorten them.
+var (
+	pluginLoadWait = 20 * time.Second
+	pluginListWait = 20 * time.Second
+)
 
 // drainStderr logs the child's stderr a line at a time. A line over 4 MiB
 // stops the scanner; the rest is read and dropped, so the child is never left
@@ -1033,8 +1047,9 @@ func (h *host) read(out io.Reader) {
 	for {
 		line, err := readLine(r, h.lineLimit())
 		if len(line) > 0 {
-			var m message
-			if json.Unmarshal(line, &m) == nil {
+			if m, ok := chunkFrame(line); ok {
+				h.dispatch(m)
+			} else if json.Unmarshal(line, &m) == nil {
 				h.dispatch(m)
 			}
 		}
@@ -1055,6 +1070,45 @@ func (h *host) read(out io.Reader) {
 		err = errors.New("the plugin host quit")
 	}
 	h.fail(fmt.Errorf("the plugin host quit: %v", err))
+}
+
+var (
+	chunkHead = []byte(`{"id":`)
+	chunkMid  = []byte(`,"event":"chunk","data":"`)
+)
+
+// chunkFrame is the chunk frame in line when it has exactly the shape
+// host.js's chunkLine writes, {"id":N,"event":"chunk","data":"…"}, with
+// nothing in the data JSON would escape: the reply's bytes come in these,
+// and encoding/json scanned every base64 byte of each, several times what
+// decoding them costs. Any other line is not one, and is unmarshalled; push
+// checks the data is base64 of a frame's size either way.
+func chunkFrame(line []byte) (message, bool) {
+	line = bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+	rest, ok := bytes.CutPrefix(line, chunkHead)
+	if !ok {
+		return message{}, false
+	}
+	i := bytes.IndexByte(rest, ',')
+	if i <= 0 || i > 18 {
+		return message{}, false
+	}
+	var id int64
+	for _, c := range rest[:i] {
+		if c < '0' || c > '9' {
+			return message{}, false
+		}
+		id = id*10 + int64(c-'0')
+	}
+	data, ok := bytes.CutPrefix(rest[i:], chunkMid)
+	if !ok {
+		return message{}, false
+	}
+	data, ok = bytes.CutSuffix(data, []byte(`"}`))
+	if !ok || bytes.IndexByte(data, '"') >= 0 || bytes.IndexByte(data, '\\') >= 0 {
+		return message{}, false
+	}
+	return message{ID: id, Event: "chunk", Data: string(data)}, true
 }
 
 // readLine reads one '\n'-terminated line, at most max bytes, so a child that
@@ -1143,7 +1197,39 @@ func (h *host) enqueueOwned(ctx context.Context, v any, done chan error, c *call
 	if err != nil {
 		return err
 	}
-	req := writeReq{b: append(b, '\n'), done: done}
+	return h.enqueueLine(ctx, append(b, '\n'), done, c, state)
+}
+
+// fetchLine is Fetch's call id for r, as the line the host reads, byte
+// for byte what json.Marshal wrote of it: its body in base64, written
+// once into a line made for it. json.Marshal grew its buffer to the
+// encoded body twice over and copied it out twice more, so a 1 MB request
+// was some 5 MB more before it reached the plugin (#3472).
+func fetchLine(id int64, r FetchRequest) ([]byte, error) {
+	head, err := json.Marshal(map[string]any{"id": id, "method": "fetch", "params": r})
+	if err != nil {
+		return nil, err
+	}
+	// head ends in params' "}" and the call's: body and window go before
+	// them, in the order the params struct gave them
+	tail := `,"window":` + strconv.Itoa(streamWindow) + "}}\n"
+	n := len(head) - 2 + len(tail)
+	if len(r.Body) > 0 {
+		n += len(`,"body":""`) + base64.StdEncoding.EncodedLen(len(r.Body))
+	}
+	b := make([]byte, 0, n)
+	b = append(b, head[:len(head)-2]...)
+	if len(r.Body) > 0 {
+		b = append(b, `,"body":"`...)
+		b = base64.StdEncoding.AppendEncode(b, r.Body)
+		b = append(b, '"')
+	}
+	return append(b, tail...), nil
+}
+
+// enqueueLine is enqueueOwned for a call already a line.
+func (h *host) enqueueLine(ctx context.Context, line []byte, done chan error, c *call, state callState) error {
+	req := writeReq{b: line, done: done}
 	for {
 		h.mu.Lock()
 		if !h.alive() {
@@ -1611,13 +1697,13 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	params := struct {
-		FetchRequest
-		Body   []byte `json:"body,omitempty"`
-		Window int    `json:"window"`
-	}{r, r.Body, streamWindow}
+	line, err := fetchLine(id, r)
+	if err != nil {
+		c.settle(err)
+		return nil, err
+	}
 	c.watchCtx(ctx)
-	err = h.enqueueCall(ctx, map[string]any{"id": id, "method": "fetch", "params": params}, nil, c)
+	err = h.enqueueLine(ctx, line, nil, c, callSending)
 	if err != nil {
 		c.settle(err)
 		return nil, err

@@ -56,7 +56,7 @@ func TestLeftAloneRunsNoCLI(t *testing.T) {
 			c.Unlock()
 		}
 		loginsMu.Lock()
-		loginsSeenAt = time.Time{}
+		loginsSeenAt.Store(0)
 		loginsMu.Unlock()
 	}
 	loop := func() {

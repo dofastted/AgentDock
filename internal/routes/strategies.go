@@ -47,7 +47,8 @@ func identity(n int) []int {
 // the same (#718). Only holding one, or one that runs out after the week
 // renews, changes nothing. Those alike stay in their order, keeping the
 // vendor's prompt cache warm. Past that, whichever has the most left, and
-// one all but used up only when nothing else can take it. Only the windows
+// one all but used up only when nothing else can take it, one that goes
+// on on its credits first of those (spentBefore). Only the windows
 // that count the model do: Opus's own weekly allowance being used up leaves
 // Sonnet alone.
 //
@@ -90,11 +91,20 @@ var Smart = Strategy{Order: func(_ string, seats []Seat) []int {
 		}
 		return false
 	})
-	for _, l := range [][]int{low, spent} {
-		sort.SliceStable(l, func(i, j int) bool { return seats[l[i]].Used < seats[l[j]].Used })
-	}
+	sort.SliceStable(low, func(i, j int) bool { return seats[low[i]].Used < seats[low[j]].Used })
+	sort.SliceStable(spent, func(i, j int) bool { return spentBefore(seats[spent[i]], seats[spent[j]]) })
 	return append(append(fine, low...), spent...)
 }}
+
+// spentBefore orders two seats all but used up: one that goes on on its
+// credits first (a Codex account holding them answers past its allowance;
+// one with nothing left is refused), then the one with the most left.
+func spentBefore(a, b Seat) bool {
+	if a.Credits != b.Credits {
+		return a.Credits
+	}
+	return a.Used < b.Used
+}
 
 // Ordered tries a pool in its order: the first until it can't answer.
 var Ordered = Strategy{Exact: true, Order: func(_ string, seats []Seat) []int { return identity(len(seats)) }}
@@ -115,11 +125,15 @@ var Rotate = Strategy{Order: func(pool string, seats []Seat) []int {
 
 // LeastUsed puts a subscription, or a key that reads its own windows, by the
 // share of its allowance used, as the vendor says; then, and for other
-// keys, by what magpie sent it lately.
+// keys, by what magpie sent it lately. Of those all but used up, one that
+// goes on on its credits goes first (spentBefore).
 var LeastUsed = Strategy{ByUse: true, Order: func(_ string, seats []Seat) []int {
 	idx := identity(len(seats))
 	sort.SliceStable(idx, func(a, b int) bool {
 		sa, sb := seats[idx[a]], seats[idx[b]]
+		if ta, tb := tier(sa.Used), tier(sb.Used); ta == 2 && tb == 2 && sa.Credits != sb.Credits {
+			return sa.Credits
+		}
 		if sa.Used != sb.Used {
 			return sa.Used < sb.Used
 		}
@@ -136,7 +150,8 @@ var LeastUsed = Strategy{ByUse: true, Order: func(_ string, seats []Seat) []int 
 // are Smart's: one at 90% or more of any window that counts the model — the
 // five hours too, a rate cap it would be sent into before its allowance was
 // read again — waits until the others can't answer, one all but used up
-// until nothing else can; each tier by the share used. Among the rest, one
+// until nothing else can; each tier by the share used, one all but used up
+// that goes on on its credits first (spentBefore). Among the rest, one
 // not known that tells what it has left as it answers goes first while it
 // isn't, as in Smart, else it would never be known; then the pace, those
 // alike within a tenth by what magpie sent them lately, then in their
@@ -176,6 +191,8 @@ var Pace = Strategy{ByUse: true, Order: func(_ string, seats []Seat) []int {
 		sa, sb := seats[idx[a]], seats[idx[b]]
 		if ta, tb := tier(sa.Used), tier(sb.Used); ta != tb {
 			return ta < tb
+		} else if ta == 2 && sa.Credits != sb.Credits {
+			return sa.Credits
 		} else if ta > 0 {
 			if sa.Used != sb.Used {
 				return sa.Used < sb.Used
@@ -211,6 +228,36 @@ func First(best, n int) []int {
 	return append(append([]int{best}, idx[:best]...), idx[best+1:]...)
 }
 
+// FreeFirst spends what costs nothing before what is paid for: the seats
+// whose model its vendor serves at no cost to the subscription's allowance
+// or credits go first, in their listed order, and the rest after them, also
+// in their listed order. So a request whose model is free somewhere on the
+// pool uses that first, and only when those can't answer does it go to one
+// that spends credits or quota — nothing is left unused that cost nothing.
+//
+// It orders one tier only, unlike Smart: a free seat is not pushed behind a
+// paid one for running low, since the free one spends nothing by running
+// out of. Among the paid, the listed order stands rather than Smart's
+// renewal-weighted one, because what this routing is for is the free tier;
+// set a provider's own routing (Smart, in order, weekly pace) if the paid
+// seats should be spent smartly among themselves — a provider or group in
+// this group keeps its own routing either way.
+//
+// A seat whose model costs nothing nowhere is not free: it goes with the
+// paid ones, so a routing set on a pool without free models behaves as In
+// order.
+var FreeFirst = Strategy{ByFree: true, Order: func(_ string, seats []Seat) []int {
+	free, paid := make([]int, 0, len(seats)), make([]int, 0, len(seats))
+	for i, s := range seats {
+		if s.Free {
+			free = append(free, i)
+		} else {
+			paid = append(paid, i)
+		}
+	}
+	return append(free, paid...)
+}}
+
 // Builtin are the routings besides Smart and their strategies, as
 // plugins/rotation registers them.
 var Builtin = map[string]Strategy{
@@ -219,4 +266,6 @@ var Builtin = map[string]Strategy{
 	provider.LeastUsed: LeastUsed,
 	provider.Pace:      Pace,
 	provider.Weighted:  Weighted,
+	provider.FreeFirst: FreeFirst,
+	provider.Fastest:   Fastest,
 }

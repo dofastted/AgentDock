@@ -43,7 +43,7 @@ func TestFoundGroupStaysWithAProviderOff(t *testing.T) {
 		return out
 	}
 	listed := func() bool {
-		return slices.ContainsFunc(Served(), func(e Entry) bool { return e.ID == GroupPrefix+"auto-x" })
+		return slices.ContainsFunc(Served(), func(e Entry) bool { return e.ID == AutoPrefix+"x" })
 	}
 	all := []string{"a/x", "b/x", "c/x"}
 	if got := members(); !slices.Equal(got, all) {

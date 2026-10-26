@@ -42,6 +42,8 @@ type inflight struct {
 	// begun: every route begun for it, the first its own, for endBroken
 	mu    sync.Mutex
 	begun []*Route
+	// unrouted: its watch while no route is begun for it (unrouted.go)
+	unrouted *unroutedHold
 }
 
 type inflightKey struct{}
@@ -82,6 +84,9 @@ func inflightOf(ctx context.Context) *inflight {
 // func that puts back where it stood before: a try out at the vendor whose
 // own requests wait for room in the minute (rpmTransport) is out at the
 // vendor again once they go.
+//
+// A phase is a wait magpie knows of (noteWait): one before a route is
+// begun has unroutedMost, not unroutedUnknown.
 func notePhase(ctx context.Context, phase string) (restore func()) {
 	f := inflightOf(ctx)
 	if f == nil {
@@ -89,7 +94,8 @@ func notePhase(ctx context.Context, phase string) (restore func()) {
 	}
 	was, _ := f.phase.Load().(string)
 	f.phase.Store(phase)
-	return func() { f.phase.Store(was) }
+	waited := noteWait(ctx)
+	return func() { waited(); f.phase.Store(was) }
 }
 
 // noteRoute ties ctx's request in flight to its routing trace, the first
@@ -99,7 +105,15 @@ func noteRoute(ctx context.Context, rt *Route) {
 		f.route.CompareAndSwap(nil, rt)
 		f.mu.Lock()
 		f.begun = append(f.begun, rt)
+		var shown *Route
+		if f.unrouted != nil {
+			shown = f.unrouted.routed()
+		}
 		f.mu.Unlock()
+		if shown != nil {
+			// the route that showed it while it waited gives way to its own
+			f.unrouted.s.trace.drop(shown)
+		}
 	}
 }
 

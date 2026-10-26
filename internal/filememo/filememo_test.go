@@ -96,3 +96,80 @@ func TestHold(t *testing.T) {
 		t.Fatalf("a file written just now: %q", v)
 	}
 }
+
+// A file not there is, while a request holds what was read, taken as
+// still not there as a file found unchanged is: a provider with no list
+// fetched was a look at the disk for each of its models, each request. A
+// write magpie makes (Forget), another's (Look), or the hold's end has it
+// looked at again; unheld, every read looks.
+func TestHoldMissing(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "none")
+	parse := func(b []byte) (string, error) { return string(b), nil }
+	looks := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return stats
+	}
+	release := Hold()
+	before := looks()
+	for range 100 {
+		if _, err := Read("missing", p, parse); !os.IsNotExist(err) {
+			t.Fatalf("a file not there: %v", err)
+		}
+	}
+	if n := looks() - before; n != 1 {
+		t.Fatalf("%d looks at a file not there, held", n)
+	}
+	os.WriteFile(p, []byte("a"), 0o600)
+	if _, err := Read("missing", p, parse); !os.IsNotExist(err) {
+		t.Fatalf("looked at again while held: %v", err)
+	}
+	Forget()
+	if v, err := Read("missing", p, parse); v != "a" || err != nil {
+		t.Fatalf("after a write magpie made: %q %v", v, err)
+	}
+	os.Remove(p)
+	Read("missing", p, parse)
+	os.WriteFile(p, []byte("b"), 0o600)
+	Look(p)
+	if v, err := Read("missing", p, parse); v != "b" || err != nil {
+		t.Fatalf("after another's write: %q %v", v, err)
+	}
+	os.Remove(p)
+	Read("missing", p, parse)
+	release()
+	os.WriteFile(p, []byte("c"), 0o600)
+	if v, err := Read("missing", p, parse); v != "c" || err != nil {
+		t.Fatalf("released: %q %v", v, err)
+	}
+	os.Remove(p)
+	before = looks()
+	for range 3 {
+		Read("missing", p, parse)
+	}
+	if n := looks() - before; n != 3 {
+		t.Fatalf("unheld, %d looks for 3 reads", n)
+	}
+}
+
+// Written is closed by the next Forget, and a wait begun after it waits for
+// the one after.
+func TestWritten(t *testing.T) {
+	w := Written()
+	select {
+	case <-w:
+		t.Fatal("closed before any write")
+	default:
+	}
+	Forget()
+	select {
+	case <-w:
+	case <-time.After(5 * time.Second):
+		t.Fatal("not closed by Forget")
+	}
+	select {
+	case <-Written():
+		t.Fatal("the next wait is closed already")
+	default:
+	}
+}

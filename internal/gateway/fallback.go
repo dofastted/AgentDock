@@ -239,7 +239,12 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 	}
 	keys := p.KeysOn()
 	serves := p.Serving(model) // the lists read once, not once a key (@NetRozee on X)
-	var unlisted []candidate
+	// a key on a plan of its own whose models leave this one out
+	// (KeyAccount.Plan): the Agent Plan's key is never sent the pay as
+	// you go's deepseek-v4-1-flash-261017, while a key whose plan has it
+	// can take it (yckonnnn on X)
+	planHas := p.PlanServing(model)
+	var unlisted, planless []candidate
 	var noURL provider.Protocol
 	for i, k := range keys {
 		q := p.WithKey(k)
@@ -257,6 +262,10 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 			barred = append(barred, candidate{p: q, model: model, rest: rest, rank: i})
 			continue
 		}
+		if !planHas(k) {
+			planless = append(planless, candidate{p: q, model: model, rest: rest, rank: i})
+			continue
+		}
 		if !serves(k) {
 			// the vendor lists the model to another key only
 			unlisted = append(unlisted, candidate{p: q, model: model, rest: rest, rank: i})
@@ -266,6 +275,13 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 	}
 	if len(out) == 0 {
 		out, unlisted = unlisted, nil // no key lists it: try them all the same
+	}
+	if len(out) == 0 {
+		// no key's plan has it as magpie knows the plans: a model the
+		// vendor added since, tried on them all the same. Else a key
+		// whose plan lacks it is never asked, not even after the others
+		// refused it: its endpoint has no such model either
+		out = planless
 	}
 	if len(out) == 0 && len(barred) > 0 {
 		return nil, nil, nil, barred
@@ -645,7 +661,7 @@ func capHeld(p, acct provider.Provider, model string, now time.Time) *capHold {
 	}
 	a := acct.Account
 	caps := provider.HoldCaps(p, a.Agent, a.User)
-	if a.Agent == "codex" && freeOnChatGPT(model) {
+	if a.Agent == "codex" && freeOnChatGPT(model, a.Plan) {
 		// a call ChatGPT counts in no window spends nothing a usage cap
 		// keeps (#1593); credits set not to be spent still hold it at
 		// 100%, as nothing says the backend answers it there
@@ -914,22 +930,32 @@ func restingOf(c candidate) (Rest, bool) {
 // quotaHeld is, when every candidate of cs is a key resting out of its
 // allowance or its credit — refused with a 429 or a 402 for it, the
 // vendor's words kept — the rest of the first, and when the first of them
-// is back: asked before then, each would be refused the same (#1772). A
+// is asked again: asked before then, each would be refused the same
+// (#1772). A key whose rest magpie guessed the length of, the vendor and
+// the user naming no time, is asked again all the same after its first
+// refusal, and a minute on after the next (Rest.asksAt): zoecats on Discord, a local aggregator said "quota
+// exhausted" for the moment it switched upstreams, and every request,
+// the agent's retry first, was answered from its 15-minute rest. A
 // subscription account isn't held so: its resets may be spent for it
 // (autoReset), and its windows are read again as it is planned.
 func quotaHeld(cs []candidate) (Rest, time.Time, bool) {
 	var first Rest
 	var back time.Time
+	now := time.Now()
 	for i, c := range cs {
 		r, ok := restingOf(c)
 		if !ok || c.p.Account != nil || r.Why != failQuota && r.Why != failCredit || !quotaStatus(r.Status) || r.said == "" {
 			return Rest{}, time.Time{}, false
 		}
+		at := r.asksAt(now)
+		if !now.Before(at) {
+			return Rest{}, time.Time{}, false
+		}
 		if i == 0 {
 			first = r
 		}
-		if back.IsZero() || r.Until.Before(back) {
-			back = r.Until
+		if back.IsZero() || at.Before(back) {
+			back = at
 		}
 	}
 	return first, back, len(cs) > 0
@@ -940,17 +966,18 @@ func quotaStatus(status int) bool {
 	return status == http.StatusTooManyRequests || status == http.StatusPaymentRequired
 }
 
-// soonestBack is when the first of cs is back from its rest; false when
-// one of them isn't resting.
+// soonestBack is when the first of cs is back from its rest, or asked
+// again before it is (Rest.asksAt); false when one of them isn't resting.
 func soonestBack(cs []candidate) (time.Time, bool) {
 	var back time.Time
+	now := time.Now()
 	for _, c := range cs {
 		r, ok := restingOf(c)
 		if !ok {
 			return time.Time{}, false
 		}
-		if back.IsZero() || r.Until.Before(back) {
-			back = r.Until
+		if at := r.asksAt(now); back.IsZero() || at.Before(back) {
+			back = at
 		}
 	}
 	return back, !back.IsZero()
@@ -1011,7 +1038,40 @@ var restingUntil = struct {
 	sync.Mutex
 	m    map[string]time.Time
 	note map[string]Rest // why each rests
-}{m: map[string]time.Time{}, note: map[string]Rest{}}
+	// lifted is when each rest was lifted before its time — by hand
+	// (Unrest), or its windows renewed — by the key it rested by: the
+	// kept routes still say it rested, and the Routing page reads this
+	// (TraceState.Lifted) to stop showing a rest lifted since it was
+	// found, from whichever page lifted it (zoecats on Discord: Try now
+	// in the provider's editor left Routing at 429 until a restart)
+	lifted map[string]time.Time
+}{m: map[string]time.Time{}, note: map[string]Rest{}, lifted: map[string]time.Time{}}
+
+// liftedLocked notes that the rest by key was lifted now, with
+// restingUntil held. A lift older than any rest can be is let go.
+func liftedLocked(key string, now time.Time) {
+	for k, at := range restingUntil.lifted {
+		if now.Sub(at) > longestMonthly {
+			delete(restingUntil.lifted, k)
+		}
+	}
+	restingUntil.lifted[key] = now
+}
+
+// liftedRests is when each rest lifted before its time was lifted, by
+// the key it rested by.
+func liftedRests() map[string]time.Time {
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	if len(restingUntil.lifted) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Time, len(restingUntil.lifted))
+	for k, at := range restingUntil.lifted {
+		out[k] = at
+	}
+	return out
+}
 
 func (s *Server) resting(id string) bool {
 	_, ok := restOf(id)
@@ -1065,7 +1125,7 @@ func modelRefused(status int, body []byte) bool {
 	}
 	// the words are matched decoded, too (#1669)
 	body = wordsOf(body)
-	return unservedWords.Match(body) && !quotaWords.Match(body) && !refusedWords.Match(body)
+	return unservedWords.Match(body) && !quotaWords.Match(body) && !refusedWords.Match(body) && !zdrRefused(status, body)
 }
 
 // codeAssistModelMissing says a Google account's Code Assist — the
@@ -1106,6 +1166,11 @@ func modelRetired(status int, body []byte) bool {
 	default:
 		return false
 	}
+	// the safety filter turning the request away (#3274) is about the
+	// request, whatever its message says of the model
+	if _, refused := policyRefusal(body); refused {
+		return false
+	}
 	// the words are matched decoded, too (#1669)
 	body = wordsOf(body)
 	return retiredWords.Match(body) && !quotaWords.Match(body)
@@ -1143,8 +1208,13 @@ func promptRefused(status int, body []byte) bool {
 // custom tool turned away (customToolRefusal, DeepSeek's "Unsupported
 // custom tool: 'exec'", #2656) where no translation took it in. A
 // request missing what every API requires ("field required") or too long
-// for the model isn't one.
-var shapeWords = regexp.MustCompile(`(?i)failed to deserialize|unknown (item |content |input )?(type|variant|field|parameter)|unknown_parameter|unrecognized (request argument|field|parameter)|extra (inputs|fields) are not permitted|additional properties are not allowed|schema exceeds the maximum (nesting )?depth|schema[^"]{0,60}\bnesting depth\b`)
+// for the model isn't one. Google's refusal of a function declaration's
+// schema, which points at it (GenerateContentRequest.tools[0].
+// function_declarations[17].parameters.properties[batch].items: missing
+// field, plugins#375), is the same kind as OpenCode Go's: its subset of
+// JSON Schema is its own, and another vendor's model took the reporter's
+// same tools.
+var shapeWords = regexp.MustCompile(`(?i)failed to deserialize|unknown (item |content |input )?(type|variant|field|parameter)|unknown_parameter|unrecognized (request argument|field|parameter)|extra (inputs|fields) are not permitted|additional properties are not allowed|schema exceeds the maximum (nesting )?depth|schema[^"]{0,60}\bnesting depth\b|function_declarations\[\d+\]\.parameters\b`)
 
 // unsaidWords are Command Code's Provider API turning a request away with
 // nothing but a trace id: {"message":"invalid request error trace_id:
@@ -1207,6 +1277,48 @@ var protectionWords = regexp.MustCompile(`(?i)response protection is unavailable
 // provider's other accounts or models is asked the same.
 func protectionRefused(status int, body []byte) bool {
 	return status >= 400 && protectionWords.Match(body)
+}
+
+// zdrCoded is Command Code's error code for a model no Zero Data
+// Retention upstream serves, as the error's code or type, asked with
+// x-cmd-zdr: 1 (its plugin's switch, magpie-community/plugins#246): the
+// Provider API's 422 {"error":{"message":"This model has no
+// zero-data-retention upstream. Remove the x-cmd-zdr header or choose a
+// different model.","type":"invalid_request_error","code":
+// "cmd_zdr_no_providers"}}, and the 400 the plugin makes of Go's error
+// line, {"error":{…,"type":"cmd_zdr_no_providers","code":400}}. Matched
+// where the error names its code, not in its words: "…a different
+// model.","type":"invalid_request_error" reads as a model unserved
+// (unservedWords) otherwise.
+var zdrCoded = regexp.MustCompile(`\\?"(type|code)\\?"\s*:\s*\\?"cmd_zdr_no_providers\\?"`)
+
+// zdrRefused says Command Code turned the request away for its Zero Data
+// Retention setting: a choice the user made for every request to the
+// provider, not the model or the account failing. Nothing rests for it,
+// so the model answers again as soon as the switch is off; the same
+// model at the same provider, sent the same header, isn't asked again;
+// another member may be.
+func zdrRefused(status int, body []byte) bool {
+	return (status == 400 || status == 422) && zdrCoded.Match(body)
+}
+
+// zdrHeader carries, from keepRetry to the routing loop and restAfter,
+// that a vendor's error was zdrRefused: the error the agent gets keeps
+// Command Code's words but, in Anthropic's shape or for the 400 whose
+// code is a number, not its code.
+const zdrHeader = "X-Magpie-ZDR-Refused"
+
+// notMates is, of the candidates left, those not c's model at c's
+// provider: its other accounts are sent the same Zero Data Retention
+// header, and refuse the same.
+func notMates(left []candidate, c candidate) []candidate {
+	var out []candidate
+	for _, x := range left {
+		if x.p.ID != c.p.ID || x.model != c.model {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // elsewhere is, of the candidates left, those not at c's provider, whose
@@ -1283,7 +1395,7 @@ func tooLongUnsaid(p provider.Provider, model string, tokens, status int, body [
 	// the words are matched decoded, too (#1669)
 	body = wordsOf(body)
 	if overflowed(status, body) || failure(status, body) != failOther || quotaWords.Match(body) ||
-		unservedWords.Match(body) || refusedWords.Match(body) || provider.EdgeBlocked(body) || regionRefused(status, body) {
+		unservedWords.Match(body) || refusedWords.Match(body) || provider.EdgeBlocked(body) || regionRefused(status, body) || zdrRefused(status, body) {
 		return "", false
 	}
 	window := windowOf(p, model)
@@ -1316,7 +1428,9 @@ func windowIn(served func() []provider.Entry, p provider.Provider, model string)
 	if n := p.Contexts[model]; n > 0 {
 		return n
 	}
-	for _, e := range served() {
+	cat := served()
+	for i := range cat {
+		e := &cat[i]
 		if e.Group == "" && e.Provider.ID == p.ID && (e.Model == model || e.ID == model) && e.Context > 0 {
 			return e.Context
 		}
@@ -1332,10 +1446,12 @@ const (
 	// clear than a busy moment: pauses of 1, 2 and 4s, or what Retry-After
 	// says, under half a minute in all
 	rateRetries = 3
-	// longestPause is the longest the vendor's Retry-After is waited for
-	// before that; longer, and the agent gets the error.
-	longestPause = 8 * time.Second
 )
+
+// longestPause is the longest the vendor's Retry-After is waited for by
+// the same-one retries; longer, and a plain provider or a group waits it
+// out within its patience (replan), else the agent gets the error.
+var longestPause = 8 * time.Second
 
 // retryPause is the first pause before the last one left is tried again;
 // each pause after is twice the one before.
@@ -1354,7 +1470,7 @@ func passing(status int, header http.Header, body []byte, again int) (time.Durat
 	case wait > longestPause:
 		return 0, false
 	case status == 408, status == 500, status == 502, status == 503, status == 504, status == 529:
-		if strings.Contains(string(body), didNotStream) {
+		if bytes.Contains(body, []byte(didNotStream)) {
 			return 0, false
 		}
 		return wait, again < lastRetries
@@ -1407,7 +1523,9 @@ func holds(c candidate, tokens int) bool {
 // to compact.
 //
 // Those left out are handed back (small, their rows in smallW when the
-// order has one each), kept for the last resort: when every candidate
+// order has one each, with Window set to the window: the trace lists
+// them as left out, so the Routing page keeps their rows and says why,
+// #3749), kept for the last resort: when every candidate
 // with room is out of its allowance, a fallback too small is asked all
 // the same (Kai on Discord: both Claude accounts at their limit until
 // the next day, the Claude provider's Fallback a Codex model of 272K
@@ -1447,7 +1565,9 @@ func roomy(cs []candidate, pl planned, from provider.Protocol, body []byte) (out
 		if w := windows[key(c)]; w > 0 && tokens >= w {
 			small = append(small, c)
 			if parallel {
-				smallW = append(smallW, pl.order[i])
+				x := pl.order[i]
+				x.Window = w
+				smallW = append(smallW, x)
 			}
 			continue
 		}
@@ -1542,6 +1662,8 @@ type holdWriter struct {
 	// answers with a 429 whatever quota it has left — Claude Code's, its
 	// Agent SDK's — so the account isn't at fault and doesn't rest (#666)
 	turnedAway bool
+	// turnedAwayHint says why, for that system prompt (antigravityHint)
+	turnedAwayHint string
 
 	// refused: the vendor's safety filter ended the reply before any of it
 	// was said — Anthropic's stop_reason "refusal", OpenAI's content_filter
@@ -1570,6 +1692,10 @@ type holdWriter struct {
 	// thinkingShown: the model's vendor never refuses after reasoning
 	// (refusesAfterThinking), so its reasoning goes through as it comes
 	thinkingShown bool
+	// thoughtThrough: the try went through on its reasoning alone
+	// (thinkingShown) while the request could still have asked again, so
+	// an empty reply is asked again in place as often (emptyRetries)
+	thoughtThrough bool
 
 	ended bool   // the stream's last event was written: the reply is whole
 	tail  []byte // the end of the last write, for a marker split across two
@@ -1717,7 +1843,7 @@ func (h *holdWriter) pass() {
 	}
 	dst := h.w.Header()
 	for k, v := range h.header {
-		if k != resetsHeader && k != refusedHeader { // magpie's own notes, for restAfter and settle
+		if k != resetsHeader && k != refusedHeader && k != zdrHeader && k != answeredThereHeader { // magpie's own notes, for restAfter and settle
 			dst[k] = v
 		}
 	}
@@ -1983,6 +2109,7 @@ func (h *holdWriter) scan() {
 			continue
 		case eventThinking:
 			if h.thinkingShown && !h.wantWhole {
+				h.thoughtThrough = h.hold
 				h.flow()
 				return
 			}
@@ -2121,7 +2248,7 @@ func (h *holdWriter) keepAlive() {
 		}
 		dst := h.w.Header()
 		for k, v := range src {
-			if k != resetsHeader && k != refusedHeader && k != "Content-Length" {
+			if k != resetsHeader && k != refusedHeader && k != zdrHeader && k != answeredThereHeader && k != "Content-Length" {
 				dst[k] = slices.Clone(v)
 			}
 		}
@@ -2296,6 +2423,14 @@ func (h *holdWriter) mayAskAgain() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.hold && !h.passing
+}
+
+// thoughtOnly tells whether the try went through on its reasoning while
+// it was still held for the request to ask again (thoughtThrough).
+func (h *holdWriter) thoughtOnly() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.thoughtThrough
 }
 
 // handBack sends a refusal held with nothing said as the vendor's own
@@ -3057,6 +3192,30 @@ func policyRefusal(raw []byte) (string, bool) {
 // an answer.
 const highRiskRefusal = "The request was rejected because it was considered high risk"
 
+// filterRefused is a stream's error event (its data) as an Event carries
+// it when it is the vendor's safety filter refusing the request: its code
+// (refusedCode), status refusedStatus, and an error of the request's own
+// (Said) with that code. A client answered whole is then told it as a 400
+// refusal, which the hold reads as one (policyRefusal) and asks the next
+// account, resting nobody; without the status it was answered 502
+// api_error, asked again on every account, and each one rested (#3274: a
+// Codex account's response.failed cyber_policy, its error with no type).
+// A code policyRefusal doesn't know as a refusal goes as content_filter,
+// for the hold to know it still. Not a refusal, it is "", 0 and nil.
+func filterRefused(data string) (string, int, json.RawMessage) {
+	code := refusedCode(data)
+	if code == "" {
+		return "", 0, nil
+	}
+	said := code
+	c, _ := json.Marshal(map[string]string{"code": code})
+	if _, ok := policyRefusal(c); !ok {
+		said = "content_filter"
+	}
+	b, _ := json.Marshal(map[string]any{"error": map[string]string{"type": "invalid_request_error", "code": said}})
+	return code, refusedStatus, b
+}
+
 // refusedCode is the code of a stream's error event (its data) when it is
 // the vendor's safety filter refusing, for a translation of it to keep:
 // said in another protocol as only its message, ChatGPT's bio_policy read
@@ -3229,4 +3388,52 @@ func pinTo(want string, cands []candidate, pl planned) ([]candidate, planned, in
 		msg += "; its accounts are " + strings.Join(have, ", ")
 	}
 	return nil, pl, http.StatusNotFound, msg
+}
+
+// unservedTry says c's try failed as the vendor refusing the model as one
+// it doesn't serve the account or key (modelRefused, codeAssistModelMissing):
+// what restAfterMarked rests for that model alone.
+func unservedTry(c candidate, status int, body []byte) bool {
+	return failure(status, body) == failOther && (modelRefused(status, body) || codeAssistModelMissing(c.p, status, body))
+}
+
+// unlistedNext takes out of a plan's unlisted accounts (planned.unlisted,
+// their rows in ws) those of key, "<provider>/<model>", not resting for the
+// model: the next ones asked once the accounts whose own list has the model
+// refused it as one they don't serve. The rest are returned too, for
+// none to be asked twice.
+func unlistedNext(cs []candidate, ws []Weighed, key string) (next []candidate, nextW []Weighed, restCs []candidate, restWs []Weighed) {
+	for i, c := range cs {
+		_, resting := restingOf(c)
+		if c.p.ID+"/"+c.model != key || resting {
+			restCs = append(restCs, c)
+			if i < len(ws) {
+				restWs = append(restWs, ws[i])
+			}
+			continue
+		}
+		next = append(next, c)
+		if i < len(ws) {
+			w := ws[i]
+			w.Unlisted = false // asked, after those that list the model
+			nextW = append(nextW, w)
+		}
+	}
+	return next, nextW, restCs, restWs
+}
+
+// askUnlisted moves the rows of the unlisted accounts asked next (ws) from
+// a route's left to its order, after the row of c, the one that refused
+// the model: the Routing page has them asked, not "unlisted, skipped".
+func askUnlisted(order, left []Weighed, c candidate, ws []Weighed) ([]Weighed, []Weighed) {
+	asked := make(map[string]bool, len(ws))
+	for _, w := range ws {
+		asked[w.ID+"/"+w.Model] = true
+	}
+	left = slices.DeleteFunc(slices.Clone(left), func(w Weighed) bool { return w.Unlisted && asked[w.ID+"/"+w.Model] })
+	at := slices.IndexFunc(order, func(w Weighed) bool { return w.ID == c.rest && w.Model == c.model })
+	if at < 0 {
+		return append(slices.Clip(order), ws...), left
+	}
+	return slices.Concat(order[:at+1], ws, order[at+1:]), left
 }

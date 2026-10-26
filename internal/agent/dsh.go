@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"log"
 	"os"
 	"path/filepath"
@@ -42,6 +43,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/beat"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
@@ -1335,7 +1337,9 @@ type dshPiModel struct {
 
 // dshPiCompat is a model's compat switches. On Anthropic's Messages API
 // pi-ai asks a model for a thinking budget unless forceAdaptiveThinking is
-// set, and a Claude that thinks only adaptively turns a budget away.
+// set, and a Claude that thinks only adaptively turns a budget away. Z.ai's
+// GLM-5.2 and GLM-5.3 are told so too: a budget can't ask them for max
+// (dshKindConfig).
 type dshPiCompat struct {
 	ForceAdaptiveThinking bool `yaml:"forceAdaptiveThinking,omitempty"`
 }
@@ -1500,6 +1504,33 @@ func dshLevels(ref string) []string {
 	return nil
 }
 
+// dshMaxTokens is the maxTokens magpie lists m with. dsh takes a listed
+// maxTokens as every request's output and reserves it, with 65536 of
+// headroom, out of contextWindow before it decides when to compact
+// (compaction-basic's resolveCompactSpec: the threshold is the smaller of
+// 80% of the window and window - maxTokens - 65536). A vendor's reply limit
+// near its window leaves dsh compacting at a sliver of it, or failing to
+// (#2823): 500000 with 393216 compacted at 41248; 524288 with 524288, and
+// 131072 with 65536, left it no budget at all. So the vendor's figure is
+// held to what leaves dsh half the window to compact in (window/2 - 65536),
+// or to a quarter of the window, as VS Code's and Copilot's are, where that
+// is more: a window under 262144 has no half to spare. A quarter alone cut
+// DeepSeek's 393216 on its 1000000 window to 250000, where dsh compacts at
+// 541248 with all of it (#3298); 500000 with 393216 is held to 184464 and
+// compacts at 250000. A Max output the user set stays as they set it
+// (outputOr).
+func dshMaxTokens(m catalog.Model) int {
+	if m.Context <= 0 {
+		return maxTokens(m)
+	}
+	room := max(m.Context/4, m.Context/2-dshHeadroom)
+	return outputOr(m, min(maxTokens(m), max(1, room)))
+}
+
+// dshHeadroom is compaction-basic's default headroomTokens: what dsh keeps
+// free beside a request's maxTokens before it compacts.
+const dshHeadroom = 65536
+
 // dshRouteConfig is magpie's first route with every one of models on it.
 func dshRouteConfig(models []catalog.Model, api, gw string) dshPiRoute {
 	return dshKindConfig(dshKinds[0], models, api, gw)
@@ -1518,7 +1549,7 @@ func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute
 	for _, m := range models {
 		e := dshPiModel{ID: m.ID, Name: m.Name, ContextWindow: m.Context}
 		if m.Output > 0 {
-			e.MaxTokens = maxTokens(m)
+			e.MaxTokens = dshMaxTokens(m)
 		}
 		switch {
 		case m.Images:
@@ -1527,7 +1558,10 @@ func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute
 			e.Input = []string{"text"}
 		}
 		_, e.ReasoningEfforts = dshModelLevels(m.Efforts)
-		if api == "anthropic-messages" && gateway.AdaptiveThinking(m.ID) {
+		// pi-ai's budget path clamps max to high (16384), so a model that
+		// takes adaptive thinking with its level (Z.ai's GLM-5.3) is asked
+		// adaptively too: pi-ai then sends the level itself, max as max
+		if api == "anthropic-messages" && (gateway.AdaptiveThinking(m.ID) || gateway.AdaptiveWithEffort(m.ID)) {
 			e.Compat = &dshPiCompat{ForceAdaptiveThinking: true}
 		}
 		r.Models = append(r.Models, e)
@@ -1604,7 +1638,7 @@ func dshProviderLines(effort string, models []catalog.Model, gw string) []string
 			lines = append(lines, fmt.Sprintf("        contextWindow: %d", m.Context))
 		}
 		if m.Output > 0 {
-			lines = append(lines, fmt.Sprintf("        maxTokens: %d", maxTokens(m)))
+			lines = append(lines, fmt.Sprintf("        maxTokens: %d", dshMaxTokens(m)))
 		}
 		if m.Images {
 			lines = append(lines, "        inputModalities: [text, image]")
@@ -1807,14 +1841,15 @@ func KeepDshWired(ctx context.Context) {
 // that could not write something is said once rather than every round.
 func keepDshWired(ctx context.Context, every time.Duration) {
 	var said dshSaidOnce
+	var rounds dshRounds
 	for {
-		if trouble := dshWiredOnce(); said.first(trouble) {
+		if trouble := rounds.once(); said.first(trouble) {
 			log.Print(trouble)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(every):
+		case <-beat.Next(every):
 		}
 	}
 }
@@ -1833,9 +1868,91 @@ func (s *dshSaidOnce) first(trouble string) bool {
 	return trouble != ""
 }
 
+// dshModelsFor is how long a round takes magpie's models as built before
+// while provider.StampNow says nothing changed: what the stamp can't see
+// (another app rewriting an account's file, a model retired by its date)
+// reaches dsh's lists within it.
+const dshModelsFor = 5 * time.Minute
+
+// dshRounds is what keepDshWired's last round read, so that a round with
+// nothing changed since does nothing. Every 30 seconds a round built
+// magpie's whole catalog and every route again to write nothing: 12 GB of
+// the 35.7 GB a user's magpie allocated in 48 minutes, with ~157 MB live.
+// A round is done again when dsh's files it reads, the gateway's address
+// or magpie's models are other than when the last one found nothing to
+// write. The zero dshRounds does every round.
+type dshRounds struct {
+	// the models, and the stamp and time they were built at
+	models []catalog.Model
+	stamp  provider.Stamp
+	at     time.Time
+	built  bool
+	// what the last round went by, and whether it wrote nothing, nothing
+	// else wrote while it ran, and nothing troubled it
+	last dshRoundKey
+	done bool
+}
+
+// dshRoundKey is what a round goes by: dsh's files it reads, the gateway's
+// address and magpie's models, each as a sum.
+type dshRoundKey struct {
+	files  uint64
+	gw     string
+	models uint64
+}
+
+var dshSumSeed = maphash.MakeSeed()
+
+// dshFilesSum sums the files a round reads, by path and bytes: each
+// profile's patch list, the home layer, and the settings, keys and old
+// config dsh reads beside them. A file that can't be read for another
+// reason than not being there sums differently every time: unknown, never
+// taken for what it was last round.
+func dshFilesSum(dir string, files []string) uint64 {
+	var h maphash.Hash
+	h.SetSeed(dshSumSeed)
+	sum := func(f string) {
+		h.WriteString(f)
+		h.WriteByte(0)
+		switch b, err := os.ReadFile(f); {
+		case err == nil:
+			h.WriteByte(1)
+			h.Write(b)
+		case errors.Is(err, os.ErrNotExist):
+			h.WriteByte(2)
+		default:
+			h.WriteString(time.Now().String())
+		}
+		h.WriteByte(0)
+	}
+	for _, f := range files {
+		sum(f)
+	}
+	for _, name := range []string{"cordis.patch.yml", "settings.yaml", ".env", ".credentials.yaml", "config.yaml"} {
+		sum(filepath.Join(dir, name))
+	}
+	return h.Sum64()
+}
+
+// dshModelsSum sums the models a round writes the route from.
+func dshModelsSum(models []catalog.Model) uint64 {
+	b, err := json.Marshal(models)
+	if err != nil {
+		return uint64(time.Now().UnixNano()) // unknown: done again
+	}
+	return maphash.Bytes(dshSumSeed, b)
+}
+
 // dshWiredOnce writes magpie's route again in every patch list whose route
 // is not what magpie would write now, and says what could not be written.
 func dshWiredOnce() string {
+	var r dshRounds
+	return r.once()
+}
+
+// once is dshWiredOnce, done only when something the round reads changed
+// since r's last round that found nothing to write.
+func (r *dshRounds) once() string {
 	dshWrites.Lock()
 	defer dshWrites.Unlock()
 	dir := dshHome()
@@ -1846,10 +1963,29 @@ func dshWiredOnce() string {
 	if len(files) == 0 {
 		// no dsh: the catalog isn't built for nothing every round, ~34 MB
 		// of garbage a minute in a magpie at rest
+		r.done = false
 		return ""
 	}
+	key := dshRoundKey{files: dshFilesSum(dir, files), gw: gateway.URL(), models: r.last.models}
+	// the stamp is read before the models are built: a change while they
+	// are moves it past the one kept, and the next round builds them again
+	if stamp := provider.StampNow(); !r.built || stamp != r.stamp || time.Since(r.at) >= dshModelsFor {
+		r.models, r.stamp, r.at, r.built = magpieModels("dsh"), stamp, time.Now(), true
+		key.models = dshModelsSum(r.models)
+	}
+	if r.done && key == r.last {
+		return ""
+	}
+	trouble := dshWiredWith(dir, files, r.models)
+	// kept only when the round wrote nothing and nothing else wrote while
+	// it ran: a file written by either is read again next round
+	r.last, r.done = key, trouble == "" && dshFilesSum(dir, dshProfiles(dir)) == key.files
+	return trouble
+}
+
+// dshWiredWith is a round's work, with the models it writes the route from.
+func dshWiredWith(dir string, files []string, models []catalog.Model) string {
 	var trouble []string
-	models := magpieModels("dsh")
 	// a profile dsh has just made — the desktop app's, opened for the first
 	// time while magpie runs — is its empty template: given magpie's route
 	// and start as the catalog sync would, rather than left listing dsh's

@@ -76,7 +76,7 @@ type zcodeKey struct {
 func zcodeCredentialsPath() string {
 	home, _ := os.UserHomeDir()
 	// under the folder ZCode's data was moved to, when it was
-	return filepath.Join(appdir.ZCodeDataIn(home), ".zcode", "v2", "credentials.json")
+	return filepath.Join(appdir.ZCodeDataIn(appdir.ZCodeHome(home)), ".zcode", "v2", "credentials.json")
 }
 
 // zcodeSecret is the key ZCode encrypts its credentials with.

@@ -49,6 +49,7 @@
     <a class="toc-only" href="/docs/remote">Remote magpie</a>
     <a class="toc-only" href="/docs/docker">Docker</a>
     <a class="toc-only" href="/docs/privacy">Privacy</a>
+    <a class="toc-only" href="/docs/masking">Privacy masking</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -89,11 +90,11 @@
     <div class="table-wrap"><table>
       <tr><td><b>Image</b></td><td><code>ghcr.io/yetone/magpie</code>, for <code>linux/amd64</code> and <code>linux/arm64</code></td></tr>
       <tr><td><b>Tags</b></td><td><code>latest</code> (the newest release), <code>0.1.1150</code> (one release), <code>0.1</code>, <code>edge</code> (every change on <code>main</code>)</td></tr>
-      <tr><td><b>Ports</b></td><td><code>3425</code> the gateway agents call; <code>3430</code> the browser UI, when the container runs <code>magpie web</code></td></tr>
+      <tr><td><b>Ports</b></td><td><code>3425</code> the gateway agents call; <code>3430</code> the browser UI, when the container runs <code>magpie web</code>; it answers the gateway’s <code>/v1</code> routes too, so a reverse proxy needs only this port</td></tr>
       <tr><td><b>Volume</b></td><td><code>/config</code>: providers, keys, sign-ins, plugins and usage</td></tr>
       <tr><td><b>User</b></td><td>nonroot (uid 65532)</td></tr>
     </table></div>
-    <p>The image holds magpie’s terminal-only build on distroless, with bash and busybox for a terminal in the container. It runs <code>magpie serve</code> (the gateway alone) unless given another command. The container finds no agents to wire, so magpie in it is a gateway: the agents that use it run elsewhere.</p>
+    <p>The image holds magpie’s terminal-only build on Debian 12 slim, with bash for a terminal in the container and curl for the installers of the CLIs some subscriptions sign in with (Cursor, Devin, Grok Build). It runs <code>magpie serve</code> (the gateway alone) unless given another command. The container finds no agents to wire, so magpie in it is a gateway: the agents that use it run elsewhere.</p>
 
     <h2 id="run"><a class="anchor" href="#run">Run it</a></h2>
     <p>Run it with the browser UI, a key for that page you keep across restarts, and both ports on the host’s loopback only:</p>
@@ -171,7 +172,7 @@ docker logs magpie</pre>
       <li><b>Publish the port</b>Recreate the container with <code>-p 3425:3425</code>, or bound to the NAS’s LAN or VPN address (<code>-p 192.168.1.20:3425:3425</code>), and with <code>-e MAGPIE_PUBLIC_URL=http://192.168.1.20:3425</code>.</li>
     </ol>
     <p>On each other computer, point the agent at the gateway with one of those keys as its API key: <code>http://192.168.1.20:3425/v1</code> for an OpenAI client, <code>http://192.168.1.20:3425</code> for an Anthropic or Gemini one. Model ids are <code>provider/model</code>, or a routing group’s; <code>GET /v1/models</code> lists them. If that computer runs magpie itself, add the container as a <a href="/docs/remote">Remote magpie</a> instead, and magpie wires its agents for you.</p>
-    <p><span class="ui">Settings</span> → <span class="ui">Share on local network</span> isn’t needed in the container: turning it on also makes a gateway key named <span class="ui">Magpie</span>, and the gateway asks for a key from outside the container either way.</p>
+    <p><span class="ui">Settings</span> → <span class="ui">Network and sharing</span> → <span class="ui">Share on local network</span> isn’t needed in the container: turning it on also makes a gateway key named <span class="ui">Magpie</span>, and the gateway asks for a key from outside the container either way.</p>
     <p><b>Upgrading from an earlier image.</b> An agent outside the container that sends <code>magpie</code>, or any other key that isn’t an enabled gateway key, now gets 401 (“the API key sent is not an enabled magpie gateway key”). Make it a key as above and put that in the agent’s settings. Agents that already send a gateway key, and a Remote magpie set up with one, keep working.</p>
     <p id="allow"><b>Allowed addresses.</b> On a public host, set <code>-e MAGPIE_ALLOW_IPS=203.0.113.7,10.0.0.0/8</code> to the addresses your clients come from. A request from any other address is refused 403 before its key is looked at, so a key that leaks is no use from elsewhere; the refusal names the address it came from, as does the container’s log. magpie judges the address of the connection itself, never an <code>X-Forwarded-For</code> header, and a mistyped entry lets nothing in rather than everything. Docker’s default bridge network passes a client’s own address into the container, but a request from the host itself arrives from the bridge’s gateway (<code>172.17.0.1</code>), and Docker Desktop and rootless Docker show every client as one address of their own: add that, or check what the 403 says. Behind a reverse proxy or tunnel, every request comes from the proxy’s address, so limit who reaches magpie at the proxy. On the desktop app the same list is <span class="ui">Settings</span> → <span class="ui">Network and sharing</span> → <span class="ui">Allowed addresses</span>.</p>
     <div class="callout"><b>Over the internet, prefer a VPN</b> such as Tailscale or WireGuard to opening 3425. A reverse proxy or tunnel in front of the container is the network too: its clients need a gateway key like any other machine’s.</div>
@@ -219,6 +220,7 @@ docker logs magpie</pre>
     <a href="/docs/remote">Remote magpie</a>
     <a href="/docs/docker">Docker</a>
     <a href="/docs/privacy">Privacy</a>
+    <a href="/docs/masking">Privacy masking</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

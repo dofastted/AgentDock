@@ -94,7 +94,7 @@ func TestModelName(t *testing.T) {
 	if b.Name != "Sol" || b.Default != "" || b.Label() != "Sol · B" {
 		t.Fatalf("%+v %q", b, b.Label())
 	}
-	if g := entry(t, "group/auto-sol"); g.Name != "Sol" {
+	if g := entry(t, "auto/sol"); g.Name != "Sol" {
 		t.Fatalf("the group took a provider's name: %+v", g)
 	}
 	if p, m, ok := Resolve("a/sol"); !ok || p.ID != "a" || m != "sol" {
@@ -170,7 +170,7 @@ func TestModelEfforts(t *testing.T) {
 	if got := entry(t, "b/sol").Efforts; !slices.Equal(got, []string{"low", "medium", "high", "max"}) {
 		t.Fatal(got)
 	}
-	if got := entry(t, "group/auto-sol").Efforts; !slices.Equal(got, []string{"low", "high"}) {
+	if got := entry(t, "auto/sol").Efforts; !slices.Equal(got, []string{"low", "high"}) {
 		t.Fatal(got)
 	}
 	// the vendor is still asked at any level it has

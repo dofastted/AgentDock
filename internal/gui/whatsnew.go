@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +39,15 @@ type whatsNew struct {
 	pending bool                     // an upgrade whose notes are still to be shown
 	quiet   bool                     // the upgrade was the user's own restart to update: not shown by itself
 	shown   bool                     // a page has shown them
-	notes   map[string][]update.Note // by language
+	notes   map[string][]update.Note // by language and channel (notesKey)
+	back    map[string]backNotes     // Settings' "this version and n before it", by language
+}
+
+// backNotes is the longest "this version and n before it" asked for in a
+// language: a shorter one is cut from it, a longer one asked for again.
+type backNotes struct {
+	n    int
+	list []update.Note
 }
 
 var news = &whatsNew{}
@@ -152,7 +162,8 @@ func (n *whatsNew) get(ctx context.Context, all bool, lang string) whatsNewJSON 
 	if !pending {
 		after = ""
 	}
-	notes := n.notes[lang]
+	key := notesKey(lang)
+	notes := n.notes[key]
 	// shown by itself: not after a restart to update, nor on a day it was
 	// asked not to be
 	popup := pending && !shown && !n.quiet && !quietToday()
@@ -173,7 +184,7 @@ func (n *whatsNew) get(ctx context.Context, all bool, lang string) whatsNewJSON 
 			if n.notes == nil {
 				n.notes = map[string][]update.Note{}
 			}
-			n.notes[lang] = notes
+			n.notes[key] = notes
 			n.mu.Unlock()
 		}
 	}
@@ -182,6 +193,100 @@ func (n *whatsNew) get(ctx context.Context, all bool, lang string) whatsNewJSON 
 	}
 	j.Show = popup && len(j.Releases) > 0
 	return j
+}
+
+// notesKey is what the notes since the last update are kept by: their
+// language, and the channel, whose cap on how many are shown (MostNotes)
+// differs.
+func notesKey(lang string) string {
+	if update.Stable() {
+		return lang + "|" + settings.UpdateStable
+	}
+	return lang
+}
+
+// before is Settings' other ranges (Linka on Discord): this version's notes
+// and those of the count releases before it, newest first. They are asked
+// of the site once per language for the longest count asked so far, and
+// kept while magpie runs, as the releases up to this one don't change. A
+// failed ask is said (Error), with the notes of a shorter range asked
+// before, if any, so a page keeps what it had.
+func (n *whatsNew) before(ctx context.Context, count int, lang string) whatsNewJSON {
+	j := whatsNewJSON{Current: Version, Releases: []update.Note{}}
+	if !update.Released(Version) {
+		return j
+	}
+	j.URL = update.ReleasePage(Version)
+	n.mu.Lock()
+	got, ok := n.back[lang]
+	n.mu.Unlock()
+	if !ok || got.n < count {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		list, err := update.NotesBack(ctx, Version, count, lang)
+		cancel()
+		if err != nil {
+			log.Println("release notes:", err)
+			j.Error = err.Error()
+		} else {
+			got, ok = backNotes{count, list}, true
+			n.mu.Lock()
+			if n.back == nil {
+				n.back = map[string]backNotes{}
+			}
+			if n.back[lang].n < count {
+				n.back[lang] = got
+			}
+			n.mu.Unlock()
+		}
+	}
+	if ok {
+		j.Releases = update.Back(got.list, Version, count)
+	}
+	return j
+}
+
+// backCount is the range a page asks for (?last=10, 20, 50 or 100), 0 for
+// the notes since the last update.
+func backCount(r *http.Request) int {
+	for _, c := range update.BackCounts {
+		if r.URL.Query().Get("last") == strconv.Itoa(c) {
+			return c
+		}
+	}
+	return 0
+}
+
+// withWaiting puts first, in Settings' What's new while an update waits,
+// the notes of every release after this one up to it, marked not installed
+// yet. Only the update's own notes were (小八 on Discord: on 0.1.1398 with
+// 0.1.1409 waiting, 0.1.1399 to 0.1.1408 were missing), so they come from
+// the site as the restart's dialog has them (update/notes), with the
+// update's own when the site can't say.
+func withWaiting(ctx context.Context, list []update.Note, u updateJSON, lang string) []update.Note {
+	switch u.State {
+	case "ready", "available", "downloading", "found":
+	default:
+		return list
+	}
+	if !update.Released(Version) || u.Latest == "" || !update.Newer(u.Latest, Version) {
+		return list
+	}
+	ahead, _ := fetchNotes(ctx, Version, u.Latest, lang)
+	if len(ahead) == 0 && strings.TrimSpace(u.Notes) != "" {
+		ahead = []update.Note{{Version: u.Latest, Notes: u.Notes, URL: u.URL}}
+	}
+	out := make([]update.Note, 0, len(ahead)+len(list))
+	for _, r := range ahead {
+		if !slices.ContainsFunc(list, func(o update.Note) bool { return o.Version == r.Version }) {
+			r.Pending = true
+			out = append(out, r)
+		}
+	}
+	out = append(out, list...)
+	if most := update.MostNotes(); len(out) > most {
+		out = out[:most]
+	}
+	return out
 }
 
 func (n *whatsNew) seen() {
@@ -240,7 +345,16 @@ func askedLang(r *http.Request) string {
 
 func whatsNewRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/whatsnew", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, news.get(r.Context(), r.URL.Query().Get("all") != "", pageLang(r)))
+		all, lang := r.URL.Query().Get("all") != "", pageLang(r)
+		if c := backCount(r); all && c > 0 {
+			writeJSON(rw, news.before(r.Context(), c, lang))
+			return
+		}
+		j := news.get(r.Context(), all, lang)
+		if all {
+			j.Releases = withWaiting(r.Context(), j.Releases, updates.jsonIn(askedLang(r)), lang)
+		}
+		writeJSON(rw, j)
 	})
 	mux.HandleFunc("POST /api/whatsnew/seen", func(rw http.ResponseWriter, r *http.Request) {
 		news.seen()

@@ -2,7 +2,7 @@
 
 When a project folder is renamed or moved, Claude Code's saved sessions remain
 under the old encoded path in its `projects` directory. In **Sessions**, choose
-**Claude Code**, then **Relocate project** beside the old folder.
+**Claude Code**, then **Relocate project** in the old folder's ⋯ menu.
 
 1. Close Claude Code and its editor sessions. Wait at least one minute after
    their last write.

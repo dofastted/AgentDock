@@ -92,6 +92,33 @@ func TestGrokBodyDropsLoneToolChoice(t *testing.T) {
 	}
 }
 
+// The Grok plugin is handed a lone tool_choice "none" (#3110): it reads it
+// before adding x_search, and leaves it out before Grok. Any other lone
+// tool_choice still goes, and the built-in, which is Grok's last stop,
+// sends no lone "none" either.
+func TestGrokPluginBodyKeepsLoneNone(t *testing.T) {
+	for _, in := range []string{
+		`{"model":"grok-4.7","tool_choice":"none","input":[]}`,
+		`{"model":"grok-4.7","tools":[],"tool_choice":"none","input":[]}`,
+		`{"model":"grok-4.7","tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":"none","input":[]}`,
+	} {
+		if got := string(grokPluginBody([]byte(in))); !strings.Contains(got, `"tool_choice":"none"`) {
+			t.Errorf("plugin: %s\n-> %s", in, got)
+		}
+		if got := string(grokBody([]byte(in))); strings.Contains(got, "tool_choice") {
+			t.Errorf("built-in: %s\n-> %s", in, got)
+		}
+	}
+	for _, in := range []string{
+		`{"model":"grok-4.7","tool_choice":"auto","input":[]}`,
+		`{"model":"grok-4.7","tool_choice":{"type":"none"},"input":[]}`,
+	} {
+		if got := string(grokPluginBody([]byte(in))); strings.Contains(got, "tool_choice") {
+			t.Errorf("plugin: %s\n-> %s", in, got)
+		}
+	}
+}
+
 // Codex's reasoning, handed back with a null content, is sent without it.
 func TestGrokBodyDropsNullReasoningContent(t *testing.T) {
 	in := []byte(`{"input":[{"type":"reasoning","id":"rs_1","summary":[],"content":null,"encrypted_content":"a+b/c="},{"type":"message","role":"user","content":"hi"}]}`)

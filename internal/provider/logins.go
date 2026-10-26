@@ -23,9 +23,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
@@ -60,6 +62,9 @@ type Login struct {
 	// first is the saved Claude account served in the place of Claude
 	// Code's own while it is signed out (claudeStandIn).
 	first bool
+	// home is the other Codex folder a ChatGPT account is signed in to
+	// in, Codex's own there (codexHomeLogins): not one to switch ~/.codex to.
+	home string
 }
 
 type savedLogin struct {
@@ -130,8 +135,18 @@ var (
 		Path:   func() string { return loginsPath() + ".lock" },
 		Locked: func() { filememo.Look(loginsPath()) },
 	}
-	loginsSeenAt time.Time
+	// loginsSeenAt is when rememberLogins last looked at the agents'
+	// sign-ins (UnixNano), 0 for not since this magpie started or since
+	// a change made the next look due at once. It is read without
+	// loginsMu, so a look not yet due takes no lock (#1665).
+	loginsSeenAt atomic.Int64
 )
+
+// loginsLookDue says the 30 seconds since the last look are up.
+func loginsLookDue() bool {
+	at := loginsSeenAt.Load()
+	return at == 0 || time.Since(time.Unix(0, at)) >= 30*time.Second
+}
 
 // switchable agents: those whose sign-in magpie can save and put back.
 var loginAgents = []string{"claude", "codex"}
@@ -659,26 +674,7 @@ func liveLogin(agent string) (savedLogin, bool) {
 	}
 	switch agent {
 	case "codex":
-		b, _, err := readCodexLogin(codexHome(), false)
-		if err != nil {
-			return savedLogin{}, false
-		}
-		var a codexAuth
-		if json.Unmarshal(b, &a) != nil || a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
-			return savedLogin{}, false
-		}
-		id := jwtClaims(a.Tokens.IDToken)
-		user := codexUser(id)
-		if user == "" {
-			user = a.Tokens.AccountID
-		}
-		if user == "" {
-			return savedLogin{}, false
-		}
-		l := savedLogin{Agent: agent, User: user, Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"),
-			Auth: json.RawMessage(bytes.TrimSpace(b))}
-		l.User = codexLiveName(user, l.Auth)
-		return l, true
+		return codexLoginIn(codexHome())
 	case "claude":
 		c, _, ok := claudeCredential()
 		if !ok {
@@ -707,6 +703,91 @@ func liveLogin(agent string) (savedLogin, bool) {
 	return savedLogin{}, false
 }
 
+// CodexSignInPlan is the plan of the ChatGPT account this machine's Codex
+// is signed in to, as its ID token's chatgpt_plan_type names it ("free",
+// "plus", "pro" …), "" when Codex isn't signed in or it can't be read.
+// Codex's auto-review follows the session on a Free plan by default
+// (codexcat.AutoReviewModel).
+func CodexSignInPlan() string {
+	l, _ := liveLogin("codex")
+	return l.Plan
+}
+
+func init() { codexcat.SignInPlan = CodexSignInPlan }
+
+// codexLoginIn is the ChatGPT account Codex is signed in to in its folder
+// home, as Codex keeps it there (auth.json, or the keychain item named by
+// the folder).
+func codexLoginIn(home string) (savedLogin, bool) {
+	b, _, err := readCodexLogin(home, false)
+	if err != nil {
+		return savedLogin{}, false
+	}
+	var a codexAuth
+	if json.Unmarshal(b, &a) != nil || a.Tokens.AccessToken == "" || a.AuthMode == "apikey" {
+		return savedLogin{}, false
+	}
+	id := jwtClaims(a.Tokens.IDToken)
+	user := codexUser(id)
+	if user == "" {
+		user = a.Tokens.AccountID
+	}
+	if user == "" {
+		return savedLogin{}, false
+	}
+	l := savedLogin{Agent: "codex", User: user, Plan: claimString(id, "https://api.openai.com/auth", "chatgpt_plan_type"),
+		Auth: json.RawMessage(bytes.TrimSpace(b))}
+	l.User = codexLiveName(user, l.Auth)
+	return l, true
+}
+
+// codexOtherHomes are the user's Codex folders but the one magpie and
+// Codex run with (appdir.CodexHomes): one ChatGPT account each, Codex run
+// in it with CODEX_HOME set.
+func codexOtherHomes() []string { return appdir.CodexHomes()[1:] }
+
+// codexHomeLogins are the accounts Codex is signed in to in the user's
+// other Codex folders, each with its folder as Home: one Codex keeps
+// signed in itself, as it does the one in ~/.codex. The one ~/.codex is
+// signed in to is that one's, wherever else it is too, and an account in
+// two other folders is the first's.
+func codexHomeLogins(live savedLogin, haveLive bool) []savedLogin {
+	var out []savedLogin
+	for _, home := range codexOtherHomes() {
+		l, ok := codexLoginIn(home)
+		if !ok || haveLive && sameLogin(live, l) || slices.ContainsFunc(out, func(o savedLogin) bool { return sameLogin(o, l) }) {
+			continue
+		}
+		l.Home = home
+		out = append(out, l)
+	}
+	return out
+}
+
+// codexHeldIn is the other Codex folder the saved account l is signed in
+// to now, as rememberLogins recorded it in Home: the same login, or the
+// same refresh token. "" when it is in none.
+func codexHeldIn(l savedLogin) string {
+	if l.Agent != "codex" || l.Home == "" {
+		return ""
+	}
+	in, ok := codexLoginIn(l.Home)
+	if !ok {
+		return ""
+	}
+	if sameLogin(in, l) || sameRefresh(in.Auth, l.Auth) {
+		return l.Home
+	}
+	return ""
+}
+
+// sameRefresh says two Codex auth.json hold one refresh token.
+func sameRefresh(x, y json.RawMessage) bool {
+	var a, b codexAuth
+	return json.Unmarshal(x, &a) == nil && json.Unmarshal(y, &b) == nil &&
+		a.Tokens.RefreshToken != "" && a.Tokens.RefreshToken == b.Tokens.RefreshToken
+}
+
 // rememberLogins saves the accounts the agents are signed in to now. The
 // copy of an active account is only a bookmark: the agent keeps refreshing
 // its own, and a switch saves that fresher one first.
@@ -720,12 +801,20 @@ func rememberLogins(force bool) {
 	if settings.AccountDiscoveryOff() {
 		return
 	}
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	if !force && time.Since(loginsSeenAt) < 30*time.Second {
+	// the time first, and the lock only for a look that is due: taken
+	// first, every ask (each list of accounts, each page's read) made and
+	// locked logins.json.lock, ~370 times in a start's first 25s on
+	// Windows, where an antivirus' filter driver works on each (#1665)
+	if !force && !loginsLookDue() {
 		return
 	}
-	loginsSeenAt = time.Now()
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	// another ask may have looked while this one waited for the lock
+	if !force && !loginsLookDue() {
+		return
+	}
+	loginsSeenAt.Store(time.Now().UnixNano())
 	was := readLogins()
 	ls := slices.Clone(was)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -735,6 +824,15 @@ func rememberLogins(force bool) {
 			continue
 		}
 		l, ok := liveLogin(agent)
+		if agent == "codex" {
+			// Codex's other folders' accounts (phantom3792 on X: only the
+			// default profile's account read a quota)
+			for _, h := range codexHomeLogins(l, ok) {
+				h.Seen = now
+				ls = upsertLogin(ls, h)
+				changed = true
+			}
+		}
 		if !ok {
 			if agent == "claude" && claudeLoggedOut(ls) {
 				changed = true
@@ -792,6 +890,33 @@ func onlySeenMoved(was, next []savedLogin, now time.Time) bool {
 	ja, err1 := json.Marshal(a)
 	jb, err2 := json.Marshal(b)
 	return err1 == nil && err2 == nil && bytes.Equal(ja, jb)
+}
+
+// SignedOut says that p is a signed-in account whose every account in use
+// (on, or the one the agent is signed in to) has had its sign-in refused:
+// listed, so it can be signed in again, but not "signed in". It is what
+// the app's Providers row says as "{user} is signed out", for magpie
+// providers and the TUI to say the same (LeeHom on Discord: Claude Code
+// listed on two lapsed accounts).
+func (p Provider) SignedOut() bool {
+	if p.Account == nil {
+		return false
+	}
+	ls := Logins(p.Account.Agent)
+	if _, ok := PluginOf(p.ID); ok && p.IsPlugin() {
+		ls = Logins(p.ID)
+	}
+	n := 0
+	for _, l := range ls {
+		if !l.On && !l.Active {
+			continue
+		}
+		if l.Lapsed == "" {
+			return false
+		}
+		n++
+	}
+	return n > 0
 }
 
 // Logins lists the remembered accounts of an agent ("" for every one),
@@ -862,7 +987,9 @@ func Logins(agent string) []Login {
 	ls := readLogins()
 	standIn := ""
 	if _, ok := active["claude"]; !ok {
-		standIn = claudeStandIn(ls)
+		// the one the provider is listed on (claudeStandInAccount), a
+		// signed-out one too, which the row then says is signed out
+		standIn = claudeListed(ls)
 	}
 	back := map[string]string{}
 	for a, user := range active {
@@ -878,6 +1005,9 @@ func Logins(agent string) []Login {
 		first := l.Agent == "claude" && strings.EqualFold(standIn, l.User)
 		lg := Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen, Active: using, On: using || first || l.On,
 			Paused: (using || first) && pausedOwn(ls, l.Agent, l.User), first: first}
+		if !using && l.Agent == "codex" {
+			lg.home = l.Home
+		}
 		if l.Agent == "claude" {
 			lg.Lapsed = claudeSignedOut(l)
 		} else {
@@ -1075,6 +1205,12 @@ func switchSavedLogin(agent, user string) (from string, _ error) {
 	if target == nil {
 		return "", fmt.Errorf("no saved %s account %q", agent, user)
 	}
+	if home := codexHeldIn(*target); home != "" {
+		// Codex there keeps it signed in and refreshes it: a copy in
+		// ~/.codex would be a second holder of one refresh token, and
+		// whichever refreshed first would sign the other out
+		return "", fmt.Errorf("%s is signed in to Codex in %s: run Codex there (CODEX_HOME=%s codex) to use it, or turn it on for magpie's requests", target.User, home, home)
+	}
 	if agent == "claude" {
 		// as Claude Code keeps it, if it has run on the account beside the
 		// one it is signed in to; never one that can't be used, which
@@ -1137,7 +1273,7 @@ func switchSavedLogin(agent, user string) (from string, _ error) {
 	if err != nil {
 		return "", err
 	}
-	loginsSeenAt = time.Time{}
+	loginsSeenAt.Store(0)
 	forgetAccountCaches()
 	return from, nil
 }
@@ -1266,6 +1402,14 @@ func forgetLogin(agent, user string) (signedOut bool, err error) {
 		}
 		signedOut = true
 	}
+	for _, l := range ls {
+		if l.Agent == agent && strings.EqualFold(l.User, user) {
+			if home := codexHeldIn(l); home != "" {
+				// it would be read again from there at the next look
+				return false, fmt.Errorf("%s is signed in to Codex in %s: sign it out there (CODEX_HOME=%s codex logout) to remove it", l.User, home, home)
+			}
+		}
+	}
 	out := ls[:0]
 	found := false
 	for _, l := range ls {
@@ -1312,7 +1456,7 @@ func loginAgentName(agent string) string {
 // a caller that changed a sign-in behind magpie's back (a test's home).
 func ForgetAccounts() {
 	loginsMu.Lock()
-	loginsSeenAt = time.Time{}
+	loginsSeenAt.Store(0)
 	loginsMu.Unlock()
 	// an account asked for its list a moment ago is asked again: the
 	// accounts read afresh may be others under the same id

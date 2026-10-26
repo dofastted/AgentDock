@@ -387,6 +387,7 @@ footer a:hover { color: var(--ink); }
   <a class="brand" href="/"><img class="bird" src="/img/magpie-small.svg" alt="">magpie</a>
   <div class="links" id="links">
     <a class="hide" href="#how" data-i18n="nav.how">How it works</a>
+    <a class="hide" href="#masking" data-i18n="nav.masking">Masking</a>
     <a class="hide" href="#routing" data-i18n="nav.routing">Routing</a>
     <a class="hide" href="#providers" data-i18n="nav.providers">Providers</a>
     <a href="#cli">CLI</a>
@@ -452,6 +453,13 @@ footer a:hover { color: var(--ink); }
       <img class="for-dark" src="/img/sponsor-apinebula-dark.svg" width="143" height="37" alt="APINEBULA">
       <hr>
       <span data-i18n="sponsor.apinebula">One API for the world's top AI models. Pay as you go, from 10% of list price.</span>
+      <i aria-hidden="true">→</i>
+    </a>
+    <a class="card" href="/go/fastai/home" target="_blank" rel="noopener sponsored">
+      <img class="for-light" src="/img/sponsor-fastai.png" width="608" height="81" alt="FastAIToken">
+      <img class="for-dark" src="/img/sponsor-fastai-dark.png" width="608" height="81" alt="FastAIToken">
+      <hr>
+      <span data-i18n="sponsor.fastai">One-stop access to Claude, GPT and DeepSeek, from 6% of list price, with company invoicing and payment.</span>
       <i aria-hidden="true">→</i>
     </a>
     </div>
@@ -565,6 +573,24 @@ footer a:hover { color: var(--ink); }
           <li data-i18n="bar.l4"><b>Profiles</b> switch every agent at once — “Budget”, “Focus”, whatever you save.</li>
         </ul>
       </div>
+    </div>
+  </section>
+
+  <section id="masking">
+    <p class="eyebrow" data-i18n="msk.eyebrow">Privacy masking</p>
+    <h2 data-i18n="msk.h2">Your secrets never reach the vendor.</h2>
+    <p class="sub" data-i18n="msk.sub">Agents put what they read into the prompt: an <code>.env</code>, a config file, a log with a token in it. magpie swaps those values for placeholders on your computer before a request leaves it, and swaps them back in the reply. Your agent and your files keep the real values; the vendor never sees them.</p>
+    <div class="wide">
+      <img class="for-light" loading="lazy" src="/img/masking-light.png" width="1912" height="1084" data-i18n-attr="src:img.masking.light,alt:alt.masking" alt="Insights › Masking: 5,812 values kept from vendors in 7 days, flowing from Claude Code and Codex through magpie to OpenAI, Kimi and DeepSeek">
+      <img class="for-dark" loading="lazy" src="/img/masking-dark.png" width="1912" height="1084" data-i18n-attr="src:img.masking.dark,alt:alt.masking" alt="Insights › Masking: 5,812 values kept from vendors in 7 days, flowing from Claude Code and Codex through magpie to OpenAI, Kimi and DeepSeek">
+    </div>
+    <div class="grid" style="margin-top:32px">
+      <div><h3 data-i18n="msk.find">Found two ways</h3><p data-i18n="msk.find.p">Rules for what is certain: API keys, private keys, tokens, emails, card and ID numbers whose checksum adds up. And, if you want it, a model that runs on this computer for the names, addresses and passwords no rule can find.</p></div>
+      <div><h3 data-i18n="msk.back">Put back everywhere</h3><p data-i18n="msk.back.p">A value becomes a placeholder like <code>{{API_KEY_k3v9x2mq}}</code>. Every placeholder in the reply turns back into its value, in streamed text and tool calls too, so the command your agent runs has the real key.</p></div>
+      <div><h3 data-i18n="msk.cache">Nothing breaks</h3><p data-i18n="msk.cache.p">A value gets the same placeholder every time, so the conversation, the prompt cache and thinking signatures stay valid.</p></div>
+      <div><h3 data-i18n="msk.disk">Never on disk</h3><p data-i18n="msk.disk.p">Values are held in memory only; the record keeps a value’s kind, length and first characters. If masking can’t run, the request is held back, never sent as written.</p></div>
+      <div><h3 data-i18n="msk.see">Not a black box</h3><p data-i18n="msk.see.p">Insights › Masking lists every request it changed, with what the vendor got instead, side by side.</p></div>
+      <div><h3 data-i18n="msk.cost">Your call</h3><p data-i18n="msk.cost.p">The model sees the placeholder, not the value, so a task about a value itself needs it under Never mask. Pick what to mask, add your own words, or warn or block instead.</p></div>
     </div>
   </section>
 

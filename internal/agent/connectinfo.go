@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -147,28 +146,14 @@ type runningProc struct {
 
 // running lists the processes a pgrep -f pattern matches. A var so tests
 // can say.
-var running = func(pat string) []runningProc {
-	out, _ := proc.Command("pgrep", "-f", pat).Output()
-	pids := strings.Fields(string(out))
-	if len(pids) == 0 {
-		return nil
-	}
-	out, _ = proc.Command("ps", "-o", "etime=,command=", "-p", strings.Join(pids, ",")).Output()
-	var ps []runningProc
-	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		et, cmd, _ := strings.Cut(strings.TrimSpace(l), " ")
-		if up, ok := elapsed(et); ok {
-			ps = append(ps, runningProc{up, strings.TrimSpace(cmd)})
-		}
-	}
-	return ps
-}
+var running = listRunning
 
 // changedAt is when magpie last changed what the agent reads at start. It
 // is kept in the stash with a digest of what that was, so neither the
 // agent's own writes to the same files nor magpie starting again move it;
-// a change first seen is put at the files' latest write. Zero when the
-// files aren't there.
+// a change first seen is put at the files' latest write, or at now when
+// no file was written since the last one. Zero when the files aren't
+// there.
 func (a *Agent) changedAt(files []string, reads func() string) time.Time {
 	var mod time.Time
 	for _, f := range files {
@@ -182,10 +167,15 @@ func (a *Agent) changedAt(files []string, reads func() string) time.Time {
 	sum := sha256.Sum256([]byte(reads()))
 	digest := hex.EncodeToString(sum[:8])
 	key := a.ID + ".started"
-	if was, at, ok := strings.Cut(stashLoad()[key], " "); ok && was == digest {
-		if n, err := strconv.ParseInt(at, 10, 64); err == nil {
-			return time.Unix(0, n)
-		}
+	was, at, ok := strings.Cut(stashLoad()[key], " ")
+	n, err := strconv.ParseInt(at, 10, 64)
+	if ok && err == nil && was == digest {
+		return time.Unix(0, n)
+	}
+	// a change no file's time shows (Claude Desktop's models are the
+	// gateway's, not a file's) is put at when it is first seen
+	if ok && err == nil && !mod.After(time.Unix(0, n)) {
+		mod = time.Now()
 	}
 	stash(map[string]string{key: digest + " " + strconv.FormatInt(mod.UnixNano(), 10)})
 	return mod
@@ -207,9 +197,12 @@ type StaleCopy struct {
 	// subcommand the daemon spawns beside itself, no copy to reopen) or
 	// "cli"; "" for other agents; "embedded" is another app's own Codex,
 	// named by App
-	Kind  string    `json:"kind,omitempty"`
-	App   string    `json:"app,omitempty"`
-	Since time.Time `json:"since"`
+	Kind string `json:"kind,omitempty"`
+	App  string `json:"app,omitempty"`
+	// Bundle is the desktop app's own, for "app": what the row's Restart
+	// quits and opens again
+	Bundle string    `json:"bundle,omitempty"`
+	Since  time.Time `json:"since"`
 }
 
 // StaleCopies are the copies Stale counts. Reopening one kind doesn't end
@@ -259,8 +252,11 @@ func (a *Agent) StaleCopies() []StaleCopy {
 					// is no Codex to quit (#1461)
 					continue
 				}
-				if c.Kind == "embedded" {
+				switch c.Kind {
+				case "embedded":
 					c.App = app
+				case "app":
+					c.Bundle = app
 				}
 				if app != "" {
 					if i, ok := apps[app]; ok {

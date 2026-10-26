@@ -21,6 +21,9 @@ type Result struct {
 	// fetched again and the ones that couldn't be (What is skill:<name>)
 	Updated   []string  `json:"updated,omitempty"`
 	Unupdated []Problem `json:"unupdated,omitempty"`
+	// Gone are, for an update of skills, the ones their sources no longer
+	// have: removed there, not failed (skill_gone.go)
+	Gone []string `json:"gone,omitempty"`
 	// Unimported are, for skills brought in together, the ones that
 	// couldn't be (What is skill:<name>)
 	Unimported []Problem `json:"unimported,omitempty"`
@@ -178,6 +181,7 @@ func (l *Library) syncMCP(t *Target, b *backups, res *Result) {
 	}
 	how := toolsOffOf(t)
 	toolsOff := map[string][]string{} // what magpie's in each entry's list now
+	startup := map[string]float64{}   // the startup timeout magpie's in each entry now
 	entries, err := t.MCP.entries()
 	if err != nil {
 		res.fail(id, "mcp", err)
@@ -205,6 +209,7 @@ func (l *Library) syncMCP(t *Target, b *backups, res *Result) {
 		if _, ok := entries[name]; (ok || t.MCP.holds(name)) && !write("mcp:"+name, func() error { return t.MCP.del(name) }) {
 			mine = append(mine, name)
 			toolsOff[name] = a.ToolsOff[name]
+			startup[name] = a.Startup[name]
 		}
 	}
 	base := gatewayOf(t)
@@ -218,6 +223,7 @@ func (l *Library) syncMCP(t *Target, b *backups, res *Result) {
 			if slices.Contains(a.MCP, s.Name) {
 				mine = append(mine, s.Name)
 				toolsOff[s.Name] = a.ToolsOff[s.Name]
+				startup[s.Name] = a.Startup[s.Name]
 			}
 			continue
 		}
@@ -227,6 +233,7 @@ func (l *Library) syncMCP(t *Target, b *backups, res *Result) {
 			continue
 		}
 		s, _ = t.MCP.side(s)
+		s = wroteStartup(s, a.Startup[s.Name])
 		old := entries[s.Name]
 		if err := t.MCP.foreign(old); err != nil {
 			res.fail(id, "mcp:"+s.Name, err)
@@ -247,17 +254,29 @@ func (l *Library) syncMCP(t *Target, b *backups, res *Result) {
 			if cur, ok := t.MCP.current(s.Name, old, s); ok && cur.same(s) && t.MCP.has(s) && !t.MCP.behind(s, old) {
 				mine = append(mine, s.Name)
 				toolsOff[s.Name] = offMine
+				startup[s.Name] = t.MCP.startupWritten(s, old)
 				continue
 			}
 		}
 		if write("mcp:"+s.Name, func() error { return t.MCP.putEntry(s, off.apply(t.MCP.merged(s, old))) }) {
 			mine = append(mine, s.Name)
 			toolsOff[s.Name] = offMine
+			startup[s.Name] = t.MCP.startupWritten(s, old)
 		} else if old != nil {
 			toolsOff[s.Name] = prev // the entry is as it was
+			startup[s.Name] = a.Startup[s.Name]
 		}
 	}
 	a.MCP = mine
+	for k, v := range startup {
+		if v == 0 || !slices.Contains(mine, k) {
+			delete(startup, k)
+		}
+	}
+	a.Startup = startup
+	if len(a.Startup) == 0 {
+		a.Startup = nil
+	}
 	for k, v := range toolsOff {
 		if len(v) == 0 {
 			delete(toolsOff, k)
@@ -297,8 +316,11 @@ type AgentView struct {
 	NoEnvRefs bool `json:"noEnvRefs,omitempty"`
 	// ToolsOff: it can be told to leave out single tools of a server
 	// (mcp_tools_off.go); the page names those that can't
-	ToolsOff bool   `json:"toolsOff,omitempty"`
-	MCPVia   string `json:"mcpVia,omitempty"`
+	ToolsOff bool `json:"toolsOff,omitempty"`
+	// Startup: it is given a server's startup timeout (Codex's
+	// startup_timeout_sec)
+	Startup bool   `json:"startup,omitempty"`
+	MCPVia  string `json:"mcpVia,omitempty"`
 	// How is the way it is given its skills, link or copy, and HowOwn its
 	// own over the library's; MustCopy is one that can only take copies
 	// (in WSL)
@@ -326,7 +348,7 @@ type SkillView struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
 	Source      string            `json:"source,omitempty"`
-	Kind        string            `json:"kind"`             // github, folder, or "" for one kept in the library
+	Kind        string            `json:"kind"`             // github, git, folder, or "" for one kept in the library
 	Origin      string            `json:"origin,omitempty"` // on GitHub, as CC Switch installed it: it can be updated from there
 	Repo        string            `json:"repo,omitempty"`   // the repository it came from, however it came in, for the page to group by
 	Icon        string            `json:"icon,omitempty"`
@@ -344,6 +366,9 @@ type SkillView struct {
 	// in the library or in an agent's copy: an update replaces that, so
 	// the page asks first (#1449)
 	Edited bool `json:"edited,omitempty"`
+	// Gone is when its source was found without it: removed there, the
+	// page offers to take it out (skill_gone.go)
+	Gone string `json:"gone,omitempty"`
 }
 
 // View is the Library page.
@@ -427,6 +452,7 @@ func readView(problems []Problem, glance bool) (*View, error) {
 			av.NoRemote = t.MCP.supports(&Server{Transport: "http"}) != nil
 			av.NoEnvRefs = t.MCP.refsOf() == envSyntax{}
 			av.ToolsOff = toolsOffOf(t) != toolsNone
+			av.Startup = t.MCP.Format == fmtCodex
 		}
 		v.Agents = append(v.Agents, av)
 	}
@@ -513,6 +539,7 @@ func readView(problems []Problem, glance bool) (*View, error) {
 		}
 		sv.Check = lastCheck(s.Name)
 		sv.Edited, _ = l.editState(s, targets)
+		sv.Gone = s.Gone
 		v.Skills = append(v.Skills, sv)
 	}
 	v.FoundServers = foundServersOf(l, targets)

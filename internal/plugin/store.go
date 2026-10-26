@@ -34,6 +34,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
@@ -83,7 +85,36 @@ var installMu sync.Mutex
 func runBun(ctx context.Context, bun string, args ...string) ([]byte, error) {
 	installMu.Lock()
 	defer installMu.Unlock()
+	mendPackageJSON()
+	defer mendPackageJSON()
 	return bunCommand(ctx, bun, Dir(), args...).CombinedOutput()
+}
+
+// mendPackageJSON cuts what follows plugins/package.json's object off. Bun
+// on Windows can write a shorter package.json over a longer one without
+// truncating it (klmno1993, plugins#405: a bun remove left the old file's
+// last 56 bytes after the closing brace), and every bun add after it
+// fails on bun's "failed to read/parse package.json", whatever
+// the plugin. The object is kept as written; the whole file is kept as
+// package.json.broken. A file whose start isn't an object is left alone.
+// installMu held.
+func mendPackageJSON() {
+	pj := filepath.Join(Dir(), "package.json")
+	b, err := os.ReadFile(pj)
+	if err != nil || json.Valid(b) {
+		return
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	var obj map[string]any
+	if d.Decode(&obj) != nil || obj == nil {
+		return
+	}
+	head := append(bytes.Clone(bytes.TrimRight(b[:d.InputOffset()], " \t\r\n")), '\n')
+	if !json.Valid(head) {
+		return
+	}
+	_ = os.WriteFile(pj+".broken", b, 0o644)
+	_ = edit.WriteAtomic(pj, head)
 }
 
 // Dir is the folder magpie installs npm plugins into.
@@ -228,6 +259,7 @@ func save(l List) error {
 	if err := lastgood.Keep(listPath(), lastgood.JSON, 0o600); err != nil {
 		return err
 	}
+	defer filememo.Forget() // what follows plugins.json looks again (Written)
 	if err := writeWhole(listPath(), append(b, '\n')); err != nil {
 		return err
 	}
@@ -360,8 +392,20 @@ func Target(spec string) string {
 }
 
 // Add installs a plugin and adds it to the list, in place of one of the
-// same package. A package is installed with its scripts left unrun.
-func Add(ctx context.Context, spec string) (Entry, error) { return add(ctx, spec, "") }
+// same package. A package is installed with its scripts left unrun. A
+// community plugin's short or shown name (workbuddy, WorkBuddy) is its
+// package (resolve); the entry gives the package installed.
+func Add(ctx context.Context, spec string) (Entry, error) {
+	spec, err := resolve(ctx, strings.TrimSpace(spec))
+	if err != nil {
+		return Entry{}, err
+	}
+	return add(ctx, spec, "")
+}
+
+// AddExact is Add of a spec that is a package's own (another computer's
+// plugins.json), installed as written, never taken for a name.
+func AddExact(ctx context.Context, spec string) (Entry, error) { return add(ctx, spec, "") }
 
 // add is Add, an npm package installed at the version given when there is
 // one (installAt), its spec kept as given.
@@ -707,12 +751,16 @@ func install(ctx context.Context, spec string) error {
 		}
 	}
 	defer installMu.Unlock()
+	mendPackageJSON()
+	defer mendPackageJSON()
 	err = bunAdd(ctx, bun, spec)
 	// a @magpie-community package or version npm doesn't have (a new
 	// one waits for an owner to publish it there) comes from the
 	// community repo's dist branch; one Bun's minimumReleaseAge holds
-	// back stays held, as the user's bunfig asks
-	if name, version, ok := distWanted(spec); ok && err != nil && !minAge.MatchString(err.Error()) {
+	// back stays held, as the user's bunfig asks, and a bun this machine
+	// can't run at all can't add it from there either
+	var ue *BunUnstartableError
+	if name, version, ok := distWanted(spec); ok && err != nil && !minAge.MatchString(err.Error()) && !errors.As(err, &ue) {
 		if derr := installDist(ctx, bun, name, version); derr != nil {
 			return fmt.Errorf("%w (and from the community repo's dist branch: %v)", err, derr)
 		}
@@ -720,6 +768,7 @@ func install(ctx context.Context, spec string) error {
 	}
 	if err == nil {
 		pruneDist()
+		pruneInstallCache()
 	}
 	return err
 }
@@ -731,6 +780,9 @@ func bunAdd(ctx context.Context, bun, spec string) error {
 	if err != nil {
 		if hint := missingLibs(string(out)); hint != "" {
 			return fmt.Errorf("bun add %s: %s: %w", spec, hint, err)
+		}
+		if ue := wontLoad(bun, err); ue != nil {
+			return fmt.Errorf("bun add %s: %w", spec, ue)
 		}
 		return fmt.Errorf("bun add %s: %v: %s", spec, cantStart(bun, err), lastLines(string(out), 6))
 	}
@@ -900,6 +952,9 @@ func reinstall(ctx context.Context, spec string) error {
 	if err != nil {
 		if hint := missingLibs(string(out)); hint != "" {
 			return fmt.Errorf("bun update %s: %s: %w", name, hint, err)
+		}
+		if ue := wontLoad(bun, err); ue != nil {
+			return fmt.Errorf("bun update %s: %w", name, ue)
 		}
 		return fmt.Errorf("bun update %s: %v: %s", name, cantStart(bun, err), lastLines(string(out), 6))
 	}

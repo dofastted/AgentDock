@@ -1,0 +1,102 @@
+diff --git a/src/model.cpp b/src/model.cpp
+index 80afe56..0ff1edb 100644
+--- a/src/model.cpp
++++ b/src/model.cpp
+@@ -2,8 +2,10 @@
+ 
+ #include <ggml.h>
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <cstring>
++#include <fstream>
+ 
+ namespace pf {
+ 
+@@ -57,15 +59,19 @@ void yarn_freq_factors(const hparams & hp, std::vector<float> & ff, float & attn
+ bool model::load(const std::string & gguf_path, const std::string & device, int n_threads) {
+     release();
+ 
+-    if (!file.open(gguf_path, /*with_data =*/ true)) {
+-        error = file.error;
+-        return false;
+-    }
+     if (!be.init(device, n_threads)) {
+         error = be.error;
+         return false;
+     }
+-    if (!map_tensors() || !realize_weights()) {
++    // The CPU uses the loader's buffer in place, so it is read whole. A
++    // device gets the metadata only, and realize_weights reads each tensor
++    // from the file into the device's buffer: the weights are never held
++    // twice, once in the device's buffer and once here.
++    if (!file.open(gguf_path, /*with_data =*/ be.is_cpu())) {
++        error = file.error;
++        return false;
++    }
++    if (!map_tensors() || !realize_weights(gguf_path)) {
+         return false;
+     }
+     yarn_freq_factors(file.hp, freq_factors, attn_factor);
+@@ -116,7 +122,7 @@ bool model::map_tensors() {
+     return true;
+ }
+ 
+-bool model::realize_weights() {
++bool model::realize_weights(const std::string & gguf_path) {
+     if (be.is_cpu()) {
+         // Zero-copy: the GGUF loaded with no_alloc=false, so all tensor data
+         // lives in one contiguous ctx buffer. Wrap it as a CPU backend buffer
+@@ -155,11 +161,36 @@ bool model::realize_weights() {
+         error = "device weight alloc failed (out of device memory?)";
+         return false;
+     }
++    // Each tensor's bytes go from the file to the device through one
++    // 16 MB buffer.
++    std::ifstream in(gguf_path, std::ios::binary);
++    if (!in) {
++        error = "failed to reopen GGUF: " + gguf_path;
++        return false;
++    }
++    const size_t data_off = gguf_get_data_offset(file.guf);
++    std::vector<char> chunk(16u << 20);
+     for (ggml_tensor * s = ggml_get_first_tensor(file.ctx); s; s = ggml_get_next_tensor(file.ctx, s)) {
+-        ggml_tensor * d = ggml_get_tensor(device_ctx, ggml_get_name(s));
+-        ggml_backend_tensor_set(d, s->data, 0, ggml_nbytes(s));
++        ggml_tensor * d  = ggml_get_tensor(device_ctx, ggml_get_name(s));
++        const int64_t id = gguf_find_tensor(file.guf, ggml_get_name(s));
++        if (id < 0) {
++            error = std::string("tensor not in GGUF: ") + ggml_get_name(s);
++            return false;
++        }
++        in.seekg((std::streamoff) (data_off + gguf_get_tensor_offset(file.guf, id)));
++        const size_t n = ggml_nbytes(s);
++        for (size_t off = 0; off < n;) {
++            const size_t k = std::min(chunk.size(), n - off);
++            if (!in.read(chunk.data(), (std::streamsize) k)) {
++                error = std::string("short read of tensor ") + ggml_get_name(s);
++                return false;
++            }
++            ggml_backend_tensor_set(d, chunk.data(), off, k);
++            off += k;
++        }
+     }
+-    // Repoint the weight map at the device tensors (file.ctx stays as source).
++    // Repoint the weight map at the device tensors (file.ctx holds their
++    // metadata alone).
+     auto remap = [&](ggml_tensor *& t) { if (t) t = ggml_get_tensor(device_ctx, ggml_get_name(t)); };
+     remap(tok_embd); remap(output_norm); remap(cls_w); remap(cls_b);
+     for (auto & l : layers) {
+diff --git a/src/model.h b/src/model.h
+index 9fd8f06..6dc37d6 100644
+--- a/src/model.h
++++ b/src/model.h
+@@ -69,7 +69,7 @@ struct model {
+                  tap_map * taps = nullptr);
+ 
+   private:
+-    bool realize_weights();
++    bool realize_weights(const std::string & gguf_path);
+     bool map_tensors();
+ };
+ 

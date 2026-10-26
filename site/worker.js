@@ -3,7 +3,11 @@
 // download links that never go stale.
 //
 //   /api/latest            {version, notes, url, published, assets: {name: {url, size, sha256}}}
-//   /api/notes?after=&upto= {releases: [{version, notes, url, published}]}, newest
+//   /api/latest?channel=stable
+//                          the same for Settings' Stable channel: a release a
+//                          week, an urgent one at once ("The Stable channel"
+//                          below), with channel and urgent; 503 while unknown
+//   /api/notes?after=&upto=&limit= {releases: [{version, notes, url, published}]}, newest
 //                          first: what changed since the version an app last ran
 //                          Both take ?lang=zh for the notes in Chinese, where a
 //                          release has them (below its <!-- lang:zh --> marker);
@@ -64,9 +68,16 @@ export default {
       return Response.redirect(url.toString(), 301);
     }
     if (url.pathname === "/api/latest") {
+      const lang = url.searchParams.get("lang");
+      // Settings' Stable channel; any other channel, or none, is every
+      // version as it comes out
+      if (url.searchParams.get("channel") === "stable") {
+        const got = await stable(ctx, env, Date.now());
+        if (!got) return json({ error: "the stable version isn't known yet" }, 503, NO_STORE);
+        return json({ ...got.rel, notes: inLang(got.rel.notes, lang) }, 200, cacheFor(got));
+      }
       const got = await latest(ctx, env);
       if (!got) return json({ error: "no release yet" }, 503, NO_STORE);
-      const lang = url.searchParams.get("lang");
       return json({ ...got.rel, notes: inLang(got.rel.notes, lang) }, 200, cacheFor(got));
     }
     if (url.pathname === "/api/partners") {
@@ -91,9 +102,18 @@ export default {
       if (!got) return json({ error: "no releases" }, 503, NO_STORE);
       const after = url.searchParams.get("after"), upto = url.searchParams.get("upto");
       const lang = url.searchParams.get("lang");
-      const pick = got.list
-        .filter((r) => (!after || newer(r.version, after)) && (!upto || !newer(r.version, upto)))
-        .map((r) => ({ ...r, notes: inLang(r.notes, lang) }));
+      // limit: the newest that many alone (Settings' "this version and the
+      // 10 before it", Linka), so an app asking for 11 isn't sent 100
+      const limit = parseInt(url.searchParams.get("limit"), 10);
+      const within = (r) => (!after || newer(r.version, after)) && (!upto || !newer(r.version, upto));
+      let pick = got.list.filter(within);
+      // the hundred newest are a day of releases: a range reaching further
+      // back (a Stable app's week, an app long unopened) is read on from
+      // the ledger
+      const oldest = got.list.at(-1);
+      const short = after ? !oldest || newer(oldest.version, after) : limit > 0 ? pick.length < limit : !pick.some((r) => r.version === upto);
+      if (short && upto) pick = [...pick, ...(await fromLedger(env, oldest && oldest.version, after, upto, limit > 0 ? limit - pick.length : LEDGER_MOST))];
+      pick = pick.slice(0, limit > 0 ? limit : undefined).map((r) => ({ ...r, notes: inLang(r.notes, lang) }));
       return json({ releases: pick }, 200, cacheFor(got));
     }
     if (url.pathname === "/api/icon") return icon(url.searchParams.get("url"));
@@ -141,6 +161,11 @@ export default {
     }
     return beacon(await env.ASSETS.fetch(req));
   },
+  // the cron (wrangler.jsonc's triggers) keeps the ledger the Stable
+  // channel is chosen from
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(keepLedger(env, Date.now()));
+  },
 };
 
 // A partner's reach and clicks are counted here, not in the app: the app's
@@ -166,10 +191,13 @@ function live(p, now) {
 
 // served is the list the app gets: those whose term hasn't ended (an
 // ended one stays in partners.js, so the /go links of providers added from
-// it keep working), with their website and key page as /go links.
+// it keep working), with their website and key page as /go links. A
+// website's own host goes beside it as siteHost, for the editor's link to
+// read (www.kimi.com, not usemagpie.ai).
 export function served(list, now) {
   const go = (p, what, r) => GO + [p.id, what, r && r.id].filter(Boolean).map(encodeURIComponent).join("/");
-  const linked = (o, p, r) => ({ ...o, ...(o.website && { website: go(p, "site", r) }), ...(o.keysUrl && { keysUrl: go(p, "keys", r) }) });
+  const host = (u) => { try { return new URL(u).host; } catch { return ""; } };
+  const linked = (o, p, r) => ({ ...o, ...(o.website && { website: go(p, "site", r), siteHost: host(o.website) }), ...(o.keysUrl && { keysUrl: go(p, "keys", r) }) });
   return list
     .filter((p) => !p.until || now < Date.parse(p.until))
     .map((p) => ({ ...linked(p, p), ...(p.regions && { regions: p.regions.map((r) => linked(r, p, r)) }) }));
@@ -362,10 +390,12 @@ function api(path, env) {
   return fetch(`https://api.github.com/repos/${REPO}/${path}`, { headers });
 }
 
-async function fromAPI(env) {
+// fromAPI is a release from GitHub's API: the newest, or the one path names
+// (releases/tags/v0.1.2), or null.
+async function fromAPI(env, path = "releases/latest") {
   let res;
   try {
-    res = await api("releases/latest", env);
+    res = await api(path, env);
   } catch (e) {
     console.log("github api", e);
     return null;
@@ -399,10 +429,17 @@ async function fromPages() {
     console.log("github latest redirect", res.status);
     return null;
   }
-  const [sums, feed] = await Promise.all([checksums(tag), fromFeed()]);
+  const feed = await fromFeed();
+  return fromSums(tag, (feed || []).find((r) => r.version === tag.replace(/^v/, "")));
+}
+
+// fromSums is tag's release from its SHA256SUMS alone, with its notes and
+// date from entry ({notes, published}) where there is one: every file, its
+// size unknown (0). null when SHA256SUMS can't be read.
+async function fromSums(tag, entry) {
+  const sums = await checksums(tag);
   if (!sums) return null;
   const url = `https://github.com/${REPO}/releases/tag/${tag}`;
-  const entry = (feed || []).find((r) => r.version === tag.replace(/^v/, ""));
   const rel = { version: tag.replace(/^v/, ""), notes: entry ? entry.notes : "", url, published: entry ? entry.published : null, assets: {} };
   for (const [name, sha256] of Object.entries(sums)) {
     rel.assets[name] = { url: `https://github.com/${REPO}/releases/download/${tag}/${name}`, size: 0, sha256 };
@@ -445,6 +482,228 @@ async function releases(ctx, env) {
   const got = { list, degraded: true };
   remember(ctx, "releases", got, BRIEF);
   return got;
+}
+
+// The Stable channel (Settings' Update channel, ssharpcc on X): magpie
+// releases many times a day, and someone who reads every changelog before
+// updating wants fewer, older ones. /api/latest?channel=stable is the
+// update feed for them, chosen here from the release list and never by
+// hand:
+//
+//   - once a week, as the week turns (Monday 00:00 UTC), Stable becomes
+//     the newest release that was out SOAK (three days) by then;
+//   - an urgent release (a security hole, a ban risk, lost data) is Stable
+//     as soon as it is out, until a weekly pick passes it.
+//
+// A release is urgent when its notes have a line that starts with
+// URGENT_MARK: "**Urgent release:** why". magpie-releases' release run
+// writes it from an `Urgent:` trailer on any commit since the version
+// before, and it can be added to a published release's notes by hand
+// (gh release edit) within a day, while the release is on the ledger's
+// first page. GitHub releases are never marked pre-release for this:
+// /download and the Latest mark go by them.
+//
+// A hundred releases are a day or so of magpie, so the list GitHub's API
+// gives in one ask doesn't reach a week back. The ledger does: a KV
+// namespace (LEDGER) the cron fills every quarter hour, its "index" every
+// release of the last LEDGER_DAYS ({v, p: published, u: urgent}, newest
+// first) and "notes:<UTC day>" each day's notes by version, which
+// /api/notes reads for a range older than the hundred newest. Without the
+// ledger, or one that doesn't reach back to the week's cut, Stable isn't
+// known and the feed says so (503) rather than guess.
+const DAY = 86400e3;
+const SOAK = 3 * DAY;
+const LEDGER_DAYS = 45;
+const LEDGER_REACH = 21 * DAY; // how far back the cron fills the ledger
+const LEDGER_PAGES = 4; // GitHub API asks one cron run makes at most
+const LEDGER_MOST = 1500; // releases /api/notes reads from the ledger at most
+export const URGENT_MARK = "**Urgent release:**";
+
+// urgentIn says whether a release's notes mark it urgent: a line (or a
+// quoted one) that starts with URGENT_MARK, in any case.
+export function urgentIn(notes) {
+  return /^[ \t]*(?:>[ \t]*)?\*\*urgent release:\*\*/im.test(notes || "");
+}
+
+// weekStart is the Monday 00:00 UTC on or before now, in ms.
+export function weekStart(now) {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() + 6) % 7) * DAY;
+}
+
+// stableOf is the Stable release at now among list ([{version, published,
+// urgent}], any order): the newer of the newest release out SOAK before
+// this week began and the newest urgent one. null when the list doesn't
+// reach back to that cut and has no urgent release either: unknown.
+export function stableOf(list, now) {
+  const cut = weekStart(now) - SOAK;
+  let weekly = null, rush = null, reaches = false;
+  for (const r of list) {
+    const at = Date.parse(r.published);
+    if (!(at <= now)) continue; // a date not known, or not yet
+    if (at <= cut) {
+      reaches = true;
+      if (!weekly || newer(r.version, weekly.version)) weekly = r;
+    }
+    if (r.urgent && (!rush || newer(r.version, rush.version))) rush = r;
+  }
+  if (!reaches) return rush;
+  return rush && newer(rush.version, weekly.version) ? rush : weekly;
+}
+
+// readIndex is the ledger's index, null when there is no ledger, and
+// undefined when it can't be read: unknown, never an empty one.
+async function readIndex(env, cacheTtl) {
+  if (!env || !env.LEDGER) return null;
+  try {
+    const ix = await env.LEDGER.get("index", cacheTtl ? { type: "json", cacheTtl } : { type: "json" });
+    if (ix === null) return { list: [] };
+    return Array.isArray(ix && ix.list) ? ix : undefined;
+  } catch (e) {
+    console.log("ledger index", e);
+    return undefined;
+  }
+}
+
+// stable is the Stable release, condensed as latest's is: {rel, degraded},
+// or null when it isn't known. rel also says it is Stable's (channel) and
+// whether it went there as urgent.
+async function stable(ctx, env, now) {
+  const hit = await cached("stable");
+  if (hit && hit.rel && hit.rel.version) return hit;
+  const ix = await readIndex(env, 60);
+  if (!ix) return null;
+  const pick = stableOf(ix.list.map((r) => ({ version: r.v, published: r.p, urgent: !!r.u })), now);
+  if (!pick) return null;
+  const tag = "v" + pick.version;
+  let rel = await fromAPI(env, "releases/tags/" + tag), degraded = false;
+  if (!rel) {
+    // the API said no: the files from SHA256SUMS, the notes from the ledger
+    const [entry] = await fromLedger(env, null, null, pick.version, 1);
+    rel = await fromSums(tag, entry && entry.version === pick.version ? entry : { notes: "", published: pick.published });
+    degraded = true;
+  }
+  if (!rel) return null;
+  const got = { rel: { ...rel, channel: "stable", urgent: !!pick.urgent }, degraded };
+  remember(ctx, "stable", got, degraded ? BRIEF : TTL);
+  return got;
+}
+
+// fromLedger is the notes of the releases the ledger has older than below
+// (every one when null), after after (exclusive, "" for any) up to upto,
+// newest first, at most most: [{version, notes, url, published}].
+async function fromLedger(env, below, after, upto, most) {
+  const ix = await readIndex(env, 300);
+  if (!ix || !(most > 0)) return [];
+  const want = ix.list
+    .filter((r) => (!below || newer(below, r.v)) && (!after || newer(r.v, after)) && !newer(r.v, upto))
+    .sort((a, b) => (newer(a.v, b.v) ? -1 : newer(b.v, a.v) ? 1 : 0))
+    .slice(0, most);
+  const days = [...new Set(want.map((r) => dayOf(r.p)))];
+  const books = await Promise.all(days.map((d) => env.LEDGER.get("notes:" + d, { type: "json", cacheTtl: 300 }).catch(() => null)));
+  const by = Object.fromEntries(days.map((d, i) => [d, books[i] || {}]));
+  return want.map((r) => ({ version: r.v, notes: by[dayOf(r.p)][r.v] || "", url: `https://github.com/${REPO}/releases/tag/v${r.v}`, published: r.p }));
+}
+
+function dayOf(iso) {
+  return String(iso || "").slice(0, 10);
+}
+
+// keepLedger is the cron's run: GitHub's newest hundred releases into the
+// ledger (or the releases feed's ten, when the API says no), the pages
+// after them while the ledger has a hole or doesn't yet reach
+// LEDGER_REACH back, at most LEDGER_PAGES asks. A ledger that can't be
+// read is left alone, never written over as an empty one.
+export async function keepLedger(env, now) {
+  const ix = await readIndex(env);
+  if (!ix) return;
+  const kv = env.LEDGER;
+  const had = new Map(ix.list.map((r) => [r.v, r]));
+  const got = new Map(); // version: {version, notes, published}
+  let asks = 0, bottom = !!ix.bottom;
+  const page = async (n) => {
+    asks++;
+    let res;
+    try {
+      res = await api(`releases?per_page=100&page=${n}`, env);
+    } catch (e) {
+      console.log("ledger page", n, e);
+      return null;
+    }
+    if (!res.ok) {
+      console.log("ledger page", n, res.status);
+      return null;
+    }
+    const rels = (await res.json())
+      .filter((r) => !r.draft && !r.prerelease)
+      .map((r) => ({ version: r.tag_name.replace(/^v/, ""), notes: r.body || "", published: r.published_at }));
+    if (rels.length < 100) bottom = true;
+    for (const r of rels) got.set(r.version, r);
+    return rels;
+  };
+  const first = await page(1);
+  if (!first) for (const r of (await fromFeed()) || []) got.set(r.version, r);
+  // a hole (the cron stopped for a day): the pages after the first until
+  // one meets what the ledger had
+  let n = 1;
+  for (let last = first; last && last.length === 100 && had.size && !last.some((r) => had.has(r.version)) && asks < LEDGER_PAGES; ) last = await page(++n);
+  // reaching back: the page where the ledger's oldest is, then on
+  const oldest = () => {
+    let o = null;
+    for (const r of [...had.values(), ...[...got.values()].map((g) => ({ v: g.version, p: g.published }))]) if (!o || newer(o.v, r.v)) o = r;
+    return o;
+  };
+  let deep = Math.max(n + 1, Math.floor((had.size || got.size) / 100) + 1);
+  while (first && !bottom && asks < LEDGER_PAGES) {
+    const o = oldest();
+    if (o && Date.parse(o.p) <= now - LEDGER_REACH) break;
+    if (!(await page(deep++))) break;
+  }
+  // the index: what was had, what came, nothing older than LEDGER_DAYS
+  const keep = now - LEDGER_DAYS * DAY;
+  const merged = new Map(had);
+  for (const r of got.values()) {
+    // the feed's date is when the release was last edited: the API's, or
+    // the one the ledger has, is when it came out
+    const was = merged.get(r.version);
+    merged.set(r.version, { v: r.version, p: !first && was ? was.p : r.published, u: urgentIn(r.notes) });
+  }
+  const list = [...merged.values()]
+    .filter((r) => r.v && Date.parse(r.p) >= keep)
+    .sort((a, b) => (newer(a.v, b.v) ? -1 : newer(b.v, a.v) ? 1 : 0));
+  const next = { list, bottom };
+  if (JSON.stringify(next) !== JSON.stringify({ list: ix.list, bottom: !!ix.bottom })) await kv.put("index", JSON.stringify(next));
+  // each day's notes, written where they changed
+  const days = new Map();
+  for (const r of got.values()) {
+    // by the day the index has it out (the feed's date is its last edit)
+    const p = merged.get(r.version).p;
+    if (!p || Date.parse(p) < keep) continue;
+    const d = dayOf(p);
+    if (!days.has(d)) days.set(d, []);
+    days.get(d).push(r);
+  }
+  for (const [d, rels] of days) {
+    const key = "notes:" + d;
+    let book;
+    try {
+      book = (await kv.get(key, { type: "json" })) || {};
+    } catch (e) {
+      console.log("ledger notes", d, e);
+      continue; // unreadable: left as it is
+    }
+    let changed = false;
+    for (const r of rels) {
+      // the feed's notes (HTML made markdown, the Chinese marker guessed)
+      // never replace the API's
+      if (!first && book[r.version]) continue;
+      if (book[r.version] !== r.notes) {
+        book[r.version] = r.notes;
+        changed = true;
+      }
+    }
+    if (changed) await kv.put(key, JSON.stringify(book), { expirationTtl: (LEDGER_DAYS + 15) * 86400 });
+  }
 }
 
 // fromFeed is the newest releases from GitHub's releases feed (Atom), which

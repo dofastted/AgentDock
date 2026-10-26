@@ -34,7 +34,7 @@ func (m *model) reloadGroups() {
 	m.grow = clamp(m.grow, len(m.groups))
 }
 
-var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed, provider.Pace, provider.Weighted, provider.Manual}
+var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed, provider.Pace, provider.Weighted, provider.FreeFirst, provider.Fastest, provider.Manual}
 
 func routingName(v string) string {
 	switch v {
@@ -48,6 +48,10 @@ func routingName(v string) string {
 		return "weekly pace"
 	case provider.Weighted:
 		return "by weight"
+	case provider.FreeFirst:
+		return "free first"
+	case provider.Fastest:
+		return "speed first"
 	case provider.Manual:
 		return "manual"
 	}
@@ -199,7 +203,7 @@ func memberOptions(skip []string, self string) []agent.Option {
 		// agents see too (a provider kept for routing groups, a group's
 		// with listed=no, #1783), as the Routing view's picker offers
 		for _, e := range provider.Served() {
-			if slices.Contains(skip, e.ID) || e.ID == provider.GroupPrefix+self {
+			if slices.Contains(skip, e.ID) || slices.Contains(skip, provider.CanonicalRef(e.ID)) || e.Group != "" && e.Group == self {
 				continue
 			}
 			note := e.Name
@@ -293,7 +297,7 @@ func (m *model) openClassifier(g provider.Group) {
 // ruleHint is what a rule is typed as.
 const ruleHint = `use=<model>, and any of: tokens=200k · images · effort=on|low|medium|high|xhigh|max · agents=codex,claude
 intent="a quick question" (the group's classifier=<model> tells it) · compact
-time=09:00-18:00 (local; 22:00-08:00 runs past midnight) · days=mon-fri · folders=~/work/acme,~/oss · except-folders=~/old · at=<n> for its place
+time=09:00-18:00 (22:00-08:00 runs past midnight) · days=mon-fri · tz=Asia/Shanghai (this computer's zone if none) · folders=~/work/acme,~/oss · except-folders=~/old · at=<n> for its place
 use-effort=low|medium|high|xhigh|max: the reasoning the model is asked for, whatever the agent asked
 or pause=<model> time=… days=… agents=… folders=… except-folders=…: the model is left out of the group then, not even a fallback`
 
@@ -325,6 +329,7 @@ func putRule(g *provider.Group, i int, line string) error {
 	if err != nil {
 		return err
 	}
+	r.InZoneHere()
 	if classifier != "" {
 		g.Classifier = classifier
 	}
@@ -414,7 +419,7 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openClassifier(g)
 	case "E", "F":
 		// the model's own effort and fast mode, whatever the agent asks
-		if onRule || n == 0 || strings.HasPrefix(g.Members[m.gsel], provider.GroupPrefix) {
+		if onRule || n == 0 || provider.IsGroupRef(g.Members[m.gsel]) {
 			return m, nil
 		}
 		id := g.Members[m.gsel]
@@ -521,7 +526,7 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.confirm != "member/"+id {
 			m.confirm = "member/" + id
 			m.flash, m.flashOK = "press d again to take "+id+" out", false
-			if slices.ContainsFunc(g.Rules, func(r provider.Rule) bool { return r.Use == id }) {
+			if slices.ContainsFunc(g.Rules, func(r provider.Rule) bool { _, kept := r.Without(id); return !kept }) {
 				m.flash += " and its rules"
 			}
 			return m, nil
@@ -530,7 +535,14 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.gsel = clamp(m.gsel, all-1)
 		return m, saveGroup(g.ID, func(g *provider.Group) error {
 			g.Members = slices.DeleteFunc(g.Members, func(x string) bool { return x == id })
-			g.Rules = slices.DeleteFunc(g.Rules, func(r provider.Rule) bool { return r.Use == id })
+			// a rule that sends to others too keeps them
+			var rules []provider.Rule
+			for _, r := range g.Rules {
+				if r, kept := r.Without(id); kept {
+					rules = append(rules, r)
+				}
+			}
+			g.Rules = rules
 			return nil
 		}, id+" taken out")
 	}
@@ -557,7 +569,7 @@ func (m model) viewGroups() string {
 	}
 	nameW, idW := 0, 0
 	for _, g := range m.groups {
-		nameW, idW = max(nameW, lipgloss.Width(dash(g.Name))), max(idW, lipgloss.Width(provider.GroupPrefix+g.ID))
+		nameW, idW = max(nameW, lipgloss.Width(dash(g.Name))), max(idW, lipgloss.Width(g.Ref()))
 	}
 	visible := max(3, m.h-7)
 	start := 0
@@ -576,7 +588,7 @@ func (m model) viewGroups() string {
 		if i == m.grow {
 			marker, name = sCursor.Render("▸ "), sNameOn.Render(padRight(dash(g.Name), nameW))
 		}
-		line := pad + marker + name + "  " + sFaint.Render(padRight(provider.GroupPrefix+g.ID, idW))
+		line := pad + marker + name + "  " + sFaint.Render(padRight(g.Ref(), idW))
 		if g.Hidden {
 			b.WriteString(line + "\n")
 			continue
@@ -612,7 +624,7 @@ func (m model) viewGroup() string {
 	var b strings.Builder
 	b.WriteString(m.header("routing", g.Name))
 	b.WriteString("\n\n")
-	head := []string{provider.GroupPrefix + g.ID, groupRouting(g), staysName(g.Affinity)}
+	head := []string{g.Ref(), groupRouting(g), staysName(g.Affinity)}
 	if g.Context > 0 {
 		head = append(head, "context "+fmtTokens(g.Context))
 	}
@@ -661,9 +673,10 @@ func (m model) viewGroup() string {
 	}
 	for i := ruleFrom; i < ruleTo; i++ {
 		r := g.Rules[i]
-		marker, use := "  ", sText.Render(r.Use)
+		uses := strings.Join(r.Uses(), ", ") // in order: the next when one can't take it
+		marker, use := "  ", sText.Render(uses)
 		if len(g.Members)+i == m.gsel {
-			marker, use = sCursor.Render("▸ "), sNameOn.Render(r.Use)
+			marker, use = sCursor.Render("▸ "), sNameOn.Render(uses)
 		}
 		arrow := " → "
 		if r.Pause {

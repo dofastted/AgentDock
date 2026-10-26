@@ -38,6 +38,11 @@ type Model struct {
 	// APIs, when the vendor says, are the APIs the model is served on
 	// ("chat", "responses", "anthropic"); empty is not known.
 	APIs []string `json:",omitempty"`
+	// Endpoints, in magpie's own models for an agent, are the gateway
+	// paths a request for it is relayed on as it is
+	// (provider.NativeEndpoints, /v1/models' native_endpoints); none for a
+	// group or a model translated anyway.
+	Endpoints []string `json:"-"`
 	// Images is set on a model that takes images as input.
 	Images bool `json:",omitempty"`
 	// ImageInput is the source's explicit answer; nil means it did not say.
@@ -121,7 +126,8 @@ type Model struct {
 	// WebSearch is how another magpie (a Remote magpie) searches the web
 	// for the model when a web search tool is offered: "native", its own
 	// provider by itself, or "magpie", with that magpie's searcher; "" it
-	// doesn't, or didn't say.
+	// doesn't, or didn't say. A plugin's model it says searches by itself
+	// (m.searches) is "native" too.
 	WebSearch string `json:",omitempty"`
 }
 
@@ -371,22 +377,27 @@ func (p mdProvider) levels(m mdModel, providerID string) []string {
 	if e := m.efforts(providerID); len(e) > 0 || !m.Thinks || m.Family == "" || m.budgeted() {
 		return e
 	}
-	var kin *mdModel
-	for _, x := range p.Models {
-		if x.Family != m.Family || !x.Thinks || x.ID == m.ID || len(x.efforts(providerID)) == 0 {
+	// the kin is kept by its id, date and levels, not as &x: a pointer to
+	// the loop's copy put every model of p on the heap, for every model
+	// asked (~6 GB in 48 minutes of a user's magpie, #1956)
+	var kinID, kinDate string
+	var kin []string
+	for id := range p.Models {
+		x := p.Models[id]
+		if x.Family != m.Family || !x.Thinks || x.ID == m.ID {
 			continue
 		}
 		if m.ReleaseDate != "" && x.ReleaseDate > m.ReleaseDate {
 			continue
 		}
-		if kin == nil || x.ReleaseDate > kin.ReleaseDate || x.ReleaseDate == kin.ReleaseDate && x.ID > kin.ID {
-			kin = &x
+		if kin != nil && (x.ReleaseDate < kinDate || x.ReleaseDate == kinDate && x.ID <= kinID) {
+			continue
+		}
+		if e := x.efforts(providerID); len(e) > 0 {
+			kinID, kinDate, kin = x.ID, x.ReleaseDate, e
 		}
 	}
-	if kin == nil {
-		return nil
-	}
-	return kin.efforts(providerID)
+	return kin
 }
 
 // window is the tokens a prompt to m may hold: the input limit where
@@ -432,7 +443,12 @@ var (
 	// while a call is pricing its model
 	loadMu sync.Mutex
 	loaded bool
-	mdev   map[string]mdProvider
+	// built are Provider's lists of this load, by provider: dsh's wiring
+	// asks for them every 30 seconds, and each built every model again.
+	// gen counts Resets, so a list built from an older load isn't kept.
+	built map[string][]Model
+	gen   int
+	mdev  map[string]mdProvider
 	// images are the models, by bare id, most of the providers serving
 	// them say take images (a few mislabel a text model)
 	images map[string]bool
@@ -482,6 +498,13 @@ func Source() string {
 }
 
 func load() map[string]mdProvider {
+	all, _ := loadGen()
+	return all
+}
+
+// loadGen is load with the Reset count it was loaded at, read under the
+// same lock, so what is built of it is kept for that load alone.
+func loadGen() (map[string]mdProvider, int) {
 	loadMu.Lock()
 	defer loadMu.Unlock()
 	if !loaded {
@@ -612,15 +635,23 @@ func load() map[string]mdProvider {
 			}
 		}()
 	}
-	return mdev
+	return mdev, gen
 }
 
-// Reset forgets the loaded catalog so the next call re-reads the cache.
+// Reset forgets the loaded catalog so the next call re-reads the cache,
+// and tells Forget: what the provider package built of the old one (the
+// windows and output limits of its entries) is kept between requests
+// for a moment, and would answer for the old catalog meanwhile.
 func Reset() {
 	loadMu.Lock()
-	defer loadMu.Unlock()
 	loaded = false
+	built = nil
+	gen++
 	mdev, images, windows, outputs, efforts, thinks, names, listed, canonical = nil, nil, nil, nil, nil, nil, nil, nil, nil
+	loadMu.Unlock()
+	if Forget != nil {
+		Forget()
+	}
 }
 
 // Sync downloads the models.dev catalog into CachePath. It serializes with
@@ -706,7 +737,7 @@ func PriceOf(providerID, modelID string) (Price, bool) {
 // for a dash, then as the model an entry names as its canonical_model_id
 // (DeepSeek's deepseek-flash is deepseek-v4.1-flash).
 func PricedBy(providers []string, id string) (Price, bool) {
-	all := load()
+	all, at := loadGen()
 	for _, pid := range providers {
 		if m, ok := all[pid].Models[id]; ok && m.Cost != nil {
 			return *m.Cost, true
@@ -718,15 +749,8 @@ func PricedBy(providers []string, id string) (Price, bool) {
 	}
 	for _, want := range []string{b, cutAt(b, '('), cutAt(b, ':')} {
 		for _, pid := range providers {
-			keys := make([]string, 0, len(all[pid].Models))
-			for key, m := range all[pid].Models {
-				if m.Cost != nil && bareID(key) == want {
-					keys = append(keys, key)
-				}
-			}
-			if len(keys) > 0 {
-				slices.Sort(keys)
-				return *all[pid].Models[keys[0]].Cost, true
+			if key, ok := priceIndexOf(all, at, pid).bare[want]; ok {
+				return *all[pid].Models[key].Cost, true
 			}
 		}
 	}
@@ -736,15 +760,8 @@ func PricedBy(providers []string, id string) (Price, bool) {
 	// lists the id as given, at a price of its own, is still the one asked.
 	want := dashed(b)
 	for _, pid := range providers {
-		keys := []string{}
-		for key, m := range all[pid].Models {
-			if m.Cost != nil && dashed(bareID(key)) == want {
-				keys = append(keys, key)
-			}
-		}
-		if len(keys) > 0 {
-			slices.Sort(keys)
-			return *all[pid].Models[keys[0]].Cost, true
+		if key, ok := priceIndexOf(all, at, pid).dashed[want]; ok {
+			return *all[pid].Models[key].Cost, true
 		}
 	}
 	// and by what models.dev says an entry is (canonical_model_id): DeepSeek
@@ -752,7 +769,7 @@ func PricedBy(providers []string, id string) (Price, bool) {
 	// deepseek/deepseek-v4.1-flash, the id WorkBuddy and the relays serve it
 	// under, and lists no deepseek-v4.1-flash of its own (#1520). Only where
 	// nothing above priced it, so an id a vendor lists keeps its own price.
-	if pr, ok := canonicallyPriced(all, providers, b); ok {
+	if pr, ok := canonicallyPriced(all, at, providers, b); ok {
 		return pr, true
 	}
 	// and a relay's rename of a model none of them lists as given
@@ -761,6 +778,72 @@ func PricedBy(providers []string, id string) (Price, bool) {
 		return PricedBy(providers, r)
 	}
 	return Price{}, false
+}
+
+// priceIndex is what PricedBy looks a model up by in one models.dev
+// provider, built once a load rather than from every model of the
+// provider at each look-up: a model no catalog prices went through every
+// model of every vendor asked, lower-cased, five times over, and a model
+// list priced row by row (/v1/models' pricing) spent 30ms on it for 250
+// models.
+type priceIndex struct {
+	// bare and dashed are the first key, in key order, of the priced
+	// entries with that bare id, and with that bare id's dots as dashes
+	bare, dashed map[string]string
+	// canon and canonDashed are the price the vendor's own entries under a
+	// canonical id (bare, and dashed) give, nil where they disagree
+	canon, canonDashed map[string]*Price
+}
+
+var priceIndexes struct {
+	sync.Mutex
+	gen int
+	by  map[string]*priceIndex
+}
+
+// priceIndexOf is pid's priceIndex in all, the catalog loaded at Reset
+// count at.
+func priceIndexOf(all map[string]mdProvider, at int, pid string) *priceIndex {
+	priceIndexes.Lock()
+	defer priceIndexes.Unlock()
+	if priceIndexes.by == nil || priceIndexes.gen != at {
+		priceIndexes.gen, priceIndexes.by = at, map[string]*priceIndex{}
+	}
+	if x, ok := priceIndexes.by[pid]; ok {
+		return x
+	}
+	x := &priceIndex{bare: map[string]string{}, dashed: map[string]string{}, canon: map[string]*Price{}, canonDashed: map[string]*Price{}}
+	first := func(by map[string]string, k, key string) {
+		if was, ok := by[k]; !ok || key < was {
+			by[k] = key
+		}
+	}
+	seen := map[*map[string]*Price]map[string]bool{&x.canon: {}, &x.canonDashed: {}}
+	agree := func(by *map[string]*Price, k string, p *Price) {
+		if !seen[by][k] {
+			seen[by][k] = true
+			(*by)[k] = p
+		} else if was := (*by)[k]; was != nil && !was.Same(*p) {
+			(*by)[k] = nil
+		}
+	}
+	for key, m := range all[pid].Models {
+		if m.Cost == nil {
+			continue
+		}
+		b := bareID(key)
+		first(x.bare, b, key)
+		first(x.dashed, dashed(b), key)
+		maker, _, ok := strings.Cut(m.Canonical, "/")
+		if !ok || !strings.EqualFold(maker, pid) || m.Cost.Same(Price{}) {
+			continue
+		}
+		c := bareID(m.Canonical)
+		agree(&x.canon, c, m.Cost)
+		agree(&x.canonDashed, dashed(c), m.Cost)
+	}
+	priceIndexes.by[pid] = x
+	return x
 }
 
 // canonicallyPriced is the list price the first of providers gives the
@@ -774,27 +857,14 @@ func PricedBy(providers []string, id string) (Price, bool) {
 // its id is priced at its maker's, as it was. A vendor listing several
 // entries under one canonical at different prices names none of them:
 // which one was called isn't known.
-func canonicallyPriced(all map[string]mdProvider, providers []string, b string) (Price, bool) {
-	for _, same := range []func(c string) bool{
-		func(c string) bool { return bareID(c) == b },
-		func(c string) bool { return dashed(bareID(c)) == dashed(b) },
+func canonicallyPriced(all map[string]mdProvider, at int, providers []string, b string) (Price, bool) {
+	for _, by := range []func(*priceIndex) (*Price, bool){
+		func(x *priceIndex) (*Price, bool) { p, ok := x.canon[b]; return p, ok },
+		func(x *priceIndex) (*Price, bool) { p, ok := x.canonDashed[dashed(b)]; return p, ok },
 	} {
 		for _, pid := range providers {
-			var got *Price
-			agree := true
-			for _, m := range all[pid].Models {
-				maker, _, ok := strings.Cut(m.Canonical, "/")
-				if !ok || !strings.EqualFold(maker, pid) || m.Cost == nil || m.Cost.Same(Price{}) || !same(m.Canonical) {
-					continue
-				}
-				if got != nil && !got.Same(*m.Cost) {
-					agree = false
-					break
-				}
-				got = m.Cost
-			}
-			if got != nil && agree {
-				return *got, true
+			if p, ok := by(priceIndexOf(all, at, pid)); ok && p != nil {
+				return *p, true
 			}
 		}
 	}
@@ -832,7 +902,27 @@ func APIOf(providerID, modelID string) string {
 // A vendor's own /models answer, once fetched, is layered over it by the
 // provider package (see provider.Provider.Available).
 func Provider(id string) []Model {
-	p, ok := load()[id]
+	loadMu.Lock()
+	out, ok := built[id]
+	at := gen
+	loadMu.Unlock()
+	if ok {
+		return slices.Clone(out)
+	}
+	out = provider(load(), id)
+	loadMu.Lock()
+	if at == gen {
+		if built == nil {
+			built = map[string][]Model{}
+		}
+		built[id] = out
+	}
+	loadMu.Unlock()
+	return slices.Clone(out)
+}
+
+func provider(all map[string]mdProvider, id string) []Model {
+	p, ok := all[id]
 	if !ok {
 		return nil
 	}
@@ -956,6 +1046,14 @@ func fillNames(ms []Model, fallback []string, reserved ...Model) {
 // any provider, as ContextOf and EffortsOf match it.
 func Knows(id string) bool {
 	return ContextOf(id) > 0 || len(EffortsOf(id)) > 0 || Thinks(id)
+}
+
+// Lists reports whether models.dev lists a model by this very id (its
+// last part, any case), not one found by another spelling: claude-opus-5.5
+// only when that is how one of its providers spells it.
+func Lists(id string) bool {
+	load()
+	return listed[bareID(id)]
 }
 
 // SeesImages reports whether models.dev says a model of this id takes
@@ -1197,6 +1295,24 @@ func listedBy(providers []string, id string, providerOverrides bool) ([]string, 
 		}
 	}
 	return nil, false
+}
+
+// variantSuffix is a word a proxy puts after a model's id to name the
+// level or speed it serves the model at: CLIProxyAPI's Antigravity
+// channel lists gemini-3.8-flash-high, claude-opus-5-5-high,
+// claude-opus-4-6-thinking and gpt-oss-120b-medium, and its xAI channel
+// grok-3-mini-fast. Its "(high)" form is found's.
+var variantSuffix = regexp.MustCompile(`(?i)-(minimal|low|medium|high|xhigh|max|thinking|fast)$`)
+
+// Unsuffixed is id with a proxy's level or speed word taken off
+// (variantSuffix), and whether it had one. It is for borrowing levels a
+// model has no word on alone: the vendor's own list, which may name a
+// model so, goes first.
+func Unsuffixed(id string) (string, bool) {
+	if loc := variantSuffix.FindStringIndex(id); loc != nil && loc[0] > 0 {
+		return id[:loc[0]], true
+	}
+	return "", false
 }
 
 // KinEfforts are the reasoning levels of a model none of the providers
@@ -1441,14 +1557,32 @@ func AtEndpoint(base string) []string {
 	if want == "" {
 		return nil
 	}
-	var ids []string
-	for id, p := range load() {
-		if endpointKey(p.API) == want {
-			ids = append(ids, id)
+	all, at := loadGen()
+	endpoints.Lock()
+	defer endpoints.Unlock()
+	if endpoints.by == nil || endpoints.gen != at {
+		// every provider's API, keyed once a load rather than each
+		// look-up: a provider's price asks for it, and a model list
+		// priced row by row asked it once a model (/v1/models' pricing)
+		endpoints.gen, endpoints.by = at, map[string][]string{}
+		for id, p := range all {
+			if k := endpointKey(p.API); k != "" {
+				endpoints.by[k] = append(endpoints.by[k], id)
+			}
+		}
+		for _, ids := range endpoints.by {
+			slices.Sort(ids)
 		}
 	}
-	slices.Sort(ids)
-	return ids
+	return slices.Clone(endpoints.by[want])
+}
+
+// endpoints are the models.dev providers by the API they serve at
+// (endpointKey), for the load of Reset count gen.
+var endpoints struct {
+	sync.Mutex
+	gen int
+	by  map[string][]string
 }
 
 func endpointKey(u string) string {

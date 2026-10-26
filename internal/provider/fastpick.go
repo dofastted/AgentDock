@@ -106,7 +106,7 @@ func SetFastTier(agent, id, tier string) error {
 		return fmt.Errorf("magpie knows no tier %q", tier)
 	}
 	if tier != "" {
-		if strings.HasPrefix(id, GroupPrefix) {
+		if IsGroupRef(id) {
 			return fmt.Errorf("%s is a routing group: its members are sent fast as it says, on the Routing page", id)
 		}
 		p, model, ok := Resolve(id)

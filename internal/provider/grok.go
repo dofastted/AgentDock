@@ -180,7 +180,16 @@ var grokTools = map[string]bool{"function": true, "web_search": true, "x_search"
 // agent_message (a subagent's task, or its reply in the lead's history),
 // which the backend turns away with 422 "unknown item type", goes as the
 // user's message, its sender and recipient said first (grokAgentMessage).
-func grokBody(body []byte) []byte {
+func grokBody(body []byte) []byte { return grokShaped(body, false) }
+
+// grokPluginBody is grokBody for the Grok plugin, but a tool_choice "none"
+// with no tools stays: a request that turned tools off says so to the
+// plugin, which reads it before adding a tool of its own (x_search) and
+// leaves a lone tool_choice out before the request goes to Grok
+// (@magpie-community/opencode-grok-auth 0.1.18, #3110).
+func grokPluginBody(body []byte) []byte { return grokShaped(body, true) }
+
+func grokShaped(body []byte, keepNone bool) []byte {
 	if !bytes.Contains(body, []byte(`"tools"`)) && !bytes.Contains(body, []byte(`"reasoning"`)) && !bytes.Contains(body, []byte(`"tool_choice"`)) && !bytes.Contains(body, []byte(`"namespace"`)) && !bytes.Contains(body, []byte(`"agent_message"`)) {
 		return body
 	}
@@ -228,7 +237,7 @@ func grokBody(body []byte) []byte {
 			}
 		}
 	}
-	if tools, _ := m["tools"].([]any); len(tools) == 0 {
+	if tools, _ := m["tools"].([]any); len(tools) == 0 && !(keepNone && m["tool_choice"] == "none") {
 		if _, ok := m["tool_choice"]; ok {
 			delete(m, "tool_choice")
 			dirty = true
