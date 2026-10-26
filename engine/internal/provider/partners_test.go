@@ -1,10 +1,14 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,7 +57,9 @@ func TestPartnersFromTheFeed(t *testing.T) {
 	t.Cleanup(resetPartners)
 	was := fetchPartnerIcon
 	t.Cleanup(func() { fetchPartnerIcon = was })
+	var iconFetches atomic.Int32
 	fetchPartnerIcon = func(_ context.Context, u string) (string, error) {
+		iconFetches.Add(1)
 		if u != "https://acme.example/logo.png" {
 			t.Errorf("icon fetched from %q", u)
 		}
@@ -64,6 +70,7 @@ func TestPartnersFromTheFeed(t *testing.T) {
 	var body atomic.Value
 	body.Store(`{"partners":[
 		{"id":"acme","name":"Acme AI","chat":"https://api.acme.example/v1","keysUrl":"https://acme.example/keys?ref=magpie",
+		 "website":"https://usemagpie.ai/go/acme/site","siteHost":"www.acme.example",
 		 "iconUrl":"https://acme.example/logo.png","notes":{"en":"Fast relay","zh":"快速中转"},"langs":["zh"],
 		 "decide":"https://api.acme.example/decide","noKey":true},
 		{"id":"plain","name":"Plain","chat":"http://api.plain.example/v1"},
@@ -72,7 +79,7 @@ func TestPartnersFromTheFeed(t *testing.T) {
 		{"id":"noname","chat":"https://x.example/v1"},
 		{"id":"later","name":"Later","chat":"https://later.example/v1","from":"` + future + `"},
 		{"id":"gone","name":"Gone","chat":"https://gone.example/v1","until":"` + past + `"},
-		{"id":"regioned","name":"Regioned","regions":[{"id":"cn","name":"China","chat":"https://cn.regioned.example/v1"}]},
+		{"id":"regioned","name":"Regioned","regions":[{"id":"cn","name":"China","chat":"https://cn.regioned.example/v1","website":"https://usemagpie.ai/go/regioned/site/cn","siteHost":"cn.regioned.example"}]},
 		{"id":"acme","name":"Acme twice","chat":"https://twice.example/v1"}
 	]}`)
 	t.Setenv("MAGPIE_PARTNERS", partnerFeedServer(t, &body).URL)
@@ -94,6 +101,19 @@ func TestPartnersFromTheFeed(t *testing.T) {
 	}
 	if got[1].Chat != "https://cn.regioned.example/v1" {
 		t.Errorf("a partner with regions only is at %q, not its first region", got[1].Chat)
+	}
+	// the host a /go website sends the browser to, which the editor's link reads
+	if a.SiteHost != "www.acme.example" || got[1].Regions[0].SiteHost != "cn.regioned.example" {
+		t.Errorf("siteHost = %q, region's %q", a.SiteHost, got[1].Regions[0].SiteHost)
+	}
+
+	// fetched again, its icon from the same URL is the one kept
+	fetchPartnersNow()
+	if n := iconFetches.Load(); n != 1 {
+		t.Errorf("icon fetched %d times over two fetches of one URL, want 1", n)
+	}
+	if got := Partners(); len(got) == 0 || got[0].Icon != a.Icon {
+		t.Errorf("icon after a second fetch = %v, want the kept %q", got, a.Icon)
 	}
 
 	// a provider is added from it as from a preset
@@ -117,7 +137,7 @@ func TestPartnersFromTheFeed(t *testing.T) {
 		t.Fatalf("partners after the list emptied = %s", partnerIDs(got))
 	}
 	resetPartners()
-	if pr := Preset("acme"); pr == nil || pr.Sponsored || pr.Chat != "https://api.acme.example/v1" {
+	if pr := Preset("acme"); pr == nil || pr.Sponsored || pr.Chat != "https://api.acme.example/v1" || pr.SiteHost != "www.acme.example" {
 		t.Fatalf("Preset(acme) after it left = %+v", pr)
 	}
 
@@ -179,6 +199,33 @@ func TestPartnersFetchedLastIsHeld(t *testing.T) {
 	}
 	if n := asked.Load(); n != 2 {
 		t.Fatalf("asked %d times, want 2", n)
+	}
+}
+
+// A process started fetches the list on its first ask, however fresh the
+// list kept on disk: one fetched empty a minute before a partner was added
+// held it back for six hours, restart or not.
+func TestPartnersFetchedOnStart(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	resetPartners()
+	t.Cleanup(resetPartners)
+	kept, _ := json.Marshal(partnerCache{At: time.Now().Add(-time.Minute)})
+	if err := os.MkdirAll(filepath.Dir(partnerCacheFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partnerCacheFile(), kept, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var body atomic.Value
+	body.Store(`{"partners":[{"id":"acme","name":"Acme","chat":"https://a.example/v1"}]}`)
+	t.Setenv("MAGPIE_PARTNERS", partnerFeedServer(t, &body).URL)
+
+	Partners()
+	// the fetch it started has ended once a fetch can be claimed
+	claimPartnerFetch()
+	partnerMu.Unlock()
+	if ids := partnerIDs(Partners()); ids != "acme" {
+		t.Fatalf("partners after a start with a fresh empty list kept = %q, want acme", ids)
 	}
 }
 
@@ -345,5 +392,248 @@ func TestNoticePartners(t *testing.T) {
 	fetchPartnersNow()
 	if !PartnerNoticed("acme") || PartnerNoticed("gamma") {
 		t.Fatalf("after a fetch: acme %v gamma %v", PartnerNoticed("acme"), PartnerNoticed("gamma"))
+	}
+}
+
+// The magpie serving the gateway fetches the list when it starts and
+// again when it is due, with no page asking: an app left open on another
+// page still learns of a partner added within the hour.
+func TestPartnersKeptFreshUnasked(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	resetPartners()
+	t.Cleanup(resetPartners)
+	was := partnerEvery
+	partnerEvery = 50 * time.Millisecond
+	t.Cleanup(func() { partnerEvery = was })
+	var asked atomic.Int32
+	var body atomic.Value
+	body.Store(`{"partners":[]}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		_, _ = rw.Write([]byte(body.Load().(string)))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MAGPIE_PARTNERS", srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); KeepPartnersFresh(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: asked %d times", what, asked.Load())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor("fetched on start", func() bool { return asked.Load() >= 1 })
+	body.Store(`{"partners":[{"id":"acme","name":"Acme","chat":"https://a.example/v1"}]}`)
+	n := asked.Load()
+	waitFor("fetched again when due", func() bool { return asked.Load() > n })
+	// the fetch counted may still be storing its list
+	claimPartnerFetch()
+	partnerMu.Unlock()
+	waitFor("the partner added is held", func() bool {
+		partnerMu.Lock()
+		defer partnerMu.Unlock()
+		return partnerState != nil && partnerIDs(partnerState.Partners) == "acme"
+	})
+}
+
+// #3424: a partner's logo is no provider's icon until one is added from
+// it, and a list fetched again uses the logo kept from the same URL as it
+// is, so the file only ages. The prune after any save of providers.json
+// took it once it was an hour old: the add sheet drew the partner with
+// the generic icon, and the next fetch downloaded the logo again. It is
+// kept while the partner is listed; a picture nothing points at still
+// goes.
+func TestPartnerLogoOutlivesAProvidersSave(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	resetPartners()
+	t.Cleanup(resetPartners)
+	was := fetchPartnerIcon
+	t.Cleanup(func() { fetchPartnerIcon = was })
+	var fetched atomic.Int32
+	fetchPartnerIcon = func(context.Context, string) (string, error) {
+		fetched.Add(1)
+		return StoreIcon([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR acme's logo"))
+	}
+	var body atomic.Value
+	body.Store(`{"partners":[{"id":"acme","name":"Acme AI","chat":"https://api.acme.example/v1","iconUrl":"https://acme.example/logo.png"}]}`)
+	t.Setenv("MAGPIE_PARTNERS", partnerFeedServer(t, &body).URL)
+	fetchPartnersNow()
+	got := Partners()
+	if len(got) != 1 || !strings.HasPrefix(got[0].Icon, iconPrefix) {
+		t.Fatalf("partners = %+v", got)
+	}
+	logo := IconFile(strings.TrimPrefix(got[0].Icon, iconPrefix))
+	stray, err := StoreIcon([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR nobody's"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strayFile := IconFile(strings.TrimPrefix(stray, iconPrefix))
+	// kept from an earlier day, and the list fetched again (a start) uses
+	// it as it is
+	old := time.Now().Add(-2 * time.Hour)
+	for _, f := range []string{logo, strayFile} {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fetchPartnersNow()
+
+	pruneIcons(file{})
+	if _, err := os.Stat(logo); err != nil {
+		t.Errorf("the listed partner's logo was pruned: %v", err)
+	}
+	if _, err := os.Stat(strayFile); err == nil {
+		t.Errorf("a picture nothing points at was kept")
+	}
+	fetchPartnersNow()
+	if n := fetched.Load(); n != 1 {
+		t.Errorf("the logo was downloaded %d times, want once", n)
+	}
+}
+
+// partners.json says when the list was last tried and how that ended. An
+// app that kept a list from 10-20 for three days left a file that
+// couldn't tell a fetch failing every time from one that never came back,
+// or from none asked (#3362). Now a failure keeps its error until a fetch
+// gets the list, a fetch still out shows as a try after the list's time
+// with no error, and a failure is logged once, however often it is
+// tried again.
+func TestPartnersKeepTheirLastTry(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	resetPartners()
+	t.Cleanup(resetPartners)
+	var logged bytes.Buffer
+	was := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(was) })
+	var fail, hold atomic.Bool
+	fail.Store(true)
+	var asked atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		if hold.Load() {
+			<-release
+		}
+		if fail.Load() {
+			http.Error(rw, "down for maintenance", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = rw.Write([]byte(`{"partners":[{"id":"acme","name":"Acme","chat":"https://a.example/v1"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	// runs before srv.Close, which waits for a held fetch (#1808)
+	let := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(let)
+	t.Setenv("MAGPIE_PARTNERS", srv.URL)
+
+	// what the file says, read as written, not through partnerCache
+	type kept struct {
+		at, tried time.Time
+		err       string
+		partners  string
+	}
+	read := func() kept {
+		t.Helper()
+		b, err := os.ReadFile(partnerCacheFile())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(b, &raw); err != nil {
+			t.Fatal(err)
+		}
+		var k kept
+		_ = json.Unmarshal(raw["at"], &k.at)
+		_ = json.Unmarshal(raw["tried"], &k.tried)
+		_ = json.Unmarshal(raw["error"], &k.err)
+		var ps []Partner
+		_ = json.Unmarshal(raw["partners"], &ps)
+		k.partners = partnerIDs(ps)
+		return k
+	}
+
+	start := time.Now()
+	fetchPartnersNow()
+	k := read()
+	if k.tried.Before(start) || !strings.Contains(k.err, "503") || !k.at.IsZero() {
+		t.Fatalf("after a failed fetch the file says tried %v, error %q, at %v; want a try since %v, the 503, no list", k.tried, k.err, k.at, start)
+	}
+	fetchPartnersNow()
+	fetchPartnersNow()
+	if n := strings.Count(logged.String(), "couldn't be fetched"); n != 1 {
+		t.Fatalf("three failed fetches logged %d times, want once:\n%s", n, logged.String())
+	}
+
+	// a fetch still out: tried after the list's time, no error
+	fail.Store(false)
+	hold.Store(true)
+	before, out := asked.Load(), time.Now()
+	done := make(chan struct{})
+	go func() { fetchPartnersNow(); close(done) }()
+	for deadline := time.Now().Add(5 * time.Second); asked.Load() == before; {
+		if time.Now().After(deadline) {
+			t.Fatal("the fetch never asked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	k = read()
+	if k.tried.Before(out) || k.err != "" || !k.at.Before(k.tried) {
+		t.Fatalf("while a fetch is out the file says tried %v, error %q, at %v; want a try since %v after the list's time, no error", k.tried, k.err, k.at, out)
+	}
+
+	let()
+	<-done
+	k = read()
+	if k.err != "" || k.at.Before(k.tried) || k.partners != "acme" {
+		t.Fatalf("after the fetch got the list the file says tried %v, error %q, at %v, partners %q", k.tried, k.err, k.at, k.partners)
+	}
+	if !strings.Contains(logged.String(), "fetched again") {
+		t.Fatalf("the list fetched again after a failure wasn't logged:\n%s", logged.String())
+	}
+}
+
+// A partners.json that doesn't parse is read as no list and no Seen, and
+// every try now writes the file before it is sent (#3362). The first try,
+// offline too, wrote over it: the presets of partners no longer listed,
+// which providers added from them still use, were gone. It is kept aside
+// first, as lastgood keeps every file read as empty when it doesn't parse.
+func TestPartnersUnparsedFileKeptAside(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	resetPartners()
+	t.Cleanup(resetPartners)
+	bad := []byte(`{"at":"2026-10-20T15:40:31+08:00","seen":{"acme":{"id":"acme","name":"Acme AI","ch`)
+	if err := os.MkdirAll(filepath.Dir(partnerCacheFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partnerCacheFile(), bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		http.Error(rw, "down", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MAGPIE_PARTNERS", srv.URL)
+	fetchPartnersNow()
+
+	aside, _ := filepath.Glob(partnerCacheFile() + ".bad-*")
+	if len(aside) != 1 {
+		t.Fatalf("partners.json that didn't parse was written over with nothing kept aside (%v)", aside)
+	}
+	if b, err := os.ReadFile(aside[0]); err != nil || !bytes.Equal(b, bad) {
+		t.Fatalf("kept aside %q (%v), want the file as it was", b, err)
+	}
+	partnerMu.Lock()
+	defer partnerMu.Unlock()
+	if partnerState.Error == "" {
+		t.Fatalf("the failed try isn't recorded: %+v", partnerState)
 	}
 }

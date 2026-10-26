@@ -49,6 +49,7 @@
     <a class="toc-only" href="/docs/zh/remote">远程 magpie</a>
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
+    <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -164,11 +165,11 @@
     </figure>
 
     <h3>一个供应商里的多个账号或密钥</h3>
-    <p>展开供应商那一行，勾选要用的每个账号或密钥。<span class="ui">路由</span> 决定请求怎么分给它们：<span class="ui">智能</span>（默认）、<span class="ui">按顺序</span>、<span class="ui">轮流</span>、<span class="ui">用量少的优先</span> 或 <span class="ui">重置前用完</span>。<span class="ui">备用</span> 里列出这个供应商额度用完、被限流或不可用时改用的模型。</p>
+    <p>展开供应商那一行，勾选要用的每个账号或密钥。<span class="ui">路由</span> 决定请求怎么分给它们：<span class="ui">智能</span>（默认）、<span class="ui">按顺序</span>、<span class="ui">轮流</span>、<span class="ui">用量少的优先</span>、<span class="ui">重置前用完</span> 或 <span class="ui">速度优先</span>（最近回答最快的密钥先用）。<span class="ui">备用</span> 里列出这个供应商额度用完、被限流或不可用时改用的模型。</p>
 
     <h3>跨供应商的同一个模型</h3>
     <p>路由组是几个模型（来自一个或多个供应商），Agent 把它当作一个来选：<code>group/&lt;id&gt;</code>，在选择列表的 <em>路由组</em> 下面。两个供应商用同一个名字提供的模型会自动成组；在 <span class="ui">路由</span> 标签页点 <span class="ui">新建组</span> 可以把任意模型组到一起。排第一的模型决定这个组对外的能力。</p>
-    <div class="callout"><b>不用手动建的组。</b>再加一个供应商，只要它提供的模型和已有的同名（比如 Claude 订阅和 Copilot 都有 Claude Opus，DeepSeek 官方 API 和 OpenRouter 都有 DeepSeek），magpie 就会自动把它们组成一个路由组：<code>group/auto-&lt;模型&gt;</code>，包含所有提供这个模型的供应商。名字按各家不同的写法匹配（<code>deepseek/deepseek-chat</code> 和 <code>deepseek-chat</code> 算同一个）。给 Agent 选这个组，请求就会分摊到这些供应商上；不想要的可以用 <code>magpie group rm</code> 隐藏。</div>
+    <div class="callout"><b>不用手动建的组。</b>再加一个供应商，只要它提供的模型和已有的同名（比如 Claude 订阅和 Copilot 都有 Claude Opus，DeepSeek 官方 API 和 OpenRouter 都有 DeepSeek），magpie 就会自动把它们组成一个路由组：<code>auto/&lt;模型&gt;</code>（模型自己的 id，比如 <code>auto/claude-opus-4.6</code>；以前的 <code>group/auto-…</code> 也照样能用），包含所有提供这个模型的供应商。名字按各家不同的写法匹配（<code>deepseek/deepseek-chat</code> 和 <code>deepseek-chat</code> 算同一个）。给 Agent 选这个组，请求就会分摊到这些供应商上；不想要的可以用 <code>magpie group rm</code> 隐藏。</div>
     <div class="table-wrap"><table>
       <tr><th>路由</th><th>谁排在前面</th></tr>
       <tr><td>智能 <code>smart</code></td><td>默认。把成员的账号和 Key 放在一起排（组里的路由组算一个，见下文）：还有余量的订阅里，额度最先重置的排第一。看周额度的重置时间；只有 5 小时额度、没有周额度的账号（如 Claude Enterprise）看它的 5 小时重置，所以排在所有更晚重置的周额度前面。没有重置时间的积分（WorkBuddy 的积分包，各自到期）按剩余积分最早过期的时间算，所以积分最先过期的 WorkBuddy 账号排第一。失败后在休息的排最后。</td></tr>
@@ -177,6 +178,7 @@
       <tr><td>最少使用 <code>usage</code></td><td>剩余额度最多的账号或 Key 排第一。</td></tr>
       <tr><td>重置前用完 <code>pace</code></td><td>每周剩余额度除以距重置的小时数，最高的账号排第一——重置时损失最多的那个——少让成员的周额度到重置时作废；只有 5 小时额度、没有周额度的账号（如 Claude Enterprise）按 5 小时窗口的剩余额度除以距它重置的小时数算，所以几乎总排第一。用到 90% 以上的等其他账号都答不了时才用。Key 按最近发给它的 token 数排。</td></tr>
       <tr><td>按权重 <code>weight</code></td><td>每个模型按群组编辑器里它旁边设的权重（1 到 1000，不设为 1）分得请求：权重 3 的模型每拿三个，权重 1 的拿一个，均匀穿插而不是成批。每个模型按它自己提供方的路由用自己的账号或 Key，群组里的群组算一个成员。失败后歇着的那个退出这一轮；一个失败时，下一个模型接上。</td></tr>
+      <tr><td>速度优先 <code>fast</code></td><td>最近回答这个模型最快的成员、账号或 Key 先用：看首字时间和输出速度，越新的回答算得越重。相差不到一成的保持原来的顺序。一小时内没测过的每五个请求分到一个，慢过一次的渠道还会再试；失败后歇着的排最后。只测流式回复，重启后重新测。</td></tr>
     </table></div>
     <div class="table-wrap"><table>
       <tr><th>会话保持</th><th>会话在回答过它的账号或 Key 上留多久</th></tr>
@@ -192,7 +194,7 @@
       <li>规则只在一轮开始时决定；Agent 回传工具结果的过程中一直留在那个模型上，不会半途换掉而丢掉厂商的缓存。唯一例外：这一轮涨到超过所在模型的上下文，会换到装得下的成员。</li>
       <li>token 数取请求大小的估算与厂商对这个会话上一个请求的计数中较大的一个。请留出余量：给 200k 的模型设 150k，而不是 199k。</li>
       <li>子代理是单独的会话，规则可以把它发到别处，主代理仍留在原处。</li>
-      <li>意图是用几个词描述用户想做什么，例如“写或修测试”“一个简单问题”。每一轮开始时，magpie 会问一次组里指定的意图判断模型：用户这条消息属于哪个可能命中的意图。这个模型可以是 magpie 里的任意模型，建议选小而快、不带推理的。发过去的只有这条消息，不包括整段对话。它出错、超时（8 秒）或给不出答案时，意图条件都不命中，这一轮按其他规则走。如果前面有不带意图的规则已经能决定，就不会去问；同一条消息也不会问两次。它的调用在用量里显示为 magpie 自己的调用。它具体被问了什么、回答怎么用、失败时怎么办，详见<a href="/docs/zh/intent">意图路由</a>。</li>
+      <li>意图是用几个词描述用户想做什么，例如“写或修测试”“一个简单问题”。每一轮开始时，magpie 会问一次组里指定的意图判断模型：用户这条消息属于哪个可能命中的意图。这个模型可以是 magpie 里的任意模型，建议选小而快、不带推理的。发过去的只有这条消息，不包括整段对话。它出错、超过设定的超时时间（默认 8 秒，在「设置 → 模型 → 回复 → 意图判断超时」中调整）或给不出答案时，意图条件都不命中，这一轮按其他规则走。如果前面有不带意图的规则已经能决定，就不会去问；同一条消息也不会问两次。它的调用在用量里显示为 magpie 自己的调用。它具体被问了什么、回答怎么用、失败时怎么办，详见<a href="/docs/zh/intent">意图路由</a>。</li>
       <li><span class="ui">压缩上下文时</span>：Agent 压缩对话上下文时命中——Claude Code 的 <code>/compact</code> 和自动压缩、Codex、OpenCode、Pi、Gemini CLI、Qwen Code、Kimi Code——让更便宜、更快的模型来写总结，对话本身仍留在原来的模型上。压缩请求单独决定：它所在的这一轮和缓存都留在原处。对话比规则里的模型能装下的还长时，改由下一条命中的规则或组本来的顺序决定。</li>
       <li><b>时段和星期。</b>规则可以只在某些时段、某几天生效，按这台电脑的时钟——比如厂商的高峰期。把这段时间的对话“先发给”别的模型，厂商那个模型仍排在后面做故障转移。要把它完全拿掉，在规则的 <span class="ui">⋯</span> 菜单里选 <span class="ui">改为暂停该模型</span>：规则生效期间（它的时段、星期和 Agent），这个模型移出分组——不排第一、不做备用、也不会因为会话粘性被留住——时段过了自动回来。暂停只按时段、星期和 Agent 判断；组里所有模型都被暂停时，会告诉 Agent。</li>
       <li><b>文件夹。</b><span class="ui">项目文件夹</span>：Agent 的工作目录是你列出的文件夹之一或其子文件夹时命中：<code>~/work/acme</code> 包括 <code>~/work/acme/web</code>，不包括 <code>~/work/acme-old</code>。文件夹以 Agent 在请求里告诉模型的为准——Claude Code、Codex、OpenCode 和 Pi 都会说——不说明工作目录的 Agent 不会命中任何按文件夹的规则。<code>~</code> 是你的主目录，<code>C:\work</code> 也就是 WSL 里的 <code>/mnt/c/work</code>，macOS 和 Windows 上不区分大小写。</li>
@@ -261,6 +263,7 @@ magpie claude group/opus-anywhere    <span class="c"># 使用它</span></pre>
       <tr><td><code>magpie codex default</code></td><td>恢复 Agent 自己的默认值，移除 magpie 的接入</td></tr>
       <tr><td><code>magpie save work</code> · <code>use work</code></td><td>保存、应用方案</td></tr>
       <tr><td><code>magpie usage 7d</code></td><td>按 Agent 和模型统计 token 与费用</td></tr>
+      <tr><td><code>magpie tools</code> · <code>magpie tool generate_image "…" -o hero.png</code></td><td>列出并直接调用 magpie 通过 MCP 给 Agent 的工具（生图、识图、联网搜索、插件的工具）；生成的图片保存到文件</td></tr>
       <tr><td><code>magpie tray</code></td><td>只启动菜单栏图标</td></tr>
     </table></div>
 
@@ -290,6 +293,28 @@ magpie claude group/opus-anywhere    <span class="c"># 使用它</span></pre>
 IP-CIDR6,::1/128,DIRECT,no-resolve</pre>
     </div>
     <p>Clash / mihomo 的配置里把这两行写在 <code>rules:</code> 下，每行前面加 <code>- </code>。改完让 Agent 重新发一次请求即可。</p>
+    <h3 id="dsh-deepseek">DeepSeek Harness 能保留自己的 DeepSeek 行，同时走 magpie 吗？</h3>
+    <p>可以，手动配置。连接 dsh 时 magpie 只加自己的路由，dsh 的 DeepSeek 行（<code>llm-deepseek</code>）留给 dsh。这一行在会话中途改提示词或工具时能保住 DeepSeek 的缓存。要让它经过 magpie，在 <code>~/.dsh/profiles/&lt;profile&gt;/cordis.patch.yml</code> 里加上：</p>
+    <div class="code">
+      <span class="lang">cordis.patch.yml</span>
+      <button class="copy" data-copy="ex-dsh-deepseek">复制</button>
+      <pre id="ex-dsh-deepseek">- id: llm-deepseek
+  config:
+    baseURL: http://127.0.0.1:3425
+    apiKeyEnv: MAGPIE_DS_KEY
+    maxInlineRequestImageBytes: 67108864
+    models:
+      - id: deepseek/deepseek-flash
+        name: DeepSeek V4.1 Flash (magpie)
+        contextWindow: 1000000
+        inputModalities: [text, image]
+        systemPromptUpdate: in-history
+        toolUpdate: addition-only
+      - id: deepseek/deepseek-v4-pro
+        name: DeepSeek V4 Pro (magpie)
+        contextWindow: 1000000</pre>
+    </div>
+    <p><code>baseURL</code> 不带 <code>/anthropic</code>。模型 id 用 magpie 的（<code>magpie models</code>）；写了 <code>models</code> 就会替换 dsh 的默认列表，所以两行更新方式要保留。<code>MAGPIE_DS_KEY</code> 里放网关密钥（本机是 <code>magpie</code>），不是你的 DeepSeek 密钥：export、写进 <code>~/.dsh/.env</code>，或在 dsh 模型页的 DeepSeek 行填入都行。模型在 dsh 里选；在 magpie 里断开不会动这一项。magpie 没有 Files API，dsh 会把图片按 base64 每轮内联发送，上限是 <code>maxInlineRequestImageBytes</code>（默认 20 MiB，上面设成 64 MiB）。这一行只用 DeepSeek 自己的模型。<a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#deepseek-harness-the-deepseek-row-by-hand">详见参考文档</a>。</p>
     <p style="margin-top:48px">遇到问题，或者有值得分享的配置？来 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 聊。想给自己的用户一键添加供应商的厂商，请看 <a href="/docs/zh/import">Add to magpie</a>。</p>
   </article>
 </main>
@@ -303,6 +328,7 @@ IP-CIDR6,::1/128,DIRECT,no-resolve</pre>
     <a href="/docs/zh/remote">远程 magpie</a>
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
+    <a href="/docs/zh/masking">本地脱敏</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

@@ -380,7 +380,8 @@ func BoundCallID(id string) string {
 }
 
 // codexInput makes input items fit a request that keeps nothing: no
-// references to stored items, no ids, a tool's output without its call
+// references to stored items, no ids (nor a message's status, which goes
+// with its id), a tool's output without its call
 // kept as a message saying what it was, and no system role, which the
 // backend rejects (developer keeps what it means in its place).
 func codexInput(input []any) []any {
@@ -422,6 +423,14 @@ func codexInput(input []any) []any {
 			continue
 		}
 		delete(it, "id")
+		// A message's status goes only with its id: without one, the
+		// backend reads it as an input message, which has no status, and
+		// turns the request away 400 "Unknown parameter: 'input[N].status'"
+		// (Doby on Discord: Pi gives each assistant message it sends again
+		// status "completed"). Codex's own reasoning items carry none.
+		if t := it["type"]; t == nil || t == "message" || t == "reasoning" {
+			delete(it, "status")
+		}
 		switch t, _ := it["type"].(string); t {
 		case "function_call_output", "custom_tool_call_output", "local_shell_call_output":
 			id, _ := it["call_id"].(string)
@@ -571,13 +580,37 @@ func declareSearch(m map[string]any, lite bool) bool {
 	return true
 }
 
-// declaresSearch says whether tools has a web search among them, by any of
-// its names (web_search, web_search_preview, a dated one).
+// declaresSearch says whether tools has a web search among them: the
+// hosted one by any of its names (web_search, web_search_preview, a dated
+// one), or Codex's own web.run, a function in the "web" namespace.
+//
+// Codex declares web.run in place of the hosted tool, never beside it: on a
+// model its catalog puts on Responses Lite, or with its standalone web
+// search on, it offers the function and leaves web_search out. The ChatGPT
+// backend refuses a request that carries both ("a single request can't
+// contain both a client-declared function web.run and the hosted tool
+// web_search", Savin on Discord, Codex 0.163.0-alpha), so a conversation
+// that replays an earlier web_search_call under web.run is sent as Codex
+// sent it, with no hosted tool added: web.run is the search the backend
+// serves it, through /alpha/search.
 func declaresSearch(tools []any) bool {
 	for _, raw := range tools {
 		t, _ := raw.(map[string]any)
-		if typ, _ := t["type"].(string); strings.HasPrefix(typ, "web_search") {
+		typ, _ := t["type"].(string)
+		name, _ := t["name"].(string)
+		switch {
+		case strings.HasPrefix(typ, "web_search"):
 			return true
+		case typ == "function" && name == "web.run":
+			return true
+		case typ == "namespace" && name == "web":
+			inner, _ := t["tools"].([]any)
+			for _, raw := range inner {
+				f, _ := raw.(map[string]any)
+				if f["type"] == "function" && f["name"] == "run" {
+					return true
+				}
+			}
 		}
 	}
 	return false

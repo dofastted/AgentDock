@@ -34,7 +34,7 @@ func TestProviderOff(t *testing.T) {
 		}
 		return strings.Join(ids, " ")
 	}
-	const all = "group/mine group/auto-m a/m a/only-a b/vendor/m b/only-b"
+	const all = "group/mine auto/m a/m a/only-a b/vendor/m b/only-b"
 	if got := catalog(); got != all {
 		t.Fatalf("catalog: %s", got)
 	}
@@ -46,7 +46,7 @@ func TestProviderOff(t *testing.T) {
 	if err != nil || !pb.Off || pb.Key != "kb" {
 		t.Fatalf("switched off, b is kept with its key: %+v %v", pb, err)
 	}
-	if got := catalog(); got != "group/mine group/auto-m a/m a/only-a" {
+	if got := catalog(); got != "group/mine auto/m a/m a/only-a" {
 		t.Fatalf("catalog with b off: %s", got)
 	}
 	if _, _, ok := provider.Resolve("b/vendor/m"); ok {

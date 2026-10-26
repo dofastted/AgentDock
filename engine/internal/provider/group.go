@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -37,11 +38,12 @@ import (
 // GroupPrefix starts a group's id in the catalog: "group/<id>".
 const GroupPrefix = "group/"
 
-// GroupIDOf is the group id a ref names ("group/<id>"), with spaces and the
-// [1m] mark Claude Code puts on a 1M window taken off, as an agent's own
-// settings carry it. ok is false for a ref that isn't a group's.
+// GroupIDOf is the group id a ref names ("group/<id>", or a found group's
+// "auto/<model>": CanonicalRef), with spaces and the [1m] mark Claude Code
+// puts on a 1M window taken off, as an agent's own settings carry it. ok is
+// false for a ref that isn't a group's.
 func GroupIDOf(ref string) (string, bool) {
-	return strings.CutPrefix(strings.TrimSuffix(strings.TrimSpace(ref), "[1m]"), GroupPrefix)
+	return strings.CutPrefix(CanonicalRef(strings.TrimSuffix(strings.TrimSpace(ref), "[1m]")), GroupPrefix)
 }
 
 // Affinities are how long a conversation stays with the key or account that
@@ -235,6 +237,10 @@ type Group struct {
 	// Auto is set on a group magpie found: one model served by several
 	// providers. It is derived, never stored.
 	Auto bool `json:"auto,omitempty"`
+	// Spelled is how a vendor spells the model of a group magpie found
+	// (auto-…), which agents are given it by: auto/<Spelled> (Ref). It is
+	// derived from the members each time the groups are read, never stored.
+	Spelled string `json:"-"`
 	// Hidden is stored for a found group the user removed.
 	Hidden bool `json:"hidden,omitempty"`
 	// Disabled is a group of the user's switched off (PAMI on Discord):
@@ -351,7 +357,50 @@ func Groups() []Group {
 	return groupsIn(providerEntries())
 }
 
+// groupsIn is the groups among entries (Groups), built once while a
+// request holds the catalog: a request looked its group up by building
+// every group again, matching each pattern and finding the automatic
+// groups over every model (FindGroup, then the groups' entries). Each
+// caller gets a copy of its own to change.
 func groupsIn(entries []Entry) []Group {
+	return cloneGroups(heldFrom("groups", entries, buildGroupsIn))
+}
+
+// cloneGroups is gs with nothing shared with it: no slice, map or pointer
+// of a group or its rules.
+func cloneGroups(gs []Group) []Group {
+	if gs == nil {
+		return nil
+	}
+	out := make([]Group, len(gs))
+	for i, g := range gs {
+		g.Members, g.Match, g.Matched = slices.Clone(g.Members), slices.Clone(g.Match), slices.Clone(g.Matched)
+		g.Off, g.Levels, g.Fast = slices.Clone(g.Off), slices.Clone(g.Levels), slices.Clone(g.Fast)
+		g.Weights = maps.Clone(g.Weights)
+		if g.Rules != nil {
+			rs := make([]Rule, len(g.Rules))
+			for j, r := range g.Rules {
+				r.Agents, r.Folders, r.ExceptFolders, r.More = slices.Clone(r.Agents), slices.Clone(r.Folders), slices.Clone(r.ExceptFolders), slices.Clone(r.More)
+				if r.Time != nil {
+					t := *r.Time
+					t.Days = slices.Clone(t.Days)
+					r.Time = &t
+				}
+				rs[j] = r
+			}
+			g.Rules = rs
+		}
+		out[i] = g
+	}
+	return out
+}
+
+// groupsBuilt counts buildGroupsIn, for the test that a held request
+// builds the groups once.
+var groupsBuilt atomic.Int64
+
+func buildGroupsIn(entries []Entry) []Group {
+	groupsBuilt.Add(1)
 	f := heldOf("file", load)
 	var out []Group
 	hidden := map[string]bool{}
@@ -375,15 +424,18 @@ func groupsIn(entries []Entry) []Group {
 	if !served(f.Groups) { // plugins/groups is off: the user's own aren't served
 		out = slices.DeleteFunc(out, func(g Group) bool { return !g.Auto })
 	}
-	if f.NoAutoGroups {
-		return orderedGroups(out, f.GroupOrder)
-	}
-	for _, g := range foundGroups(entries) {
-		if slices.ContainsFunc(out, func(o Group) bool { return o.ID == g.ID }) {
-			continue // the user changed it: theirs now
+	if !f.NoAutoGroups {
+		for _, g := range foundGroups(entries) {
+			if slices.ContainsFunc(out, func(o Group) bool { return o.ID == g.ID }) {
+				continue // the user changed it: theirs now
+			}
+			g.Hidden = hidden[g.ID]
+			out = append(out, g)
 		}
-		g.Hidden = hidden[g.ID]
-		out = append(out, g)
+	}
+	same := heldSettings().ModelSameAs
+	for i := range out {
+		out[i].Spelled = spelledIn(out[i], same)
 	}
 	return orderedGroups(out, f.GroupOrder)
 }
@@ -407,7 +459,7 @@ func withoutRemoved(g Group, have map[string]bool) Group {
 		if !ok || have[pid] || (g.Routing == Manual && m == g.Picked()) {
 			return false
 		}
-		return !slices.ContainsFunc(g.Rules, func(r Rule) bool { return r.Use == m })
+		return !slices.ContainsFunc(g.Rules, func(r Rule) bool { return r.Names(m) })
 	}
 	if !slices.ContainsFunc(g.Members, gone) {
 		return g
@@ -446,6 +498,7 @@ func (g Group) own() Group {
 		g.Rules[i].Agents = slices.Clone(r.Agents)
 		g.Rules[i].Folders = slices.Clone(r.Folders)
 		g.Rules[i].ExceptFolders = slices.Clone(r.ExceptFolders)
+		g.Rules[i].More = slices.Clone(r.More)
 		if r.Time != nil {
 			w := *r.Time
 			w.Days = slices.Clone(w.Days)
@@ -868,10 +921,34 @@ func membersOff(entries []Entry, all []Group, g Group, off func(pid, model strin
 // every member fixed, the group offers the levels they are fixed at, so
 // that an agent still asks it to reason. A group that names its own
 // levels (Group.Levels) offers those, and so does a group in it for its
-// models.
+// models. Held while a request holds the catalog (heldFrom).
 func groupEntries(entries []Entry) []Entry {
+	return heldFrom("group entries", entries, buildGroupEntries)
+}
+
+// entryOf is where in entries the last entry of provider pid's model is,
+// -1 when none is.
+type entryOf func(pid, model string) int
+
+// entriesBy is entryOf for entries, looked up in a map built once rather
+// than by a pass over every entry for each member of each group.
+func entriesBy(entries []Entry) entryOf {
+	at := make(map[[2]string]int, len(entries))
+	for i := range entries {
+		at[[2]string{entries[i].Provider.ID, entries[i].Model}] = i
+	}
+	return func(pid, model string) int {
+		if i, ok := at[[2]string{pid, model}]; ok {
+			return i
+		}
+		return -1
+	}
+}
+
+func buildGroupEntries(entries []Entry) []Entry {
 	var out []Entry
 	all := groupsIn(entries)
+	find := entriesBy(entries)
 	for _, g := range all {
 		if g.Hidden || g.Disabled {
 			continue
@@ -880,7 +957,7 @@ func groupEntries(entries []Entry) []Entry {
 		if len(ms) == 0 || DecisionGroup(ms) {
 			continue // a decision group answers System One, no agent's conversation
 		}
-		e := Entry{ID: GroupPrefix + g.ID, Model: ms[0].Model, Name: g.Name, Provider: ms[0].Provider, Group: g.ID, Named: !g.Auto}
+		e := Entry{ID: g.Ref(), Model: ms[0].Model, Name: g.Name, Provider: ms[0].Provider, Group: g.ID, Named: !g.Auto}
 		var fixed []string // the efforts members are fixed at
 		levelled := false  // a member that follows the agent's effort was met
 		// Codex's ultra (max, with Codex handing parts of the task to agents
@@ -898,12 +975,12 @@ func groupEntries(entries []Entry) []Entry {
 			var efforts []string
 			images, thinks, ctx, output := false, false, 0, 0
 			var imageInput *bool
-			unknown, reasonless := false, false
-			for _, x := range entries {
-				if x.Provider.ID == m.Provider.ID && x.Model == m.Model {
-					efforts, images, thinks, ctx, output, imageInput = x.Efforts, x.Images, x.Reasoning, x.Context, x.Output, x.ImageInput
-					unknown, reasonless = levelsUnknown(x), x.Reasonless
-				}
+			unknown, reasonless, typed := false, false, false
+			if j := find(m.Provider.ID, m.Model); j >= 0 {
+				x := &entries[j]
+				efforts, images, thinks, ctx, output, imageInput = x.Efforts, x.Images, x.Reasoning, x.Context, x.Output, x.ImageInput
+				typed = x.WindowSet
+				unknown, reasonless = levelsUnknown(*x), x.Reasonless
 			}
 			// it reasons when a member does: the gateway sends the
 			// effort to the members that take it, and a member known not
@@ -933,9 +1010,16 @@ func groupEntries(entries []Entry) []Entry {
 			// with room for it (#700, withRoom in the gateway), so the
 			// agent compacts only when none has. The shortest member's,
 			// as it was, had Pi compact a group of 1M DeepSeeks at 200k
-			// for the one free model among them that holds 200k (#712)
+			// for the one free model among them that holds 200k (#712).
+			// It is one the user typed when they typed that member's, as
+			// smallestWindow says it for a group following its smallest
+			// (Osal on Discord: an Ultra group of a ChatGPT account's
+			// GPT-6 Astra, set to its 872K on the codex provider, was
+			// handed to Codex as magpie's default 272K, ~258K at 95%)
 			if ctx > e.Context {
-				e.Context = ctx
+				e.Context, e.WindowSet = ctx, typed
+			} else if ctx > 0 && ctx == e.Context {
+				e.WindowSet = e.WindowSet || typed
 			}
 			if i == 0 {
 				e.ImageInput = imageInput
@@ -1008,11 +1092,22 @@ func groupEntries(entries []Entry) []Entry {
 		if e.ImageInput != nil && !*e.ImageInput {
 			e.Images = false
 		}
+		largest := e.Context
 		ruledEntry(&e, g.Live(), ms, entries)
+		if e.Context != largest {
+			// lifted by a rule of length to what its members fit, which
+			// is no member's typed window
+			e.WindowSet = false
+		}
 		if g.Context > 0 {
 			e.Context, e.WindowSet = g.Context, true
-		} else if smallest, typed := smallestWindow(entries, ms); g.Context == ContextSmallest && smallest > 0 {
-			e.Context, e.WindowSet = smallest, typed
+		} else if g.Context == ContextSmallest {
+			// only for a group that follows its smallest member: run for
+			// every group, it was another pass over the catalog for each
+			// member of each (8f4d091c6)
+			if smallest, typed := smallestWindowBy(entries, find, ms); smallest > 0 {
+				e.Context, e.WindowSet = smallest, typed
+			}
 		}
 		e.Family = g.Family
 		out = append(out, e)
@@ -1029,12 +1124,26 @@ func groupEntries(entries []Entry) []Entry {
 // group set to 500K itself wasn't). A tie counts as typed: the window is
 // the user's either way.
 func smallestWindow(entries []Entry, ms []Member) (n int, typed bool) {
+	return smallestWindowBy(entries, entriesBy(entries), ms)
+}
+
+// largestWindow is the window a group that names no size of its own is
+// told, its largest member's, and whether the user typed it, as
+// buildGroupEntries says it (Entry.WindowSet).
+func largestWindow(entries []Entry, g Group) (typed bool) {
+	for _, e := range groupEntries(entries) {
+		if e.Group == g.ID {
+			return e.WindowSet
+		}
+	}
+	return false
+}
+
+func smallestWindowBy(entries []Entry, find entryOf, ms []Member) (n int, typed bool) {
 	for _, m := range ms {
 		ctx, set := 0, false
-		for _, x := range entries {
-			if x.Provider.ID == m.Provider.ID && x.Model == m.Model {
-				ctx, set = x.Context, x.WindowSet
-			}
+		if j := find(m.Provider.ID, m.Model); j >= 0 {
+			ctx, set = entries[j].Context, entries[j].WindowSet
 		}
 		switch {
 		case ctx <= 0:
@@ -1082,6 +1191,7 @@ func (e Entry) Quiet() bool {
 // found makes it the user's.
 func SaveGroup(g Group) error {
 	g = g.own() // cleaned below in place: the caller's lists stay as they were
+	g.canonicalRefs()
 	g.ID = strings.ToLower(strings.TrimSpace(g.ID))
 	g.Name = strings.TrimSpace(g.Name)
 	if g.ID == "" {
@@ -1126,7 +1236,7 @@ func SaveGroup(g Group) error {
 		return err
 	}
 	for i, m := range g.Members {
-		if model, effort := memberEffortIn(entries, m); effort != "" && strings.HasPrefix(model, GroupPrefix) {
+		if model, effort := memberEffortIn(entries, m); effort != "" && IsGroupRef(model) {
 			return fmt.Errorf("%s is a group: its models reason as it says, so it takes no effort of its own (:%s)", model, effort)
 		}
 		g.Members[i] = cleanMember(entries, m)
@@ -1147,7 +1257,7 @@ func SaveGroup(g Group) error {
 		return fmt.Errorf("every model in %s is switched off: switch one on, or it has nothing to send to", g.Name)
 	}
 	for i := range g.Rules {
-		g.Rules[i].Use = cleanMember(entries, strings.TrimSpace(g.Rules[i].Use))
+		g.Rules[i].MapUses(func(u string) string { return cleanMember(entries, strings.TrimSpace(u)) })
 	}
 	if err := groupsInGroup(g, groupsIn(entries)); err != nil {
 		return err
@@ -1157,7 +1267,7 @@ func SaveGroup(g Group) error {
 	if err := cleanDecisionGroup(&g, groupsIn(entries)); err != nil {
 		return err
 	}
-	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Weighted && g.Routing != Manual && !PluginRouting(g.Routing) {
+	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Weighted && g.Routing != FreeFirst && g.Routing != Fastest && g.Routing != Manual && !PluginRouting(g.Routing) {
 		g.Routing = ""
 	}
 	if !slices.Contains(Affinities, g.Affinity) {
@@ -1547,10 +1657,13 @@ func RenameGroup(from, to string) error {
 				f.Groups[i].Members[j] = now
 			}
 		}
-		for j, r := range f.Groups[i].Rules {
-			if r.Use == old {
-				f.Groups[i].Rules[j].Use = now
-			}
+		for j := range f.Groups[i].Rules {
+			f.Groups[i].Rules[j].MapUses(func(u string) string {
+				if u == old {
+					return now
+				}
+				return u
+			})
 		}
 		if f.Groups[i].Pick == old {
 			f.Groups[i].Pick = now

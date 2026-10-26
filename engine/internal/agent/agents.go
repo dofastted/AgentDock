@@ -39,6 +39,12 @@ func init() {
 	sessions.WSLRunning = WSLRunning
 	sessions.WSLOff = func() bool { return !wslLooks() }
 	sessions.WSLDistroOff = func(d string) bool { return settings.Load().WSLDistroOff(d) }
+	// an agy conversation started on magpie's gateway is picked up again
+	// there, with the variables and --model it was started with
+	sessions.AgyStart = func() string {
+		home, _ := homes()
+		return agy(home).Launch()
+	}
 	// a Copilot CLI signed in inside a running distro (#723)
 	provider.CopilotWSLHomes = copilotWSLHomes
 }
@@ -102,6 +108,7 @@ func builtins(home, cfg string) []*Agent {
 		pi(home),
 		stepcode(home),
 		mothx(home),
+		penguin(home),
 		aside(home),
 		omo(home),
 		primeAgent(home),
@@ -112,6 +119,7 @@ func builtins(home, cfg string) []*Agent {
 		vscode(home, cfg),
 		vscodeInsidersAgent(home, cfg),
 		vscodium(home, cfg),
+		zooCode(home, cfg),
 		copilotJetBrains(home),
 		air(home, cfg),
 		copilot(home),
@@ -145,12 +153,14 @@ func builtins(home, cfg string) []*Agent {
 		pencil(home),
 		openPencil(home, cfg),
 		raycast(home),
+		kiroCrew(home),
 		t3code(home),
 		hanako(home),
 		atomcode(home),
 		snow(home),
 		alma(),
 		cindy(),
+		aionui(),
 		lody(home),
 	}, append(ompProfiles(home), wslAgents()...)...)
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // What a request said it cost in its plan's credits (#2512) is summed by
@@ -49,10 +50,10 @@ func TestPlanCreditsSummed(t *testing.T) {
 		}
 	}
 	vias := Vias(time.Time{})
-	if v := vias["claude-code|s1"]; len(v) != 1 || !near(v[0].Credits, 0.7) || v[0].Credited != 70 {
+	if v := vias.Of("claude-code|s1"); len(v) != 1 || !near(v[0].Credits, 0.7) || v[0].Credited != 70 {
 		t.Fatalf("session s1: %+v", v)
 	}
-	if v := vias["codex|s2"]; len(v) != 2 || v[0].Credited+v[1].Credited != 1 {
+	if v := vias.Of("codex|s2"); len(v) != 2 || v[0].Credited+v[1].Credited != 1 {
 		t.Fatalf("session s2: %+v", v)
 	}
 	if got := FormatCredits(page.Sum); got != "0.7 credits" {
@@ -108,7 +109,7 @@ func TestPlanCreditsPacked(t *testing.T) {
 		}
 		chunk.add(Row{Record: r}, "", int64(i), false)
 	}
-	b := newBlockPricer(nil, nil, func(Record) *catalog.Price { return nil })
+	b := newBlockPricer(provider.Renames{}, nil, func(Record) *catalog.Price { return nil })
 	defer b.release()
 	packed := chunk.pack()
 	if len(packed.Archive) == 0 {

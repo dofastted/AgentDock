@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
@@ -91,7 +92,8 @@ type providerJSON struct {
 	// the vendor searches the web by itself (provider.Searches)
 	Searches bool `json:"searches"`
 	// on the Cline API: its DeepSeek models are served by DeepSeek's own
-	// API alone (provider.PinUpstream), which only it offers
+	// API alone and its GLM models by Z.ai's (provider.PinUpstream), which
+	// only it offers
 	Cline       bool `json:"cline,omitempty"`
 	PinUpstream bool `json:"pinUpstream"`
 	// on this machine or the local network, set to go unmasked by
@@ -102,6 +104,9 @@ type providerJSON struct {
 	// may be, being the user's own and not a preset's or a sign-in's
 	InsecureTLS      bool `json:"insecureTLS"`
 	TakesInsecureTLS bool `json:"takesInsecureTLS"`
+	// asked as usual after a quota refusal or a 429, never set aside for
+	// it (provider.LimitRestOff)
+	LimitRestOff bool `json:"limitRestOff"`
 	// Codex's compaction asked of it as Codex sent it, its sealed item
 	// back as it came (provider.NativeCompaction, #1099); CarriesCompaction: its
 	// wire can carry it, so the editor offers it
@@ -433,10 +438,15 @@ type gatewayJSON struct {
 	// Version is another magpie's, serving it, and Older says it is older
 	// than this one: agents' requests are then sent as that version sends
 	// them, without this one's fixes (#506)
-	Version string         `json:"version,omitempty"`
-	Older   bool           `json:"older,omitempty"`
-	Models  int            `json:"models"`
-	Calls   []gateway.Call `json:"calls"`
+	Version string `json:"version,omitempty"`
+	Older   bool   `json:"older,omitempty"`
+	// Pid and Serves are the serving magpie's own: which process it is and
+	// how it was started, for the Routing page to name the one that is
+	// routing (#2606)
+	Pid    int            `json:"pid,omitempty"`
+	Serves string         `json:"serves,omitempty"`
+	Models int            `json:"models"`
+	Calls  []gateway.Call `json:"calls"`
 	// Lanes are the keys and accounts with requests out or waiting under
 	// a limit on requests at once (#892), by provider#keyid or
 	// provider@account
@@ -480,6 +490,9 @@ type providersJSON struct {
 	// after Codex was switched to another, until it is quit and opened
 	// again (provider.CodexAppStale)
 	CodexApp string `json:"codexApp,omitempty"`
+	// CodexAppOut is a Codex app left unable to send on its used-up
+	// ChatGPT account until it is opened again (codexAppOutState)
+	CodexAppOut *codexAppOutJSON `json:"codexAppOut,omitempty"`
 	// Plugins are the providers the plugins sign in to, for the add sheet
 	Plugins []pluginSubJSON `json:"plugins"`
 	// OnPlugins are the built-in subscriptions moved onto their plugins,
@@ -535,7 +548,7 @@ func agentUses(agents []*agent.Agent, findGroup func(string) (provider.Group, []
 	for _, a := range agents {
 		u := agentUse{Agent: a}
 		v := agentModel(a)
-		if strings.HasPrefix(v, provider.GroupPrefix) {
+		if provider.IsGroupRef(v) {
 			u.group, u.members, u.inGroup = findGroup(v)
 		} else if pid, model, ok := strings.Cut(v, "/"); ok {
 			if _, err := provider.Find(pid); err == nil {
@@ -584,7 +597,7 @@ func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(), MarksKinds: p.MarksKinds(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, InsecureTLS: p.InsecureTLS, TakesInsecureTLS: p.TakesInsecureTLS(), NativeCompaction: p.NativeCompaction, CarriesCompaction: p.CarriesCompaction(), PassUserAgent: p.PassUserAgent, OwnClient: p.OwnClient(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, BalanceMethod: p.BalanceMethod, ModelsURL: p.ModelsURL,
+		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, InsecureTLS: p.InsecureTLS, TakesInsecureTLS: p.TakesInsecureTLS(), LimitRestOff: p.LimitRestOff, NativeCompaction: p.NativeCompaction, CarriesCompaction: p.CarriesCompaction(), PassUserAgent: p.PassUserAgent, OwnClient: p.OwnClient(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, BalanceMethod: p.BalanceMethod, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Picks(), Models: []modelJSON{}, Agents: []providerAgent{},
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, Unlisted: p.Unlisted, NoModels: p.ServesNone(), Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
@@ -935,10 +948,20 @@ func providersState() providersJSON {
 		o := gateway.ServedBy()
 		s.Gateway.Running, s.Gateway.Window, s.Gateway.Version = o.Running, o.Window, o.Version
 		s.Gateway.Older = o.Running && update.Newer(gateway.Version, o.Version)
+		// the process that is routing, for the Routing page to name it
+		// (#2606): another magpie on this computer, whose routing this
+		// console shows through OwnerTrace, and its lanes for the rows
+		s.Gateway.Pid, s.Gateway.Serves = o.Pid, o.Serves
+		if o.Running {
+			if l, ok := gateway.OwnerLanes(); ok {
+				s.Gateway.Lanes = l
+			}
+		}
 	}
 	s.Gateway.Archive = archiveState()
 	s.CodexDaemon = provider.CodexDaemonStale()
 	s.CodexApp = provider.CodexAppStale()
+	s.CodexAppOut = codexAppOutState()
 	s.Plugins = pluginSubs()
 	s.Fetching = provider.FetchingNew()
 	return s
@@ -984,6 +1007,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		lanes := map[string]gateway.Lane{}
 		if gw := served.Load(); gw != nil {
 			lanes = gw.Lanes()
+		} else if l, ok := gateway.OwnerLanes(); ok {
+			// another magpie on this computer serves the gateway: its lanes
+			// are the ones to show (the rows read the same wherever it runs)
+			lanes = l
 		}
 		writeJSON(rw, lanes)
 	})
@@ -1010,7 +1037,20 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		if r.URL.Query().Has("wait") {
 			provider.FetchNew(8 * time.Second)
 		}
-		writeJSON(rw, providersState())
+		// ?last=1: the list kept from the last read, at once (#1519);
+		// null when none is kept
+		if r.URL.Query().Get("last") == "1" {
+			if b, ok := lastKnownProviders(); ok {
+				rw.Header().Set("Content-Type", "application/json")
+				rw.Write(b)
+			} else {
+				writeJSON(rw, nil)
+			}
+			return
+		}
+		s := providersState()
+		writeJSON(rw, s)
+		keepProviders(s)
 	})
 	// Recent-call bodies are read only when their row is opened, not with
 	// every Providers or Gateway refresh (#1521): forty calls' bodies made
@@ -1097,10 +1137,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		writeJSON(rw, map[string]string{"icon": icon})
 	})
 	mux.HandleFunc("GET /api/icons/{name}", func(rw http.ResponseWriter, r *http.Request) {
-		f := provider.IconFile(r.PathValue("name"))
+		// a big picture comes scaled to what the window draws (#909)
+		f, ctype := provider.IconServed(r.PathValue("name"))
 		if f == "" {
 			http.NotFound(rw, r)
 			return
+		}
+		if ctype != "" {
+			rw.Header().Set("Content-Type", ctype)
 		}
 		// an SVG is only ever drawn as an image, never run
 		rw.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
@@ -1117,6 +1161,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// host is taken unchecked (#2383); a save that leaves it out
 			// keeps it
 			InsecureTLS *bool `json:"insecureTLS"`
+			// LimitRestOff is whether a quota refusal or a 429 leaves it
+			// asked as usual; a save that leaves it out keeps it
+			LimitRestOff *bool `json:"limitRestOff"`
 			// MaxConcurrency is how many requests each of its keys or
 			// accounts has out at once: a number (0 none), null for what
 			// its plugin says or none; a save that leaves it out keeps it
@@ -1439,6 +1486,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if req.InsecureTLS != nil {
 					in.InsecureTLS = *req.InsecureTLS
 				}
+				if req.LimitRestOff != nil {
+					in.LimitRestOff = *req.LimitRestOff
+				}
 				add := provider.Add
 				if req.CopyOf != "" {
 					add = func(p provider.Provider) (string, error) { return provider.AddCopy(p, req.CopyOf) }
@@ -1470,6 +1520,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					in.InsecureTLS = *req.InsecureTLS
 				} else if old != nil {
 					in.InsecureTLS = old.InsecureTLS
+				}
+				if req.LimitRestOff != nil {
+					in.LimitRestOff = *req.LimitRestOff
+				} else if old != nil {
+					in.LimitRestOff = old.LimitRestOff
 				}
 				if keepCC && old != nil {
 					in.MaxConcurrency = old.MaxConcurrency
@@ -1506,6 +1561,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				// set <id> codex=as-sent` (#1758)
 				if !in.CodexAsSent && old != nil {
 					in.CodexAsSent = old.CodexAsSent
+				}
+				// and additional_tools taken, set with `magpie provider
+				// set <id> additional-tools=on` (#2660)
+				if !in.AdditionalTools && old != nil {
+					in.AdditionalTools = old.AdditionalTools
+				}
+				// and how long a request to it alone is kept while it is
+				// busy, set with `magpie provider set <id> patience=`
+				if in.Patience == 0 && old != nil {
+					in.Patience = old.Patience
 				}
 				// each account's own proxy likewise: {} clears them
 				if in.AccountProxies == nil && old != nil {
@@ -1585,7 +1650,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 						in.Contexts = old.Contexts // a save that doesn't say
 					}
 					if in.Key == old.Key {
-						in.KeyName, in.KeyProtocol, in.KeyWeight = old.KeyName, old.KeyProtocol, old.KeyWeight
+						in.KeyName, in.KeyProtocol, in.KeyWeight, in.KeyPlan = old.KeyName, old.KeyProtocol, old.KeyWeight, old.KeyPlan
 					}
 					// what the editor doesn't show, set from the CLI or the
 					// TUI, is kept: its tag, website and key page, and on a
@@ -1710,7 +1775,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
-			agent.SyncCatalog()
+			agent.SyncCatalogSoon()
 		case "accountmodels":
 			if err := provider.SetAccountModels(in.ID, req.Account, req.Allow); err != nil {
 				fail(rw, err)
@@ -1769,7 +1834,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
-			agent.SyncCatalog()
+			agent.SyncCatalogSoon()
 		case "switchonly":
 			// magpie only switches Codex's own sign-in, its requests going
 			// straight to OpenAI, or routes them for failover again
@@ -1778,7 +1843,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
-			agent.SyncCatalog()
+			agent.SyncCatalogSoon()
 		case "affinity":
 			if err := provider.SetAffinity(in.ID, in.Affinity); err != nil {
 				fail(rw, err)
@@ -2011,7 +2076,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		// an agent on its own models goes through magpie while more of
 		// its accounts are on, and straight to its vendor again once not
-		agent.SyncCatalog()
+		agent.SyncCatalogSoon()
 		st := providersState()
 		st.Moved = moved
 		writeJSON(rw, st)
@@ -2040,6 +2105,22 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, providersState())
 	})
+	// The Codex desktop app left on the model list before a change (the
+	// Agents row's Restart): quit it and open it again.
+	mux.HandleFunc("POST /api/codex/app/reopen", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Bundle string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		if err := agent.ReopenCodexApp(ctx, in.Bundle); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, map[string]bool{"ok": true})
+	})
 	// A provider's several keys: add one, put one in use, name or remove it.
 	mux.HandleFunc("POST /api/keys/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -2047,6 +2128,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			Refs               []string
 			Protocol           provider.Protocol
 			Weight             int
+			Plan               string
 		}
 		var added, had, removed int
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -2065,6 +2147,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			err = provider.SetKeyProtocol(in.ID, in.Ref, in.Protocol)
 		case "weight":
 			err = provider.SetKeyWeight(in.ID, in.Ref, in.Weight)
+		case "plan":
+			// the plan a key is for (KeyAccount.Plan): its endpoints and
+			// its models are that plan's
+			err = provider.SetKeyPlan(in.ID, in.Ref, in.Plan)
 		case "use":
 			err = provider.UseKey(in.ID, in.Ref)
 		case "remove":
@@ -2091,8 +2177,8 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		// models a key sees is known only from its own list, and an off
 		// key's isn't asked (#76), so until then a relay that hands out a
 		// key per group would send the key nothing, or everything
-		if a := r.PathValue("action"); a == "add" || a == "import" || a == "on" {
-			if p, err := provider.Find(in.ID); err == nil && p.Ready() && len(p.KeysOn()) > 1 {
+		if a := r.PathValue("action"); a == "add" || a == "import" || a == "on" || a == "plan" {
+			if p, err := provider.Find(in.ID); err == nil && p.Ready() && (len(p.KeysOn()) > 1 || a == "plan") {
 				ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 				p.Fetch(ctx)
 				cancel()
@@ -2180,7 +2266,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		agent.SyncCatalog()
+		agent.SyncCatalogSoon()
 		writeJSON(rw, struct {
 			Results   []provider.ImportedAccount `json:"results"`
 			Providers providersJSON              `json:"providers"`
@@ -2257,9 +2343,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("POST /api/open", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ URL string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
-		if strings.HasPrefix(in.URL, "https://") || strings.HasPrefix(in.URL, "http://") || strings.HasPrefix(in.URL, agent.CindyScheme) || strings.HasPrefix(in.URL, agent.LodyScheme) {
+		// and System Settings' Login Items, where Open at login is allowed
+		// again: that one pane, not System Settings' scheme at large
+		if strings.HasPrefix(in.URL, "https://") || strings.HasPrefix(in.URL, "http://") || strings.HasPrefix(in.URL, agent.CindyScheme) || strings.HasPrefix(in.URL, agent.LodyScheme) || strings.HasPrefix(in.URL, agent.AionUiScheme) || in.URL == autostart.LoginItemsURL {
+			open := w.OpenURL
+			if strings.HasPrefix(in.URL, agent.LodyScheme) {
+				// Lody on Linux is run with the link, which xdg-open
+				// turned away (agent.OpenLody)
+				open = func(u string) error { return agent.OpenLody(u, w.OpenURL) }
+			}
 			// Open again on a sign-in says why it didn't open (#2043)
-			if err := w.OpenURL(in.URL); err != nil {
+			if err := open(in.URL); err != nil {
 				fail(rw, err)
 				return
 			}
@@ -2278,7 +2372,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 // project is.
 func typed(p, in provider.Provider, proxy *string, insecureTLS *bool) provider.Provider {
 	if k := strings.TrimSpace(in.Key); k != "" && k != p.Key {
-		p.Key, p.KeyName, p.KeyProtocol, p.KeyWeight = k, "", "", 0
+		p.Key, p.KeyName, p.KeyProtocol, p.KeyWeight, p.KeyPlan = k, "", "", 0, ""
 	}
 	if v := in.Vertex.Normal(); v != nil && p.IsVertex() && v.Project != "" {
 		p.Vertex = v

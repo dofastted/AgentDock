@@ -27,16 +27,28 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // RouterAgent is the User-Agent magpie's own classifier calls carry.
 const RouterAgent = "magpie-router/1"
 
 var (
-	classifyTimeout = 8 * time.Second
-	classifyKeep    = 10 * time.Minute // an answer, for the same message and intents
-	classifyRest    = 30 * time.Second // after a failure, before the classifier is asked again
+	classifyKeep = 10 * time.Minute // an answer, for the same message and intents
+	classifyRest = 30 * time.Second // after a failure, before the classifier is asked again
 )
+
+// classifyTimeout is how long the classifier is given to answer, its
+// provider's failover included. It is Settings' Classifier timeout (#2934:
+// a Kiro subscription's haiku needed more than the 8 seconds it was fixed
+// at), read as each turn asks, in classifyUnit seconds.
+func classifyTimeout() time.Duration {
+	return settings.Shared().ClassifyWait() / time.Second * classifyUnit
+}
+
+// classifyUnit is a second of classifyTimeout: a test makes it shorter,
+// rather than wait the seconds out.
+var classifyUnit = time.Second
 
 // classifier asks a model which of intents text is — the intent, or ""
 // for none of them — and, when effort, how much reasoning the turn wants. prev is what
@@ -351,6 +363,16 @@ func classifyEffort(model string) string {
 // any other model through the gateway itself, as a client would: which of
 // intents the message is and, when effort, how hard the turn is, each in a
 // call of its own, at once.
+// askWaited is ask with each question a wait ctx's watch knows of
+// (noteWait): a routing group's decision model is asked before the
+// request's route is begun.
+func askWaited(ctx context.Context, ask classifier) classifier {
+	return func(model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+		defer noteWait(ctx)()
+		return ask(model, intents, prev, effort, text)
+	}
+}
+
 func (s *Server) askClassifier(model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 	if p, m, ok := provider.Resolve(model); ok && p.DecidesModel(m) {
 		return s.askDecider(p, m, intents, prev, effort, text)
@@ -447,7 +469,8 @@ func readEffort(answer string) (string, float64, error) {
 // askChat sends a chat model body through the gateway and returns its
 // answer's text.
 func (s *Server) askChat(model string, body []byte) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
+	wait := classifyTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://magpie/v1/chat/completions", nil)
 	if err != nil {
@@ -458,7 +481,7 @@ func (s *Server) askChat(model string, body []byte) (string, error) {
 	w := httptest.NewRecorder()
 	s.serve(w, r, provider.Chat, body)
 	if ctx.Err() != nil {
-		return "", fmt.Errorf("%s gave no answer in %s", model, classifyTimeout)
+		return "", fmt.Errorf("%s gave no answer in %s", model, wait)
 	}
 	var out struct {
 		Choices []struct {

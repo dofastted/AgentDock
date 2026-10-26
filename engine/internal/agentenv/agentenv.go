@@ -48,6 +48,9 @@ var Vars = []string{
 	"STEP_CODING_AGENT_DIR", "STEPCODE_CONFIG_DIR",
 	// MothX's config folder ($MOTHX_DIR/settings.json)
 	"MOTHX_DIR",
+	// PenguinHarness's data root and the Project its CLI works in
+	// ($PENGUIN_HOME/$PENGUIN_PROJECT_ID/.project_config.toml)
+	"PENGUIN_HOME", "PENGUIN_PROJECT_ID",
 	// omp
 	"OMP_PROFILE",
 	// Qoder's two builds, the global site's and China's
@@ -94,6 +97,9 @@ var Vars = []string{
 	"CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR",
 	// OpenCode and OpenChamber
 	"OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCHAMBER_DATA_DIR",
+	// Kiro Crew's home, and the adapters it runs Codex, Claude Code and Pi
+	// through
+	"KIROCREW_HOME", "CODEX_ACP_BIN", "CLAUDE_AGENT_ACP_BIN", "PI_ACP_BIN",
 	// Droid's home, Windsurf's API server, ZCode's credential seed: what
 	// makes an account or an installation visible that the test didn't make
 	"FACTORY_HOME_OVERRIDE", "WINDSURF_API_SERVER_URL", "ZCODE_CREDENTIAL_SECRET",
@@ -119,6 +125,7 @@ var NotPaths = map[string]bool{
 	"PI_CONFIG_DIR": true, "OPENCODE_DB": true,
 	"STEPCODE_CONFIG_DIR": true,
 	"MAGPIE_ZED_BIN":      true, "MAGPIE_ZED_PROCESS_NAMES": true,
+	"PENGUIN_PROJECT_ID": true,
 }
 
 // ClaudeProviders are Claude Code's switches that send its requests to a

@@ -182,7 +182,7 @@ func cleanFast(entries []Entry, g *Group) error {
 			continue // taken out of the group
 		}
 		model, _ := memberEffortIn(entries, f)
-		if strings.HasPrefix(model, GroupPrefix) {
+		if IsGroupRef(model) {
 			return fmt.Errorf("%s is a group: its models are sent as it says, so it takes no :%s", model, FastWord)
 		}
 		if p, m, ok := resolveIn(entries, model); ok && !CanFast(p, m) {
@@ -212,10 +212,13 @@ func (g *Group) RenameMember(from, to string) {
 			g.Members[i] = to
 		}
 	}
-	for i, r := range g.Rules {
-		if r.Use == from {
-			g.Rules[i].Use = to
-		}
+	for i := range g.Rules {
+		g.Rules[i].MapUses(func(u string) string {
+			if u == from {
+				return to
+			}
+			return u
+		})
 	}
 	if g.Pick == from {
 		g.Pick = to

@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/beat"
 )
 
 // MinRefreshEvery is the shortest RefreshEvery: a vendor's list changes
@@ -65,13 +67,39 @@ func ParseRefreshEvery(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// RemoteMagpieEvery is how often, as RefreshEvery writes it, the gateway
+// fetches a Remote magpie's list when its user set no RefreshEvery. Its list is the other magpie's
+// models as they are now: a model that comes there later (a ZCode gift
+// plan's GLM-5.3-Trial, listed once its plugin read the gift; a provider,
+// plugin or routing group added there) reached this magpie only when
+// Fetch models was pressed in its editor, and a trial a day long could
+// pass unseen (6igsteven on Discord, 10-24). It is a list on the other
+// computer's magpie, read from its memory, so asking it often costs
+// nothing a vendor sees. "off" (magpie provider refresh-every <id> off)
+// asks it only when told, as before.
+const RemoteMagpieEvery = "10m"
+
+// RefreshSchedule is the schedule the provider's list is fetched on, as
+// written: its user's, or a Remote magpie's default (RemoteMagpieEvery)
+// when its user set none; "" for only when asked.
+func (p Provider) RefreshSchedule() string {
+	if !p.ownList() {
+		return ""
+	}
+	if strings.TrimSpace(p.RefreshEvery) == "" && p.IsRemoteMagpie() {
+		return RemoteMagpieEvery
+	}
+	return p.RefreshEvery
+}
+
 // RefreshInterval is how often the gateway fetches the provider's list by
 // itself: 0 for only when asked, and for one RefreshEvery can't be read.
+// A Remote magpie with none set is fetched every RemoteMagpieEvery.
 func (p Provider) RefreshInterval() time.Duration {
 	if !p.ownList() {
 		return 0
 	}
-	d, err := ParseRefreshEvery(p.RefreshEvery)
+	d, err := ParseRefreshEvery(p.RefreshSchedule())
 	if err != nil {
 		return 0
 	}
@@ -107,6 +135,9 @@ func SetRefreshEvery(id, every string) error {
 	p.RefreshEvery = ""
 	if d > 0 {
 		p.RefreshEvery = strings.ToLower(strings.TrimSpace(every))
+	} else if p.IsRemoteMagpie() {
+		// kept as said: none set is RemoteMagpieEvery for a Remote magpie
+		p.RefreshEvery = "off"
 	}
 	return Save(*p)
 }
@@ -239,14 +270,16 @@ var listsEvery = time.Minute
 func KeepListsFresh(ctx context.Context) {
 	t := time.NewTimer(30 * time.Second)
 	defer t.Stop()
+	var wait <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-wait:
 		}
 		refreshDueLists(ctx, time.Now())
-		t.Reset(listsEvery)
+		wait = beat.Next(listsEvery)
 	}
 }
 
@@ -254,7 +287,13 @@ func KeepListsFresh(ctx context.Context) {
 // answers the ids it asked.
 func refreshDueLists(ctx context.Context, now time.Time) []string {
 	var asked []string
-	for _, p := range All() {
+	// the user's own providers alone, as All lists them: only those keep a
+	// list on a schedule (ownList), and All asks every agent for its
+	// sign-in, the Claude keychain's `security` among them, each minute
+	// of an idle magpie (#3185)
+	f := load()
+	own, _ := ownOf(f)
+	for _, p := range ordered(own, f.Order) {
 		every := p.RefreshInterval()
 		// one that lists nothing (Preset.NoList) has no list to keep fresh
 		if every == 0 || p.Off || !p.lists() {

@@ -174,16 +174,98 @@ func (p Provider) ClinePinnable() bool {
 	return p.IsCline() || p.PluginProvider() == "cline"
 }
 
+// clineMakers maps a model name to its maker's own upstream on the
+// router Cline sends it through. Most go through Vercel's AI Gateway,
+// pinned by providerOptions.gateway.only with Vercel's provider slug
+// (ai-gateway.vercel.sh/v1/models/<model>/endpoints lists "deepseek" for
+// deepseek/deepseek-v4-pro and "zai" for zai/glm-5.3). Some go through
+// OpenRouter directly, which reads only a top-level provider.only with
+// OpenRouter's slug (openrouter.ai/api/v1/providers: Z.AI is "z-ai"):
+// sdytman (#feedback, 10-20) found glm-5.3-flash among them, and
+// deepseek-v4.1-flash and deepseek-v4.1-flash-1017 going through Vercel.
+// An exact entry is a model name; the others match a name's start, the
+// first match winning.
+var clineMakers = []struct {
+	name       string
+	exact      bool
+	upstream   string
+	openRouter bool
+}{
+	{name: "glm-5.3-flash", exact: true, upstream: "z-ai", openRouter: true},
+	{name: "deepseek", upstream: "deepseek"},
+	{name: "glm", upstream: "zai"}, // sdytman on Discord: GLM only through Z.ai
+}
+
 // ClinePin is the upstream a request for model is pinned to on p
-// (PinUpstream): "deepseek" for a DeepSeek model of the Cline API, ""
-// for anything else. Cline's free models are served where Cline puts
-// them, so they never are.
-func (p Provider) ClinePin(model string) string {
+// (PinUpstream), and whether Cline sends the model through OpenRouter
+// (pinned by provider.only) rather than Vercel's AI Gateway (pinned by
+// providerOptions.gateway.only): "deepseek" for a DeepSeek model of the
+// Cline API, "zai" for a GLM one, "z-ai" through OpenRouter for
+// glm-5.3-flash, "" for anything else. Cline's free models are served
+// where Cline puts them, so they never are.
+func (p Provider) ClinePin(model string) (upstream string, openRouter bool) {
 	if !p.PinUpstream || !p.ClinePinnable() || strings.HasPrefix(model, clineFreePrefix) {
-		return ""
+		return "", false
 	}
-	if name := model[strings.LastIndex(model, "/")+1:]; strings.HasPrefix(strings.ToLower(name), "deepseek") {
+	// the Cline plugin pins ClinePass's DeepSeek models itself, by default,
+	// with ClinePassHas's filter and a way back when the pin can't be
+	// served (opencode-cline-auth 0.1.11). It keeps a body's own
+	// providerOptions, so magpie's only alone would stand in its place.
+	if p.PluginProvider() == "cline" && clinePassDeepSeek(model) {
+		return "", false
+	}
+	name := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
+	for _, m := range clineMakers {
+		if m.exact && name == m.name || !m.exact && strings.HasPrefix(name, m.name) {
+			return m.upstream, m.openRouter
+		}
+	}
+	return "", false
+}
+
+// ClinePassAsked is the upstream a request for model asks the Cline API
+// to serve it from on p, "" when it asks for none: ClinePin's, sent with
+// the Upstream tick, or, on the Cline plugin's provider, DeepSeek for a
+// ClinePass DeepSeek model, which opencode-cline-auth 0.1.11 pins by
+// itself unless its pinUpstream option is set off. The Routing page says
+// it beside a reply that names no provider, so a route ClinePass picked
+// reads as asked for DeepSeek or not (zRain on Discord, 10-24).
+func (p Provider) ClinePassAsked(model string) string {
+	if up, _ := p.ClinePin(model); up != "" {
+		return up
+	}
+	if p.PluginProvider() == "cline" && clinePassDeepSeek(model) {
 		return "deepseek"
 	}
 	return ""
+}
+
+// clinePassDeepSeek is a ClinePass DeepSeek model: cline-pass/deepseek-…
+func clinePassDeepSeek(model string) bool {
+	return strings.HasPrefix(strings.ToLower(model), "cline-pass/deepseek")
+}
+
+// ClinePassHas is the capability filter (providerOptions.gateway.has) a
+// pinned request for model carries beside only, or nil. On ClinePass the
+// server's own routing for a DeepSeek model wins over only alone, and a
+// fake upstream in only was served all the same; with has beside it the
+// request went to DeepSeek and a fake upstream was refused "no matching
+// upstream" (hy125245 on X, 10-23). The upstream must cache a repeated
+// prefix by itself, and, for a model that takes images (images: the
+// fetched list says so, or the request carries one), take them: a
+// text-only model asked "vision" (deepseek-v4-pro) would have no upstream
+// left. The Cline plugin's provider has none here: the plugin writes it.
+func (p Provider) ClinePassHas(model string, images bool) []string {
+	if up, _ := p.ClinePin(model); up == "" || !clinePassDeepSeek(model) {
+		return nil
+	}
+	if !images {
+		if ms := p.liveByID(model); len(ms) > 0 {
+			images = ms[0].Images
+		}
+	}
+	if images {
+		return []string{"vision", "implicit-caching"}
+	}
+	return []string{"implicit-caching"}
 }

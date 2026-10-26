@@ -20,7 +20,7 @@ import (
 )
 
 const pluginUsage = `usage: magpie plugin [list] [--json]
-       magpie plugin add <npm | git | path>        install an OpenCode provider plugin, a pi package or a gateway hook/middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js, ./recall.hooks.ts)
+       magpie plugin add <name | npm | git | path> install a community plugin by its name (workbuddy, think-tags, Qoder), an OpenCode provider plugin, a pi package or a gateway hook/middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js, ./recall.hooks.ts); npm:<name> is npm's package of a name a community plugin goes by
        magpie plugin rm <name>                     remove one
        magpie plugin update                        install the newest version of each
        magpie plugin on|off <name>                 turn one on or off
@@ -59,6 +59,10 @@ func pluginCmd(args []string) error {
 			return err
 		}
 		fmt.Println(green.Render("✓"), "added", e.Spec)
+		// a community plugin's name (workbuddy, WorkBuddy) stood for it
+		if typed := strings.TrimSpace(rest[0]); !plugin.IsPath(typed) && !plugin.IsGit(typed) && !strings.HasPrefix(typed, "npm:") && plugin.Name(typed) != plugin.Name(e.Spec) {
+			fmt.Println(faint.Render("  " + strconv.Quote(plugin.Name(typed)) + " is magpie's community plugin " + plugin.Name(e.Spec)))
+		}
 		// a deprecated built-in it serves, not signed in to, is its now
 		provider.HandOver(ctx, false)
 		return listPlugins(ctx, false)
@@ -465,9 +469,13 @@ func pluginLogin(ctx context.Context, name, method string) error {
 	ctx = provider.Via(ctx, provider.PluginID(pp.ID))
 	var saved plugin.Saved
 	if pp.Methods[m].Type == "api" {
-		key, err := secret("key", keyPrompt(pp.Name, pp.Methods[m]), false)
-		if err != nil {
-			return err
+		key := ""
+		if !pp.Methods[m].Keyless {
+			var err error
+			key, err = secret("key", keyPrompt(pp.Name, pp.Methods[m]), false)
+			if err != nil {
+				return err
+			}
 		}
 		if saved, err = plugin.APIKey(ctx, pp.ID, m, inputs, key, plugin.NewAccount); err != nil {
 			return err
@@ -480,7 +488,9 @@ func pluginLogin(ctx context.Context, name, method string) error {
 		if a.URL != "" {
 			fmt.Println("Sign in in your browser. If it didn't open, go to:")
 			fmt.Println(faint.Render(a.URL))
-			openInBrowser(a.URL)
+			if !a.Opened {
+				openInBrowser(a.URL)
+			}
 		}
 		if a.Instructions != "" {
 			fmt.Println(a.Instructions)
@@ -488,7 +498,7 @@ func pluginLogin(ctx context.Context, name, method string) error {
 		code := ""
 		if a.Method == "code" {
 			fmt.Print("Code: ")
-			line, err := stdin.ReadString('\n')
+			line, err := stdin().ReadString('\n')
 			if err != nil && line == "" {
 				return err
 			}
@@ -502,7 +512,7 @@ func pluginLogin(ctx context.Context, name, method string) error {
 			fmt.Println("If the page the browser ends on won't load (magpie on a server or in Docker), paste its whole address here and press Enter:")
 			go func() {
 				for wait.Err() == nil {
-					line, err := stdin.ReadString('\n')
+					line, err := stdin().ReadString('\n')
 					if strings.TrimSpace(line) != "" && wait.Err() == nil {
 						if next, err := provider.PastePluginCallback(wait, a.URL, line); err != nil {
 							fmt.Println(err)
@@ -525,7 +535,19 @@ func pluginLogin(ctx context.Context, name, method string) error {
 	// magpie, it comes back
 	id := provider.PluginSignedIn(saved)
 	fmt.Println(green.Render("✓"), "signed in to", pp.Name, muted.Render("· its models are "+id+"/<model>"))
+	sayStillOff(id)
 	return nil
+}
+
+// sayStillOff tells, after a sign-in, that the provider it went to is
+// switched off. A sign-in keeps the user's own switch as it was, but
+// "signed in" and then "○ switched off" in magpie providers read as a bug
+// with nothing saying how to turn it on (Atlas, WorkBuddy AI). A provider
+// that can't be found says nothing: not known to be off.
+func sayStillOff(id string) {
+	if p, err := provider.Find(id); err == nil && p.Off {
+		fmt.Println(amber.Render("!"), p.Name, "is switched off in magpie, so agents aren't given its models · turn it on: magpie provider on "+p.ID)
+	}
 }
 
 // keyPrompt asks an "api" method's key: its title, then the hint the
@@ -541,7 +563,7 @@ func keyPrompt(name string, m plugin.Method) string {
 func askNumber(n int) (int, error) {
 	for {
 		fmt.Print("> ")
-		line, err := stdin.ReadString('\n')
+		line, err := stdin().ReadString('\n')
 		if i, e := strconv.Atoi(strings.TrimSpace(line)); e == nil && i >= 1 && i <= n {
 			return i - 1, nil
 		}
@@ -587,7 +609,7 @@ func askPrompt(q *plugin.Prompt) (string, error) {
 		fmt.Println()
 		return strings.TrimSpace(string(b)), err
 	}
-	line, err := stdin.ReadString('\n')
+	line, err := stdin().ReadString('\n')
 	if err != nil && line == "" {
 		return "", err
 	}

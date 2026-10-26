@@ -1,12 +1,15 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -160,7 +163,7 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 		{"responses-current", "/v1/responses", "responses", `{"model":"probe/text","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"screenshot"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]},{"role":"user","content":[{"type":"input_text","text":"answer"}]}]}`},
 		{"responses-last", "/v1/responses", "responses", `{"model":"probe/text","input":[{"role":"user","content":[{"type":"input_text","text":"read"}]},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]}]}`},
 		{"responses-to-chat", "/v1/responses", "chat", `{"model":"probe/text","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"screenshot"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]},{"role":"user","content":[{"type":"input_text","text":"answer"}]}]}`},
-		{"chat-tool", "/v1/chat/completions", "chat", `{"model":"probe/text","messages":[{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"screenshot"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`},
+		{"chat-tool", "/v1/chat/completions", "chat", `{"model":"probe/text","messages":[{"role":"user","content":"look"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"shot","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"screenshot"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh(t)
@@ -357,7 +360,7 @@ func TestGroupWithUnknownImageCapabilityReachesUpstream(t *testing.T) {
 		}
 	}
 	for _, e := range provider.Catalog() {
-		if e.ID == "group/auto-claude-sonnet-4-5" {
+		if e.ID == "auto/claude-sonnet-4-5" {
 			if !e.Images || e.ImageInput == nil || !*e.ImageInput {
 				t.Fatalf("group image capability: %+v", e)
 			}
@@ -525,6 +528,110 @@ func TestTextOnlyRefusalSaysWhyAndWhere(t *testing.T) {
 		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(strings.Replace(body, "MODEL", model, 1))))
 		if rec.Code != 400 || !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("%s: %d %s, want %q", model, rec.Code, rec.Body.String(), want)
+		}
+	}
+}
+
+// Every request's images are looked for several times (hasImage,
+// textOnlyBody, the vision checks), and its conversation's id hashed:
+// without an image, the turns are read where they are, not decoded turn by
+// turn and block by block. A 1.5 MB conversation cost ~2.6 MB a walk and
+// ~2.8 MB an id (yg6888 on X). An image is still found where it hides:
+// last, in a tool's output, under an escaped key, under a key given twice.
+func TestImageWalkReadsTextOnlyTurnsInPlace(t *testing.T) {
+	var turns []string
+	for i := range 200 {
+		turns = append(turns, `{"role":"user","content":[{"type":"text","text":"`+strings.Repeat("read this file ", 300)+`"}]}`,
+			`{"role":"assistant","content":"ok `+strings.Repeat("x", i)+`"}`)
+	}
+	body := []byte(`{"model":"m","messages":[` + strings.Join(turns, ",") + `]}`)
+	ctx, done := context.WithCancel(context.Background())
+	defer done()
+	holdBody(ctx, body) // as readRequestBody holds a request's
+	id := conversationID(http.Header{}, body)
+	if hasImage(provider.Chat, body) {
+		t.Fatal("an image found in a text-only body")
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const n = 5
+	for range n {
+		hasImage(provider.Chat, body)
+		textOnlyBody(provider.Chat, body)
+		if conversationID(http.Header{}, body) != id {
+			t.Fatal("the conversation's id changed")
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if per := (after.TotalAlloc - before.TotalAlloc) / n; per > uint64(len(body))/8 {
+		t.Fatalf("two image walks and an id of a %d-byte text-only body allocated %d bytes", len(body), per)
+	}
+
+	head := `{"model":"m","messages":[` + strings.Join(turns[:4], ",") + ","
+	for i, c := range []struct {
+		proto provider.Protocol
+		body  string
+	}{
+		{provider.Chat, head + `{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x/a.png"}}]}]}`},
+		{provider.Chat, head + `{"role":"user","content":[{"%u0074ype":"%u0069mage_url","image_url":{"url":"https://x/a.png"}}]}]}`},
+		{provider.Chat, head + `{"role":"user","content":"hi","content":[{"type":"text","type":"image_url","image_url":"https://x/a.png"}]}]}`},
+		{provider.Chat, head + `{"role":"tool","tool_call_id":"c","content":[{"type":"image_url","image_url":{"url":"https://x/a.png"}}]},{"role":"user","content":"go"}]}`},
+		{provider.Responses, `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_image","image_url":"https://x/a.png"}]},{"role":"user","content":"go"}]}`},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"url","url":"https://x/a.png"}}]}]}]}`},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}}]}]}`},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}]}`},
+	} {
+		if !hasImage(c.proto, []byte(strings.ReplaceAll(c.body, "%u", "\x5cu"))) {
+			t.Errorf("case %d (%v): its image was not found", i, c.proto)
+		}
+	}
+}
+
+// An agent's turns are mostly tool results, and nearly all of them text:
+// the image walk looks into each one where it is, as it does a turn,
+// rather than decoding the request whenever a tool_result or a
+// functionResponse is there (#3725). An image a tool gave back is still
+// found, however its block is spelled.
+func TestImageWalkReadsToolResultsInPlace(t *testing.T) {
+	var turns []string
+	for i := range 60 {
+		turns = append(turns,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"t`+fmt.Sprint(i)+`","name":"Read","input":{"path":"a.go"}}]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t`+fmt.Sprint(i)+`","content":[{"type":"text","text":"`+strings.Repeat("package a ", 100)+`"}]},{"type":"tool_result","tool_use_id":"u","content":"done"}]}`)
+	}
+	body := []byte(`{"model":"m","messages":[` + strings.Join(turns, ",") + `]}`)
+	if hasImage(provider.Anthropic, body) {
+		t.Fatal("an image found in a text-only body")
+	}
+	if per := testing.AllocsPerRun(5, func() { hasImage(provider.Anthropic, body) }); per > 4 {
+		t.Fatalf("looking for an image in a %d-byte body of text tool results took %v allocations", len(body), per)
+	}
+	gem := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"out":"` + strings.Repeat("x", 4000) + `"}}}]}]}`)
+	if hasImage(provider.Gemini, gem) {
+		t.Fatal("an image found in a Gemini text-only function response")
+	}
+	if per := testing.AllocsPerRun(5, func() { hasImage(provider.Gemini, gem) }); per > 4 {
+		t.Fatalf("looking for an image in a Gemini function response took %v allocations", per)
+	}
+
+	img := `{"type":"image","source":{"type":"url","url":"https://x/a.png"}}`
+	for i, c := range []struct {
+		proto provider.Protocol
+		body  string
+		want  bool
+	}{
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"content":[` + img + `],"type":"tool_result","tool_use_id":"t"}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"a"}],"content":[` + img + `]}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"tool_result","content":[` + img + `]}]}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"%u0074ype":"tool_result","content":[` + img + `]}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"text","content":[` + img + `]}]}]}`, false},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","content":"see a.png"}]}]}`, false},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}],"name":"f"}}]}]}`, true},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","parts":[{"functionResponse":{"parts":[{"fileData":{"fileUri":"gs://a"}}]}}]}}]}]}`, true},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","parts":[{"text":"a"}]}}]}]}`, false},
+	} {
+		if got := hasImage(c.proto, []byte(strings.ReplaceAll(c.body, "%u", "\x5cu"))); got != c.want {
+			t.Errorf("case %d (%v): hasImage = %v, want %v", i, c.proto, got, c.want)
 		}
 	}
 }

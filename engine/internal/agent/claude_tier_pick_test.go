@@ -96,3 +96,44 @@ func TestClaudeTierPickedAsTheMainModelStays(t *testing.T) {
 		}
 	}
 }
+
+// Claude Code's subagents left unset are Claude Code's pick (KorenKrita on
+// Discord): magpie writes no CLAUDE_CODE_SUBAGENT_MODEL, through a pick
+// taken back and a main model moved, so Claude Code takes the Agent call's
+// model, then the subagent's own, then the session's (2.1.306).
+func TestClaudeSubagentsUnsetWriteNothing(t *testing.T) {
+	home, _ := codexHome(t, "", "")
+	a := claude(home)
+	if err := provider.Save(provider.Provider{ID: "oa", Name: "OA", Chat: "https://oa.example/v1", Key: "k",
+		Models: []string{"k2.8-preview", "glm-6"}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	none := func(when string) {
+		t.Helper()
+		if v, has := edit.GetJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); has {
+			t.Fatalf("%s: CLAUDE_CODE_SUBAGENT_MODEL is %q, not left to Claude Code\n%s", when, v, readFile(path))
+		}
+		if v := a.Values()["subagent"]; v != "" {
+			t.Fatalf("%s: subagents read %q", when, v)
+		}
+	}
+	if err := a.Apply("model", "oa/k2.8-preview"); err != nil {
+		t.Fatal(err)
+	}
+	none("routed")
+	if err := a.Apply("subagent", "oa/glm-6"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := edit.GetJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); v == "" {
+		t.Fatalf("a model picked isn't written\n%s", readFile(path))
+	}
+	if err := a.Apply("subagent", ""); err != nil {
+		t.Fatal(err)
+	}
+	none("taken back")
+	if err := a.Apply("model", "oa/glm-6"); err != nil {
+		t.Fatal(err)
+	}
+	none("main model moved")
+}

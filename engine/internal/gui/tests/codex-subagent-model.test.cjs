@@ -1,10 +1,17 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // Codex's lead picks each subagent's model itself, and Codex's own config
 // can't overrule it (willz on Discord), so magpie puts every Codex subagent
-// on a model set in Codex's row: a square opening the app's model picker
+// on a model set in Codex's settings, a named row. Codex's card has no
+// square for it beside the row (the same setting twice, the owner, 10-25);
+// a Codex in WSL, which those settings don't read, keeps it on its row: a
+// square opening the app's model picker
 // (no native select) with magpie's models, another provider's too (#1633),
-// Default first. A model picked is posted and lights the square; Default
-// posts "". The Routing page's story of a subagent's request says it was
+// "Same as the lead" first. It is the one square for the subagents' model:
+// Codex's own subagents square, which read the same (the owner), isn't
+// drawn, and a model left in Codex's config by it is said on this one and
+// lights it till a pick here takes it away. Each title says plainly what
+// the choice does. A model picked is posted and lights the square; Same as
+// the lead posts "". The row in Codex's sheet picks the same way. The Routing page's story of a subagent's request says it was
 // put on that model, or why it stayed on the one asked for (a task sealed
 // for ChatGPT accounts, the model set another provider's). A click scrolls nothing, nothing has a coloured left
 // border, and the row fits a narrow window, in every language. No backend:
@@ -28,6 +35,15 @@ const fresh = () => ({
     id: "codex", name: "Codex", path: "/test/config.toml", icon: "codex-color", wired: true,
     fields: [
       { key: "model", label: "model", value: "gpt-5.5", options: own },
+      { key: "subagent", label: "subagents", value: "gpt-5.4-mini", options: own },
+      { key: "subagent_model", label: "subagent model", value: "", options: chatgpt },
+    ],
+  },
+  {
+    id: "codex@wsl:Ubuntu-24.04", name: "Codex", path: "/wsl/config.toml", icon: "codex-color", wired: true,
+    fields: [
+      { key: "model", label: "model", value: "gpt-5.5", options: own },
+      { key: "subagent", label: "subagents", value: "gpt-5.4-mini", options: own },
       { key: "subagent_model", label: "subagent model", value: "", options: chatgpt },
     ],
   },
@@ -65,7 +81,10 @@ function server(lang, sets) {
       const body = req.postDataJSON();
       sets.push(body);
       cur = JSON.parse(JSON.stringify(cur));
-      cur.agents.find((a) => a.id === body.agent).fields.find((f) => f.key === body.field).value = body.value;
+      const fields = cur.agents.find((a) => a.id === body.agent).fields;
+      fields.find((f) => f.key === body.field).value = body.value;
+      // as the backend does: a pick here takes Codex's own away
+      if (body.field === "subagent_model") fields.find((f) => f.key === "subagent").value = "";
       return json({ ...cur, settings: { lang, theme: "light" } });
     }
     if (url.pathname === "/api/gateway/trace") {
@@ -90,36 +109,47 @@ function server(lang, sets) {
 
 // the words as i18n.js has them
 const W = {
-  en: { unset: "subagent model: the model the lead asks for", def: "Default", set: "subagent model: GPT-6 Astra",
+  en: { unset: "subagent model: Same as the lead", line: "Each subagent runs on the lead's model (GPT-5.5), or on another the lead picks for it. Pick a model here to put every subagent on it.",
+    old: "Codex's config still starts subagents on gpt-5.4-mini when the lead names none; picking here replaces it.",
+    def: "Same as the lead", note: "GPT-5.5, or another the lead picks for a subagent", set: "subagent model: GPT-6 Astra", setLine: "Every subagent runs on this model, whatever the lead asks for.", row: "Codex subagent model",
     moved: "Codex requested a subagent on gpt-5.5; magpie put it on codex/gpt-6-astra, the model set for its subagents.",
     kept: "Codex requested a subagent on gpt-5.5 and it stayed there: its subagents are set to codex/gpt-6-astra, but no ChatGPT account on in magpie serves it.",
     sealed: "Codex requested a subagent on gpt-5.5 and it stayed there: its subagents are set to token/gpt-6.1-sol, but its task was sealed by the ChatGPT backend that answered its lead, and only a ChatGPT account can open it." },
-  zh: { unset: "子代理模型：主代理请求的模型", def: "默认", set: "子代理模型：GPT-6 Astra",
+  zh: { unset: "子代理模型：跟主代理一样", line: "每个子代理都用主代理正在用的模型（GPT-5.5），主代理也可能给某个子代理另选一个。在这里选定一个模型，所有子代理就都用它。",
+    old: "Codex 配置里还写着：主代理没指定时，子代理用 gpt-5.4-mini。在这里选一次就会替换掉它。",
+    def: "跟主代理一样", note: "GPT-5.5，或主代理给子代理另选的模型", set: "子代理模型：GPT-6 Astra", setLine: "所有子代理都用这个模型，不管主代理要的是哪个。", row: "Codex 子代理模型",
     moved: "Codex 请求了使用 gpt-5.5 的子代理；magpie 将其改用 codex/gpt-6-astra，即为它的子代理设定的模型。",
     kept: "Codex 请求了使用 gpt-5.5 的子代理，并保留在该模型上：它的子代理设为 codex/gpt-6-astra，但magpie 中启用的 ChatGPT 账号都不提供该模型。",
     sealed: "Codex 请求了使用 gpt-5.5 的子代理，并保留在该模型上：它的子代理设为 token/gpt-6.1-sol，但它的任务由回答主代理的 ChatGPT 后端加密，只有 ChatGPT 账号能打开。" },
-  "zh-TW": { unset: "子代理模型：主代理請求的模型", def: null, set: "子代理模型：GPT-6 Astra",
+  "zh-TW": { unset: "子代理模型：跟主代理一樣", line: "每個子代理都用主代理正在用的模型（GPT-5.5），主代理也可能給某個子代理另選一個。在這裡選定一個模型，所有子代理就都用它。",
+    old: "Codex 設定裡還寫著：主代理沒指定時，子代理用 gpt-5.4-mini。在這裡選一次就會取代它。",
+    def: "跟主代理一樣", note: "GPT-5.5，或主代理給子代理另選的模型", set: "子代理模型：GPT-6 Astra", setLine: "所有子代理都用這個模型，不管主代理要的是哪個。", row: "Codex 子代理模型",
     moved: "Codex 請求了使用 gpt-5.5 的子代理；magpie 將其改用 codex/gpt-6-astra，即為它的子代理設定的模型。",
     kept: "Codex 請求了使用 gpt-5.5 的子代理，並保留在該模型上：它的子代理設為 codex/gpt-6-astra，但magpie 中啟用的 ChatGPT 帳號都不提供該模型。",
     sealed: "Codex 請求了使用 gpt-5.5 的子代理，並保留在該模型上：它的子代理設為 token/gpt-6.1-sol，但它的任務由回應主代理的 ChatGPT 後端加密，只有 ChatGPT 帳號能打開。" },
-  ja: { unset: "サブエージェントのモデル：リードがリクエストしたモデル", def: null, set: "サブエージェントのモデル：GPT-6 Astra",
+  ja: { unset: "サブエージェントのモデル：リードと同じ", line: "各サブエージェントはリードと同じモデル（GPT-5.5）で動きます。リードが別のモデルを選ぶこともあります。ここでモデルを選ぶと、すべてのサブエージェントがそのモデルになります。",
+    old: "Codex の設定には、リードが指定しないときのサブエージェントのモデルとして gpt-5.4-mini が残っています。ここで選ぶとそれを置き換えます。",
+    def: "リードと同じ", note: "GPT-5.5、またはリードがサブエージェントに選ぶ別のモデル", set: "サブエージェントのモデル：GPT-6 Astra", setLine: "リードが何を指定しても、すべてのサブエージェントがこのモデルで動きます。", row: "Codex サブエージェントのモデル",
     moved: "Codex が gpt-5.5 のサブエージェントをリクエストしました。magpie はサブエージェント用に設定された codex/gpt-6-astra に切り替えました。",
     kept: "Codex が gpt-5.5 のサブエージェントをリクエストし、そのモデルのままになりました。サブエージェントは codex/gpt-6-astra に設定されていますが、magpie で有効な ChatGPT アカウントはどれもこのモデルを提供していません。",
     sealed: "Codex が gpt-5.5 のサブエージェントをリクエストし、そのモデルのままになりました。サブエージェントは token/gpt-6.1-sol に設定されていますが、そのタスクはリードに応答した ChatGPT バックエンドが暗号化しており、開けるのは ChatGPT アカウントだけです。" },
-  de: { unset: "Modell der Subagenten: das Modell, das der Haupt-Agent anfordert", def: null, set: "Modell der Subagenten: GPT-6 Astra",
+  de: { unset: "Modell der Subagenten: Wie der Haupt-Agent", line: "Jeder Subagent läuft auf dem Modell des Haupt-Agenten (GPT-5.5) oder auf einem anderen, das der Haupt-Agent für ihn wählt. Wähle hier ein Modell, damit alle Subagenten darauf laufen.",
+    old: "Die Codex-Konfiguration startet Subagenten noch auf gpt-5.4-mini, wenn der Haupt-Agent keins nennt; eine Wahl hier ersetzt das.",
+    def: "Wie der Haupt-Agent", note: "GPT-5.5 oder ein anderes, das der Haupt-Agent für einen Subagenten wählt", set: "Modell der Subagenten: GPT-6 Astra", setLine: "Alle Subagenten laufen auf diesem Modell, egal was der Haupt-Agent verlangt.", row: "Codex-Subagenten-Modell",
     moved: "Codex hat einen Subagent mit gpt-5.5 angefordert; magpie hat ihn auf codex/gpt-6-astra gesetzt, das für seine Subagenten festgelegte Modell.",
     kept: "Codex hat einen Subagent mit gpt-5.5 angefordert, und er blieb dort: Seine Subagenten sind auf codex/gpt-6-astra gesetzt, aber kein eingeschaltetes ChatGPT-Konto in magpie bietet es an.",
     sealed: "Codex hat einen Subagent mit gpt-5.5 angefordert, und er blieb dort: Seine Subagenten sind auf token/gpt-6.1-sol gesetzt, aber seine Aufgabe wurde vom ChatGPT-Backend versiegelt, das seinen Lead beantwortet hat, und nur ein ChatGPT-Konto kann sie öffnen." },
 };
 
-const codex = '.row.agent[data-id="codex"]';
+const codex = '.row.agent[data-id="codex@wsl:Ubuntu-24.04"]';
+const wsl = "codex@wsl:Ubuntu-24.04";
 const engines = process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"];
 const langs = process.env.LANGS ? process.env.LANGS.split(",") : Object.keys(W);
 
 for (const engine of engines) {
   for (const lang of langs) {
     for (const width of [1100, 560]) {
-      test(`${engine} ${lang} ${width}px: Codex's subagent model is a square opening magpie's models, a ChatGPT account's first`, async (t) => {
+      test(`${engine} ${lang} ${width}px: Codex's subagent model opens magpie's models, a ChatGPT account's first, a square only in WSL`, async (t) => {
         const w = W[lang];
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         const page = await browser.newPage({ viewport: { width, height: 760 } });
@@ -136,15 +166,25 @@ for (const engine of engines) {
         });
         await page.goto("http://magpie.test/");
         await page.locator(codex).waitFor();
+        // Codex's own card: its settings have the row, so no square here
+        await page.locator('.row.agent[data-id="codex"] .ag-link').click();
+        await page.locator('.row.agent[data-id="codex"] .ag-exp').waitFor();
+        assert.equal(await page.locator('.row.agent[data-id="codex"] .field[data-key="subagent_model"]').count(), 0, "a subagent model square on Codex's card beside its settings row");
+        assert.equal(await page.locator('.row.agent[data-id="codex"] .field[data-key="subagent"]').count(), 0, "Codex's own subagents square");
+        await page.locator('.row.agent[data-id="codex"] .ag-link').click();
+        await page.locator('.row.agent[data-id="codex"]:not(.expanded)').waitFor();
         await page.locator(`${codex} .ag-link`).click();
+        await page.locator(`${codex}.expanded > .ag-exp`).waitFor();
         await page.locator(`${codex} .ag-exp`).waitFor();
 
         assert.equal(await page.locator('.row.agent[data-id="codex2"] .field[data-key="subagent_model"]').count(), 0, "a square with nothing to pick");
         const square = page.locator(`${codex} .extras-cell .field.extra[data-key="subagent_model"]`);
         assert.equal(await square.count(), 1);
         assert.equal(await page.locator(`${codex} .field:not(.extra)[data-key="subagent_model"]`).count(), 0, "a picker of its own");
-        assert.equal(await square.getAttribute("aria-label"), w.unset);
-        assert.equal(await square.evaluate((e) => e.classList.contains("set")), false);
+        assert.equal(await page.locator(`${codex} .field[data-key="subagent"]`).count(), 0, "Codex's own subagents square beside it");
+        // the model Codex's config has for its subagents, said and lit till replaced
+        assert.equal(await square.getAttribute("aria-label"), w.unset + "\n" + w.line + "\n" + w.old);
+        assert.equal(await square.evaluate((e) => e.classList.contains("set")), true);
         // the row fits: no page scrolls sideways, the square in the window
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "the page scrolls sideways");
         const box = await square.boundingBox();
@@ -157,7 +197,7 @@ for (const engine of engines) {
         assert.equal(await page.locator("#pop").evaluate((e) => e.classList.contains("model-picker")), true);
         assert.equal(await page.locator("select").count(), 0, "a native select");
         const items = await page.locator("#pop #list li").allInnerTexts();
-        if (w.def) assert(items[0].includes(w.def), items[0]);
+        assert(items[0].includes(w.def) && items[0].includes(w.note), items[0]);
         assert(items.some((s) => s.includes("GPT-6 Astra")), items.join(" | "));
         assert(!items.some((s) => s.includes("openai/")), "Codex's own models, which magpie can't put a request on");
         // #1633: another provider's model is offered too
@@ -171,17 +211,36 @@ for (const engine of engines) {
         assert.equal(left, 0, "a coloured left border");
 
         await page.locator("#pop #list li", { hasText: "GPT-6 Astra" }).first().click();
-        await page.waitForFunction(() => document.querySelector('.row.agent[data-id="codex"] .field.extra.set[data-key="subagent_model"]'));
-        assert.deepEqual(sets, [{ agent: "codex", field: "subagent_model", value: "codex/gpt-6-astra" }]);
-        assert.equal(await square.getAttribute("aria-label"), w.set + "\nme@example.com · via magpie");
+        await page.waitForFunction(() => document.querySelector('.row.agent[data-id="codex@wsl:Ubuntu-24.04"] .field.extra.set[data-key="subagent_model"]'));
+        assert.deepEqual(sets, [{ agent: wsl, field: "subagent_model", value: "codex/gpt-6-astra" }]);
+        assert.equal(await square.getAttribute("aria-label"), w.set + "\n" + w.setLine);
 
-        // Default: every subagent on the model asked for again
+        // Same as the lead: every subagent on the model asked for again, and
+        // Codex's config no longer has one
         await square.click();
         await page.locator("#pop:not([hidden]) #list li").first().waitFor();
         await page.locator("#pop #list li").first().click();
-        await page.waitForFunction(() => !document.querySelector('.row.agent[data-id="codex"] .field.extra.set[data-key="subagent_model"]'));
-        assert.deepEqual(sets.at(-1), { agent: "codex", field: "subagent_model", value: "" });
+        await page.waitForFunction(() => !document.querySelector('.row.agent[data-id="codex@wsl:Ubuntu-24.04"] .field.extra.set[data-key="subagent_model"]'));
+        assert.deepEqual(sets.at(-1), { agent: wsl, field: "subagent_model", value: "" });
+        assert.equal(await square.getAttribute("aria-label"), w.unset + "\n" + w.line);
         assert.equal(await page.evaluate(() => scrollY), y);
+
+        // Codex's sheet has it as a row with a name: where Codex's own is
+        // picked
+        const pick = page.locator("#codexSubagentModelRow button");
+        await pick.waitFor();
+        assert.equal((await page.locator("#codexSubagentModelRow .name").textContent()).trim(), w.row);
+        await pick.click();
+        await page.locator("#pop:not([hidden]) #list li").first().waitFor();
+        await page.locator("#pop #list li", { hasText: "GPT-6 Astra" }).first().click();
+        await page.locator("#codexSubagentModelRow button", { hasText: "GPT-6 Astra" }).waitFor();
+        assert.deepEqual(sets.at(-1), { agent: "codex", field: "subagent_model", value: "codex/gpt-6-astra" });
+        assert.equal(await page.locator("#codexSubagentModelRow .who").getAttribute("title"), w.setLine);
+        await pick.click();
+        await page.locator("#pop:not([hidden]) #list li").first().waitFor();
+        await page.locator("#pop #list li").first().click();
+        await page.locator("#codexSubagentModelRow button", { hasText: w.def }).waitFor();
+        assert.deepEqual(sets.at(-1), { agent: "codex", field: "subagent_model", value: "" });
 
         // the Routing page's story: put on the model set, or why not
         // (each from the list afresh: a narrow window shows the story over it)

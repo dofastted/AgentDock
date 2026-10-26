@@ -186,3 +186,98 @@ func TestGroupMemberNames(t *testing.T) {
 		t.Errorf("gone: %v", err)
 	}
 }
+
+// A rule naming several models (monkeyin_92 on X): use=a,b, in order; a
+// model dropped from the group leaves the rule, which goes with its last.
+func TestGroupRuleSeveralModelsCmd(t *testing.T) {
+	groupsHome(t)
+	if _, err := addGroup("Opus", []string{"models=a/claude-opus-5-5,b/gpt-5.5,a/only-a"}); err != nil {
+		t.Fatal(err)
+	}
+	rule := func() []provider.Rule {
+		t.Helper()
+		g, err := findGroup("opus")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.Rules
+	}
+	if err := ruleCmd([]string{"add", "opus", "use=gpt-5.5,only-a,claude-opus-5-5", "tokens=200k"}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := rule(); len(rs) != 1 || strings.Join(rs[0].Uses(), " ") != "b/gpt-5.5 a/only-a a/claude-opus-5-5" {
+		t.Fatalf("%+v", rs)
+	}
+	if err := ruleCmd([]string{"opus"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ruleCmd([]string{"add", "opus", "use=gpt-5.5,a/m", "tokens=5"}); err == nil {
+		t.Fatal("a model not in the group taken")
+	}
+	if _, err := setGroup("opus", []string{"models-=b/gpt-5.5"}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := rule(); len(rs) != 1 || strings.Join(rs[0].Uses(), " ") != "a/only-a a/claude-opus-5-5" || rs[0].Tokens != 200000 {
+		t.Fatalf("after models-=b: %+v", rs)
+	}
+	if _, err := setGroup("opus", []string{"models-=a/only-a,a/claude-opus-5-5", "models+=b/gpt-5.5"}); err != nil {
+		t.Fatal(err)
+	}
+	if rs := rule(); len(rs) != 0 {
+		t.Fatalf("a rule left with no model kept: %+v", rs)
+	}
+}
+
+// A rule's hours typed with no zone are this computer's ($TZ here), kept
+// as its IANA name so a server on another clock reads them as meant; a
+// zone typed is kept, and one magpie doesn't know is refused.
+func TestGroupRuleTimeZoneCmd(t *testing.T) {
+	groupsHome(t)
+	t.Setenv("TZ", "Asia/Shanghai")
+	if _, err := addGroup("Peak", []string{"models=a/claude-opus-5-5,b/gpt-5.5"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, words := range [][]string{
+		{"add", "peak", "pause=claude-opus-5-5", "time=09:00-18:00", "days=mon-fri"},
+		{"add", "peak", "use=gpt-5.5", "time=22:00-08:00@Europe/Berlin"},
+		{"add", "peak", "use=gpt-5.5", "days=sat", "tz=America/New_York"},
+	} {
+		if err := ruleCmd(words); err != nil {
+			t.Fatalf("%v: %v", words, err)
+		}
+	}
+	g, err := findGroup("peak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zones []string
+	for _, r := range g.Rules {
+		zones = append(zones, r.Time.Zone)
+	}
+	if got := strings.Join(zones, " "); got != "Asia/Shanghai Europe/Berlin America/New_York" {
+		t.Fatalf("zones %q", got)
+	}
+	if got := g.Rules[0].Line(); got != "pause=a/claude-opus-5-5 time=09:00-18:00 days=mon-fri tz=Asia/Shanghai" {
+		t.Errorf("line %q", got)
+	}
+	for _, words := range [][]string{
+		{"add", "peak", "use=gpt-5.5", "time=09:00-18:00", "tz=Beijing"},
+		{"add", "peak", "use=gpt-5.5", "time=09:00-18:00@Asia/Shangai"},
+		{"add", "peak", "use=gpt-5.5", "tz=Asia/Shanghai"},
+	} {
+		if err := ruleCmd(words); err == nil {
+			t.Errorf("%v: saved", words)
+		}
+	}
+	if g, _ = findGroup("peak"); len(g.Rules) != 3 {
+		t.Errorf("%d rules after the refused ones", len(g.Rules))
+	}
+	// with no zone name to be had, none is kept: magpie's clock, as before
+	t.Setenv("TZ", "UTC+8")
+	if err := ruleCmd([]string{"add", "peak", "use=gpt-5.5", "time=01:00-02:00"}); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ = findGroup("peak"); g.Rules[3].Time.Zone != "" {
+		t.Errorf("zone %q from TZ=UTC+8", g.Rules[3].Time.Zone)
+	}
+}

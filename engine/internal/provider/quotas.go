@@ -16,6 +16,28 @@ func Quotas(ctx context.Context) []SubscriptionQuota {
 	return cardsServed(subs, plans, balances, LastServed())
 }
 
+// InProviderOrder is qs in the order the user put the providers in on the
+// Providers page (SetOrder), each provider's cards as they came; a card of
+// no provider here (a remote magpie's) after them all. The window's Usage
+// page and the tray panel's Allowances tab draw them so, where the user
+// hasn't arranged the cards themselves (Zhenbao TONG on Discord: the
+// providers moved in the window, the tray kept its own order).
+func InProviderOrder(qs []SubscriptionQuota) []SubscriptionQuota {
+	at := map[string]int{}
+	for i, p := range All() {
+		at[p.ID] = i
+	}
+	rank := func(q SubscriptionQuota) int {
+		if i, ok := at[q.Provider]; ok {
+			return i
+		}
+		return len(at)
+	}
+	out := slices.Clone(qs)
+	slices.SortStableFunc(out, func(a, b SubscriptionQuota) int { return rank(a) - rank(b) })
+	return out
+}
+
 // Allotted is Quotas without the keys' balances: the accounts and plans
 // whose allowance runs out and starts again, which is what magpie quota
 // wait waits on; no key's balance is asked for.
@@ -102,12 +124,21 @@ type QuotaSpan struct {
 	Remaining float64    `json:"remaining"`
 	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
 	Display   string     `json:"display,omitempty"` // the vendor's own count, "1.2k / 3k"
+	// Text: the window is its Display alone, Used and Remaining no
+	// reading (QuotaWindow.Text)
+	Text bool `json:"text,omitempty"`
 	// Amount of Limit in Unit: the window's count, used, when the vendor
 	// counts it so ("credits")
 	Amount float64 `json:"amount,omitempty"`
 	Limit  float64 `json:"limit,omitempty"`
 	Unit   string  `json:"unit,omitempty"`
 	Pool   string  `json:"pool,omitempty"` // the shared pool the window draws on ("Gemini")
+	// RunsOutAt is when the soonest of what is left is lost, apart from
+	// the reset, and RunsOut how much (QuotaWindow.RunsOutAt): WorkBuddy's
+	// credits come in packages that each end on their own day, and a free
+	// account's have no reset at all (#3762).
+	RunsOutAt *time.Time `json:"runsOutAt,omitempty"`
+	RunsOut   float64    `json:"runsOut,omitempty"`
 	// Holds and HoldsWhy are the window's whole as the Usage page's card
 	// tells it (QuotaWindow.Holds, #2333): reckoned when ReckonHolds is
 	// set, else left out.
@@ -163,8 +194,8 @@ func quotaReport(subs, plans, balances []SubscriptionQuota, now time.Time) []Quo
 			// a pool's own windows stand in for the models' drawing on it,
 			// as the usage page shows them
 			for _, w := range PooledWindows(q.Windows) {
-				s := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display,
-					Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
+				s := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text,
+					Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, RunsOutAt: w.RunsOutAt, RunsOut: w.RunsOut, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
 				if s.ResetsAt == nil && w.ResetSecs > 0 {
 					t := now.Add(time.Duration(w.ResetSecs) * time.Second)
 					s.ResetsAt = &t

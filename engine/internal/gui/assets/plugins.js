@@ -14,7 +14,9 @@
   let mine = null;       // /api/plugins: what's installed
   let listings = null;   // /api/plugins/listings: the plugins suggested
   let tagged = null;     // /api/plugins/github: repositories their authors tagged magpie-plugin, as listings
-  let taggedErr = "";    // why they couldn't be asked for, while none were had
+  let taggedErr = "";    // why the list isn't GitHub's whole answer: it couldn't be asked, or...
+  let taggedKind = "";   // its kind: "slow", "limited" or ""
+  let taggedMissing = 0; // ...this many repositories it named couldn't be read
   let topic = "magpie-plugin";
   const npm = {};        // /api/plugins/npm: package → what npm says of it
   const heads = {};      // /api/plugins/git: a git plugin's spec → the commit its repository is at
@@ -137,7 +139,7 @@
   }
   function logo(ic, big, kind) {
     const box = el("span", "pm-logo" + (big ? " big" : ""));
-    if (ic) box.append(icon(ic));
+    if (ic) box.append(icon(ic, !big));
     else box.append(glyph({ mw: PIPE, ag: TERM, tl: TOOL, pg: PAGE }[kind] || PUZZLE, big ? 22 : 17, 1.4));
     return box;
   }
@@ -170,14 +172,24 @@
     summary: r.description ? { en: r.description } : undefined,
     npm: { version: r.version || "", publisher: r.owner, repository: r.url, license: r.license, weekly: 0 },
   });
-  async function loadTagged() {
+  // A failed ask is said, with why, whether or not a list was had before:
+  // an empty list was read as there being no unofficial plugins (till on
+  // Discord: GitHub unreachable from their desktop, the section gone).
+  // A list had before stands through a failed ask that brings none.
+  // again: Try again, which has magpie ask GitHub at once.
+  async function loadTagged(again) {
     try {
-      const r = await api("plugins/github");
-      tagged = (r.repos || []).map(ghListing);
-      taggedErr = "";
+      const r = await api("plugins/github" + (again ? "?again=1" : ""));
+      const got = (r.repos || []).map(ghListing);
+      if (!(r.error && !got.length && tagged?.length)) tagged = got;
+      taggedErr = r.error || "";
+      taggedKind = r.why || "";
+      taggedMissing = r.missing || 0;
       if (r.topic) topic = r.topic;
     } catch (e) {
-      if (!tagged) taggedErr = e.message || String(e);
+      taggedErr = e.message || String(e);
+      taggedKind = "";
+      taggedMissing = 0;
       tagged = tagged || [];
     }
   }
@@ -238,7 +250,6 @@
   window.pluginTabTo = (id) => { tab = id; };
   // pluginQuery: Discover, looking for q (the add sheet found nothing by it)
   window.pluginQuery = (q) => {
-    if (q === query && !q) return;
     query = q;
     tab = "discover";
     clearTimeout(searchTimer);
@@ -248,6 +259,9 @@
   };
 
   async function refresh() {
+    // a plugin installed, switched on or off, or removed brings its
+    // page's tab, or takes it, now: not on the Plugins page's next load
+    window.loadPluginPages?.();
     try {
       const [m, p] = await Promise.all([api("plugins"), api("providers")]);
       mine = m;
@@ -470,7 +484,7 @@
       b.classList.add("go");
       b.textContent = t("Sign in");
       b.title = subs.length > 1 ? t("Sign in to {name}", { name: out.name }) : "";
-      b.onclick = (ev) => { ev.stopPropagation(); pluginSignIn(out.id); };
+      b.onclick = (ev) => { ev.stopPropagation(); pluginSignIn(out.id, ev); };
       return b;
     }
     // an update out: the one button says so in place of Signed in or
@@ -517,7 +531,7 @@
     const sum = el("p", "pm-sum", summary(l));
     const meta = el("div", "pm-meta");
     meta.append(kindChip(kindOf(l)));
-    if (l.github) meta.append(unofficial(), stars(l.github.stars));
+    if (l.github) meta.append(stars(l.github.stars));
     if (l.npm?.weekly) {
       const d = el("span", "pm-dl");
       d.append(glyph(DOWN, 11, 1.5), el("span", "", t("{n}/week", { n: count(l.npm.weekly) })));
@@ -543,13 +557,6 @@
     return c;
   }
 
-  // a repository's author put it here, nobody reviewed it: said on its card
-  function unofficial() {
-    const u = el("span", "pm-chip warn");
-    u.append(el("span", "dot"), el("span", "", t("Unofficial")));
-    u.title = t("Tagged {topic} on GitHub by its author. Nobody at magpie has read it: read its code before you install it", { topic });
-    return u;
-  }
   function stars(n) {
     const d = el("span", "pm-dl");
     d.append(glyph(STAR, 11, 1.4), el("span", "", count(n)));
@@ -644,6 +651,16 @@
     replaceKeeping(ghSec, [ghHead, skeleton(3)]);
     return ghSec;
   }
+  // why the list isn't GitHub's whole answer; kept: cards are shown. A
+  // known kind in the reader's words, the raw error as its hover
+  const ghWhy = (kept) => {
+    const error = { slow: t("GitHub didn't answer in time"), limited: t("GitHub is turning requests away for now") }[taggedKind] || taggedErr;
+    const s = el("span", "", taggedMissing
+      ? t(kept ? "{n} more on GitHub couldn't be read: {error}" : "GitHub found {n} repositories, but none of them could be read: {error}", { n: taggedMissing, error })
+      : t(kept ? "Couldn't ask GitHub, so these are from before: {error}" : "Couldn't ask GitHub: {error}", { error }));
+    if (error !== taggedErr) s.title = taggedErr;
+    return s;
+  };
   // and one GitHub couldn't be asked of says so, with another go
   function ghFailed() {
     ghHead.replaceChildren(...ghTitle());
@@ -654,12 +671,27 @@
     again.onclick = () => {
       tagged = null;
       taggedErr = "";
+      taggedMissing = 0;
       drawBody();
-      loadTagged().then(drawBody);
+      loadTagged(true).then(drawBody);
     };
-    box.append(el("span", "", t("Couldn't ask GitHub: {error}", { error: taggedErr })), again);
+    box.append(ghWhy(false), again);
     replaceKeeping(ghSec, [ghHead, box]);
     return ghSec;
+  }
+  // the cards GitHub could give, and a line saying what it couldn't, with
+  // another go that keeps them until it answers
+  function ghNote() {
+    const note = el("div", "pm-ghwarn");
+    note.setAttribute("role", "status");
+    const again = el("button", "text", t("Try again"));
+    again.type = "button";
+    again.onclick = () => {
+      again.disabled = true;
+      loadTagged(true).then(drawBody);
+    };
+    note.append(ghWhy(true), again);
+    return note;
   }
   function ghSection(list) {
     ghList = list;
@@ -677,9 +709,10 @@
     return ghSec;
   }
   function drawGh() {
+    const head = taggedErr ? [ghHead, ghNote()] : [ghHead];
     if ((tagged || []).length <= 6) {
       ghGrid.replaceChildren(...ghList.map(card));
-      replaceKeeping(ghSec, [ghHead, ghGrid]);
+      replaceKeeping(ghSec, [...head, ghGrid]);
       return;
     }
     // the kinds there are, in the market's order, each with how many the
@@ -710,7 +743,7 @@
     // what's installed, on both sides of it: a reader looks for what to
     // add as much as for what they have
     if (both) {
-      const pick = segs([["", t("All") + " · " + n(ghKind, "")], ["have", t("Installed") + " · " + n(ghKind, "have")], ["none", t("Not installed") + " · " + n(ghKind, "none")]], ghHave, (h) => { ghHave = h; drawGh(); });
+      const pick = segs([["", t("All")], ["have", t("Installed") + " · " + n(ghKind, "have")], ["none", t("Not installed") + " · " + n(ghKind, "none")]], ghHave, (h) => { ghHave = h; drawGh(); });
       pick.classList.add("pm-ghhave");
       pick.setAttribute("role", "group");
       pick.setAttribute("aria-label", t("Installed or not"));
@@ -724,7 +757,7 @@
     const shown = found.filter((l) => (!ghKind || kindOf(l) === ghKind) && (!ghHave || have(l) === (ghHave === "have")));
     if (shown.length) {
       ghGrid.replaceChildren(...shown.map(card));
-      replaceKeeping(ghSec, [ghHead, ghBar, ghGrid]);
+      replaceKeeping(ghSec, [...head, ghBar, ghGrid]);
       return;
     }
     const none = el("div", "pm-ghnone");
@@ -732,7 +765,7 @@
     all.type = "button";
     all.onclick = () => { ghKind = ""; ghHave = ""; ghQuery = ""; drawGh(); ghQ.focus(); };
     none.append(el("span", "", t("No plugin on GitHub matches")), all);
-    replaceKeeping(ghSec, [ghHead, ghBar, none]);
+    replaceKeeping(ghSec, [...head, ghBar, none]);
   }
 
   // the head and its search field are made once and drawn again in
@@ -886,7 +919,7 @@
       if (pgs.length) out.push(section(t("Pages"), t("pages of their own in magpie's window, each shut off from the rest and reading only what it lists"), pgs));
       if (gh.length) out.push(ghSection(gh));
       else if (!tagged) out.push(ghWaiting());
-      else if (taggedErr) out.push(ghFailed());
+      else if (taggedErr && !tagged.length) out.push(ghFailed());
       out.push(manual());
       replaceKeeping(body, out);
       return;
@@ -894,6 +927,7 @@
     if (ls.length) out.push(section(t("Suggested"), "", ls));
     if (gh.length) out.push(ghSection(gh));
     else if (!tagged) out.push(ghWaiting());
+    else if (taggedErr && !tagged.length) out.push(ghFailed());
     const known = new Set([...listings.map((l) => l.package), ...(tagged || []).map((l) => l.github.package).filter(Boolean)]);
     const box = el("section", "pm-sec");
     const h = el("div", "pm-sechead");
@@ -1229,7 +1263,7 @@
       // button names the one it signs in to and stays quiet
       const out = subs.find((x) => !x.signedIn), some = subs.some((x) => x.signedIn);
       const s = el("button", "text" + (here || some ? "" : " primary"), some ? t("Sign in to {name}", { name: out.name }) : t("Sign in"));
-      s.onclick = () => pluginSignIn(out.id);
+      s.onclick = (ev) => pluginSignIn(out.id, ev);
       val.append(s);
     }
     // switched on again: a built-in it can carry is offered its way, in
@@ -1464,6 +1498,92 @@
     return d;
   }
 
+  // a README on its way: its lines are strings, and magpie's bird drops in
+  // and bounces down them, each bending under its feet and wobbling after
+  // it; leave() sends it off when the README comes. Its marks are data-*,
+  // not classes, so the dialog's observer doesn't place it again each hop
+  function bounceLoader() {
+    const box = el("div", "pm-bounce"), s = document.createElementNS("http://www.w3.org/2000/svg", "svg"), b = el("div", "sk-bird");
+    s.innerHTML = "<path/><path/><path/><path/>";
+    b.innerHTML = BIRD;
+    box.append(s, b);
+    const ps = [...s.children], ws = [1, .94, .6, .82], at = [.16, .44, .3, .58];
+    const L = ws.map((w, i) => ({ y: 31 + i * 22, d: 0, v: 0, bx: 0, hold: false }));
+    // the bird is placed by its feet: f faces it, r leans it, sx/sy squash it
+    let W = 0, x = 0, y = 0, f = 1, r = 0, sx = 1, sy = 1, gone = false;
+    const put = (o) => { ({ x = x, y = y, f = f, r = r, sx = sx, sy = sy } = o); b.style.transform = `translate(${x}px,${y}px) rotate(${r * f}deg) scale(${f * sx},${sy})`; };
+    const draw = () => L.forEach((l, i) => {
+      const h = l.y, d = l.d, x1 = W * ws[i] - 5, c = Math.min(x1 - 12, Math.max(17, l.bx));
+      ps[i].setAttribute("d", `M5 ${h}C${(5 + c) / 2} ${h} ${c - (c - 5) * .35} ${h + d} ${c} ${h + d}C${c + (x1 - c) * .35} ${h + d} ${(c + x1) / 2} ${h} ${x1} ${h}`);
+    });
+    // a step over frames; it stops when the box is gone, or the README came
+    const tween = (ms, fn, ease = (t) => t, exit) => new Promise((ok, no) => {
+      const t0 = performance.now();
+      const step = (now) => {
+        if (!box.isConnected || (gone && !exit)) return no();
+        const t = Math.min(1, (now - t0) / ms);
+        fn(ease(t), t);
+        t < 1 ? requestAnimationFrame(step) : ok();
+      };
+      requestAnimationFrame(step);
+    });
+    const easeIn = (t) => t * t * t, easeOut = (t) => 1 - (1 - t) ** 3;
+    (async () => {
+      await new Promise(requestAnimationFrame);
+      if (!box.isConnected || gone) return;
+      W = box.clientWidth;
+      if (calm()) return draw(), put({ x: at[0] * W, y: L[0].y - 5 });
+      // each string a damped spring, let go of when the bird leaves it
+      (async () => {
+        let last = performance.now();
+        for (;;) {
+          const now = await new Promise(requestAnimationFrame), dt = Math.min(.032, (now - last) / 1000);
+          if (!box.isConnected || gone) return;
+          last = now;
+          for (const l of L) if (!l.hold) { l.v += (-625 * l.d - 6 * l.v) * dt; l.d += l.v * dt; }
+          draw();
+        }
+      })();
+      for (;;) {
+        W = box.clientWidth;
+        ps.forEach((p) => delete p.dataset.lit);
+        const x0 = at[0] * W;
+        await tween(300, (e, t) => put({ x: x0 - 24 + 24 * t, y: -30 + (L[0].y + 25) * e, f: 1, r: 0, sx: 1 - .05 * t, sy: 1 + .08 * t }), easeIn);
+        for (let i = 0; i < L.length; i++) {
+          const l = L[i], top = l.y - 5, deep = i === L.length - 1 ? 16 : 10;
+          l.hold = true;
+          l.bx = x;
+          ps[i].dataset.lit = "";
+          await tween(140, (e) => { put({ y: top + deep * e, sx: 1 + .16 * e, sy: 1 - .2 * e }); l.d = y - top; }, easeOut);
+          await tween(90, (e) => { put({ y: top + deep * (1 - e), sx: 1.16 - .16 * e, sy: .8 + .3 * e }); l.d = y - top; }, easeIn);
+          l.hold = false;
+          l.v = -deep * 14;
+          const xa = x, ya = y;
+          if (i + 1 < L.length) {
+            const xb = at[i + 1] * W, yb = L[i + 1].y - 5;
+            put({ f: xb > xa ? 1 : -1 });
+            await tween(340, (e, t) => put({ x: xa + (xb - xa) * t, y: ya + (yb - ya) * t - 72 * t * (1 - t), sx: 1 - .06 * Math.sin(Math.PI * t), sy: 1 + .12 * Math.sin(Math.PI * t), r: (t - .5) * 20 }));
+          } else {
+            // the last one throws it high, out of sight, and it drops in again
+            b.dataset.flap = "";
+            await tween(520, (e) => put({ x: xa + 70 * e, y: ya - (ya + 60) * e, f: 1, r: -12, sx: 1, sy: 1 }), easeOut);
+            delete b.dataset.flap;
+            await tween(260, () => {});
+          }
+        }
+      }
+    })().catch(() => {});
+    box.leave = () => {
+      gone = true;
+      box.dataset.gone = b.dataset.flap = "";
+      const xa = x, ya = y;
+      tween(420, (e) => put({ x: xa + (W + 60 - xa) * e, y: ya - (ya + 80) * e, f: 1, r: -14, sx: 1, sy: 1 }), easeIn, true)
+        // gone once the dialog has grown to the README, not while it does
+        .then(() => tween(200, () => {}, undefined, true)).then(() => box.remove(), () => {});
+    };
+    return box;
+  }
+
   // the plugin's page: what it is, what npm says of it, and its README
   async function detail(l) {
     // a folder plugin: what it is comes from the folder, not from npm; a
@@ -1528,7 +1648,7 @@
     }
     if (l.replaces) main.append(el("p", "pm-note", t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it.")));
     const readme = el("div", "pm-readme");
-    readme.append(el("div", "pm-rskel"), el("div", "pm-rskel short"), el("div", "pm-rskel"));
+    readme.append(bounceLoader());
     main.append(readme);
     ed.append(main);
     const bar = el("div", "bar");
@@ -1541,14 +1661,33 @@
     // the button follows an install or a sign-in made while it's open
     const tick = setInterval(() => { if (!ed.isConnected) return stop(); redrawAct(); }, 600);
     function stop() { clearInterval(tick); }
+    // the README takes the skeleton's place, and the dialog grows to it on
+    // the spring it opened on, centred as it goes, not in one jump; the
+    // bird flies off over it
+    const fill = (n) => {
+      const d = ed.parentElement, h = d.offsetHeight, y = d.style.top, wait = readme.querySelector(".pm-bounce");
+      const m = d.parentElement, at = wait?.getBoundingClientRect(), o = m.getBoundingClientRect();
+      readme.replaceChildren(n);
+      if (!ed.isConnected || calm()) return;
+      // it leaves from over the dialog, where it was: anywhere in it, WebKit
+      // lays the fields out 8px short while it is there
+      if (wait) {
+        Object.assign(wait.style, { top: at.top - o.top + m.scrollTop + "px", left: at.left - o.left + m.scrollLeft + "px", width: at.width + "px" });
+        m.append(wait);
+        wait.leave();
+      }
+      holdModal();
+      d.animate([{ height: h + "px", top: y, overflow: "hidden" }, { height: d.offsetHeight + "px", top: d.style.top, overflow: "hidden" }], { duration: 570, easing: SPRING });
+      n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: "ease-out" });
+    };
     try {
       const p = await api("plugins/page?name=" + encodeURIComponent(l.package));
       const at = l.github && !entryOf(l.package) ? l.github.pushed : p.updated;
       upd.textContent = at && !at.startsWith("0001") ? new Date(at).toLocaleDateString(intlLang(), { year: "numeric", month: "short", day: "numeric" }) : "—";
-      readme.replaceChildren(markdown(p.readme || t("No README")));
+      fill(markdown(p.readme || t("No README")));
     } catch (e) {
       upd.textContent = "—";
-      readme.replaceChildren(el("p", "pm-note", t(l.github && isGit(l.package) && !entryOf(l.package) ? "GitHub didn't answer: {error}" : local ? "Couldn't read the folder's README: {error}" : "npm didn't answer: {error}", { error: e.message })));
+      fill(el("p", "pm-note", t(l.github && isGit(l.package) && !entryOf(l.package) ? "GitHub didn't answer: {error}" : local ? "Couldn't read the folder's README: {error}" : "npm didn't answer: {error}", { error: e.message })));
     }
   }
 

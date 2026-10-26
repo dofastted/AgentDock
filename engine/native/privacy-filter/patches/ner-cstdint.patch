@@ -1,0 +1,13 @@
+diff --git a/src/ner.h b/src/ner.h
+index b61b264..1d5b597 100644
+--- a/src/ner.h
++++ b/src/ner.h
+@@ -4,6 +4,8 @@
+ // the behavior LocalAI ships today.
+ #pragma once
+ 
++#include <cstdint>
++
+ #include <string>
+ #include <vector>
+ 

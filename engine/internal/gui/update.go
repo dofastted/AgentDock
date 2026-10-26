@@ -28,19 +28,20 @@ import (
 // restart asks for the administrator's password; only an app that can't be
 // replaced at all (run from its disk image, say) is sent to the release page.
 type updater struct {
-	mu     sync.Mutex
-	state  string // checking | latest | found | downloading | ready | available | source | error | blocked
-	latest *update.Release
-	err    string
-	bundle string      // the .app to replace, "" when not in one or stuck
-	stuck  string      // why the .app or binary can't be replaced where it is (update.Stuck, exeStuck)
-	exe    string      // not in a .app: the binary to replace, "" when not writable
-	exeDir string      // not in a .app: the binary's folder, named when it is stuck there
-	self   os.FileInfo // exe as this process started from it
-	retry  bool        // error: the download failed, and may be tried again
-	mirror string      // error: the mirror the failed download came through (#893)
-	staged string
-	aside  string // Windows: where install moved the running exe, to put back
+	mu      sync.Mutex
+	state   string // checking | latest | found | downloading | ready | available | source | error | blocked
+	latest  *update.Release
+	err     string
+	bundle  string      // the .app to replace, "" when not in one or stuck
+	stuck   string      // why the .app or binary can't be replaced where it is (update.Stuck, exeStuck)
+	exe     string      // not in a .app: the binary to replace, "" when not writable
+	exeDir  string      // not in a .app: the binary's folder, named when it is stuck there
+	self    os.FileInfo // exe as this process started from it
+	retry   bool        // error: the download failed, and may be tried again
+	mirror  string      // error: the mirror the failed download came through (#893)
+	network bool        // error: the network broke the download off (update.Network)
+	staged  string
+	aside   string // Windows: where install moved the running exe, to put back
 	// a version this computer wouldn't start (Smart App Control, #894),
 	// which the clock's checks don't download again; byClock, the check
 	// under way is the clock's
@@ -90,8 +91,11 @@ type updateJSON struct {
 	// error: the download failed through this mirror (Settings' UpdateMirror),
 	// and GitHub itself may do (#893)
 	Mirror string `json:"mirror,omitempty"`
-	Error  string `json:"error,omitempty"`
-	Done   int64  `json:"done,omitempty"` // downloading: bytes so far
+	// error: the network broke the download off, tried again already; the
+	// row says so in the app's language instead of the raw error
+	Network bool   `json:"network,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Done    int64  `json:"done,omitempty"` // downloading: bytes so far
 	// blocked: the version this computer wouldn't start, and why (#894)
 	Blocked *update.Blocked `json:"blocked,omitempty"`
 	Total   int64           `json:"total,omitempty"`
@@ -104,6 +108,10 @@ type updateJSON struct {
 	Busy    *gateway.Busy `json:"busy,omitempty"`
 	Waiting bool          `json:"waiting,omitempty"`
 	GaveUp  bool          `json:"gaveUp,omitempty"`
+	// Handover, the restart hands the gateway to the new version
+	// (handover.go): Busy is then the Claude subscription's turns alone,
+	// every other request finishing as the new version takes the next
+	Handover bool `json:"handover,omitempty"`
 }
 
 var updates = &updater{}
@@ -263,6 +271,36 @@ func (u *updater) freshen() {
 	}
 }
 
+// An answer of "latest" is about the moment the feed was asked, and magpie
+// releases many times a day: Settings' Version row said 已是最新 on
+// v0.1.1402 with v0.1.1517 out (RickyWei on Discord, Windows), the answer
+// of a check made while 1402 was the newest and never made again (automatic
+// checks off, or once a day). So it is shown only while younger than
+// freshAfter. When the Version row is drawn (GET /api/update?fresh=1) an
+// older one is asked again, with automatic updates on; with them off the
+// row says so, and its Check asks.
+
+// latestStale is whether the state is a "latest" older than freshAfter.
+// The caller holds u.mu.
+func (u *updater) latestStale() bool {
+	return u.state == "latest" && time.Since(u.asked) >= freshAfter
+}
+
+// refreshLatest asks the feed again when the Version row is drawn over a
+// stale "latest", unless automatic updates are off. It doesn't wait for
+// the answer: the row shows checking, and reads again.
+func (u *updater) refreshLatest(s settings.Settings) {
+	if s.NoAutoUpdate {
+		return
+	}
+	u.mu.Lock()
+	stale := u.latestStale()
+	u.mu.Unlock()
+	if stale && u.begin() {
+		go u.run()
+	}
+}
+
 // begin marks a check as under way, unless one is. One with a version
 // already downloaded checks too: a newer one out since takes its place,
 // so the restart goes straight to the latest.
@@ -272,7 +310,7 @@ func (u *updater) begin() bool {
 	if u.state == "checking" || u.state == "downloading" {
 		return false
 	}
-	u.state, u.err, u.retry, u.mirror, u.asked, u.byClock, u.fetch = "checking", "", false, "", time.Now(), false, false
+	u.state, u.err, u.retry, u.mirror, u.network, u.asked, u.byClock, u.fetch = "checking", "", false, "", false, time.Now(), false, false
 	return true
 }
 
@@ -292,6 +330,13 @@ func (u *updater) run() {
 	rel, err := update.LatestIn(ctx, lang)
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	// the feed names an older version than the one found before: Settings'
+	// Update channel went to Stable since (ssharpcc on X). What was
+	// downloaded from every version isn't put in, and the version found
+	// is the feed's again, as if never found.
+	if err == nil && u.latest != nil && update.Newer(u.latest.Version, rel.Version) {
+		u.staged, u.latest = "", nil
+	}
 	// a version downloaded on a click stays the one restarted into while
 	// downloads wait for a click: a newer one out since isn't fetched
 	if u.staged != "" && u.latest != nil && (err != nil || !update.Newer(rel.Version, u.latest.Version) || hold) {
@@ -358,7 +403,7 @@ func (u *updater) run() {
 	u.mu.Lock()
 	if err != nil {
 		log.Println("update:", err)
-		u.state, u.err, u.retry, u.mirror = "error", err.Error(), true, update.MirrorOf(err)
+		u.state, u.err, u.retry, u.mirror, u.network = "error", err.Error(), true, update.MirrorOf(err), update.Network(err)
 		return
 	}
 	u.state, u.staged = "ready", staged
@@ -448,7 +493,7 @@ func (u *updater) json() updateJSON { return u.jsonIn("") }
 // Notes held in another language are asked for again in lang, at most
 // once a minute; the page's next look has them.
 func (u *updater) jsonIn(lang string) updateJSON {
-	busy := gatewayBusy()
+	busy, handover := restartBusy(), handsOver()
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if lang != "" {
@@ -459,8 +504,11 @@ func (u *updater) jsonIn(lang string) updateJSON {
 		}
 	}
 	j := updateJSON{State: u.state, Current: Version, Error: u.err, Retry: u.retry}
+	if u.latestStale() {
+		j.State = "" // not asked lately: no claim to be up to date
+	}
 	if u.state == "error" {
-		j.Mirror = u.mirror
+		j.Mirror, j.Network = u.mirror, u.network
 	}
 	if u.state == "checking" && u.staged != "" {
 		j.State = "ready" // what was downloaded can still be restarted into
@@ -482,6 +530,7 @@ func (u *updater) jsonIn(lang string) updateJSON {
 	}
 	if j.State == "ready" || u.waiting {
 		j.Waiting, j.GaveUp = u.waiting, u.gaveUp && !u.waiting
+		j.Handover = handover
 		if busy.Any() {
 			j.Busy = &busy
 		}
@@ -524,6 +573,9 @@ func (u *updater) relang(version, lang string) {
 
 func updateRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/update", func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("fresh") == "1" { // the Version row
+			updates.refreshLatest(settings.Load())
+		}
 		writeJSON(rw, updates.jsonIn(askedLang(r)))
 	})
 	// notes: what changed in every release after this one up to the update,
@@ -584,7 +636,7 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 			if in.When != "now" && !updates.idle() {
 				updates.waitIdle(func() bool {
 					if restartToUpdate(isWeb(w), in.View != "" || mainShown(w), in.View) {
-						go w.Quit()
+						go leave(w.Quit)
 						return true
 					}
 					return false
@@ -599,7 +651,7 @@ func updateRoutes(mux *http.ServeMux, w Windows) {
 		case j.State == "ready":
 			if restartToUpdate(isWeb(w), in.View != "" || mainShown(w), in.View) {
 				rw.WriteHeader(http.StatusNoContent)
-				go w.Quit()
+				go leave(w.Quit)
 				return
 			}
 		case j.State == "error" && j.Retry, j.State == "found":
@@ -629,6 +681,9 @@ func restartToUpdate(web, window bool, view string) bool {
 // (#2096), and the Mac's new one too opens only its menu bar icon when no
 // window was up, rather than putting up one the user had closed.
 func restartInto(web, window bool, view string, bySelf bool) bool {
+	if pending.Load() != nil {
+		return false // a handover under way restarts already
+	}
 	bundle, exe := updates.bundle, updates.exe
 	updates.mu.Lock()
 	version := ""
@@ -642,6 +697,12 @@ func restartInto(web, window bool, view string, bySelf bool) bool {
 	updatedInApp(version) // its first start leaves the notes to Settings (#525)
 	if web {
 		webReexec.Store(true)
+		return true
+	}
+	// on a Mac or Linux the new version takes the gateway over while this
+	// one finishes its requests (handover.go)
+	if bundle != "" && beginHandover(bundle, "", window || !bySelf, "") ||
+		bundle == "" && beginHandover("", exe, window, view) {
 		return true
 	}
 	var err error

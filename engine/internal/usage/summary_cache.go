@@ -23,13 +23,29 @@ type summaryEntry struct {
 	value Summary
 }
 
+// summaryKey is a period as read in a zone: each reader's zone (Zone) has
+// days of its own, and readers in two zones don't put each other's out.
+type summaryKey struct {
+	p    Period
+	zone *time.Location
+}
+
 var summaries struct {
 	sync.Mutex
-	entries map[Period]summaryEntry
+	entries map[summaryKey]summaryEntry
 	worked  int // how many summaries were worked out, for the tests
 }
 
 func indexedSummary(p Period, now time.Time) Summary { return topSummary(p, now, -1) }
+
+// ReadAhead parses the log into its index and works out today's summary in
+// this computer's zone, for magpie to run as it starts: the first reader,
+// the tray panel's line of today's calls, finds both done. Parsing the log
+// cold took 0.33 s at 2 MB and 0.77 s at 40 MB on one core, and the
+// panel's numbers waited for it on the first open after a start
+// (CyberCaius on Discord). A reader that comes while it runs waits for the
+// same parse, never a second.
+func ReadAhead() { SummarizeTopIn(Today, summaryCacheSessions, nil) }
 
 // SummarizeTop is Summarize with only the top n sessions by tokens (all of
 // them for n < 0); SessionCount says how many the period has. It is what a page that
@@ -39,6 +55,15 @@ func indexedSummary(p Period, now time.Time) Summary { return topSummary(p, now,
 // (Vantiboo1ean, ~750k requests in ~84k sessions) that was every refresh of
 // the Usage page and the TUI, and the page was sent all 84k.
 func SummarizeTop(p Period, n int) Summary { return topSummary(p, Clock(), n) }
+
+// SummarizeTopIn is SummarizeTop with the period's days and the chart's
+// hours read in zone (Zone gives it), the reader's: the Usage page's.
+func SummarizeTopIn(p Period, n int, zone *time.Location) Summary {
+	if zone == nil {
+		zone = time.Local
+	}
+	return topSummary(p, Clock().In(zone), n)
+}
 
 func topSummary(p Period, now time.Time, n int) Summary {
 	p = p.shown()
@@ -57,7 +82,8 @@ func topSummary(p Period, now time.Time, n int) Summary {
 	}
 	meta := usagePriceCacheKey(now)
 	summaries.Lock()
-	old, ok := summaries.entries[p]
+	k := summaryKey{p, now.Location()}
+	old, ok := summaries.entries[k]
 	summaries.Unlock()
 	if ok && old.version == snapshot.version && old.meta == meta && (n >= 0 && n <= len(old.value.Sessions) || old.value.SessionCount == len(old.value.Sessions)) {
 		return topOf(cloneSummary(old.value), n)
@@ -70,10 +96,10 @@ func topSummary(p Period, now time.Time, n int) Summary {
 	kept = cloneSummary(kept)
 	summaries.Lock()
 	if summaries.entries == nil {
-		summaries.entries = map[Period]summaryEntry{}
+		summaries.entries = map[summaryKey]summaryEntry{}
 	}
-	if previous := summaries.entries[p]; previous.version <= snapshot.version {
-		summaries.entries[p] = summaryEntry{snapshot.version, meta, kept}
+	if previous := summaries.entries[k]; previous.version <= snapshot.version {
+		summaries.entries[k] = summaryEntry{snapshot.version, meta, kept}
 	}
 	summaries.Unlock()
 	return topOf(value, n)
@@ -106,9 +132,12 @@ func usagePriceCacheKey(now time.Time) string {
 	// Sign-ins and plugin lists can change independently of providers.json.
 	// Their identity and price feeds affect both grouping and historical costs.
 	h := sha256.New()
-	prices, _ := json.Marshal(settings.Load().ModelPrices)
-	aliases, _ := json.Marshal(provider.Renamed())
-	fmt.Fprint(h, string(prices), string(aliases))
+	st := settings.Load()
+	prices, _ := json.Marshal(st.ModelPrices)
+	aliases := provider.UsageRenames().Key()
+	// and the names models' usage is counted under, which the groups key on
+	usageAliases, _ := json.Marshal(st.UsageAliases)
+	fmt.Fprint(h, string(prices), string(aliases), string(usageAliases))
 	for _, current := range provider.All() {
 		fmt.Fprintf(h, "%q:%q:%v:%t:%t:%t;", current.ID, current.Where(), current.Catalogs(), current.IsPlugin(), current.Account == nil, current.Key != "")
 		fmt.Fprint(h, statKey(catalog.LivePath(current.ID)))

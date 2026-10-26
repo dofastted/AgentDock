@@ -84,7 +84,10 @@ plugins' scripts and `app.js`, all classic scripts sharing one scope. It is
 The Gateway page is `plugins/gateway` with `Client: keys.js, client.js`
 (`internal/gui/assets/plugins/gateway/`): `keys.js` is the gateway-key
 manager that was `caller-keys.js`, and `client.js` is the page's code that
-was in app.js, ending in its `magpie.plugin("gateway", …)`. Still in
+was in app.js, ending in its `magpie.plugin("gateway", …)`, and after it
+the viewer of a recorded call's bodies (`callBodyPanel`: a JSON tree, a
+stream's events or its reply), which Usage's ledger and Routing's trace
+call too; every plugin's scripts load whether it is on or off. Still in
 app.js and app.css: its styles, its sidebar and header buttons
 (`data-feature="gateway"` in index.html), and `decideEntry`, which the model
 info card shares. `TestBuiltinClientsLoaded` holds index.html to load every
@@ -150,7 +153,12 @@ says one of its words, which goes back to i18n.js.
   it, `refresh(again)` is `load()`'s read of it (coming back to the
   Overview is opening the allowances, #1588), `reload` is Refresh now,
   `costs` draws the costs again when Settings' currency changes, and
-  `tab` says which tab it is on, for `focusQuotaCard`. Still in app.js,
+  `tab` says which tab it is on, for `focusQuotaCard`, and `leave`, which
+  `show()` calls on the page it leaves, gives back what a click lent the
+  Requests (`ledLeave`, TJHHHH on Discord): a filter a ranking or chart
+  click set, or one brought in by the address or Routing's View usage,
+  goes when the reader leaves the Requests for another page or tab. One
+  picked in its own menu or typed stays. Still in app.js,
   since the tray panel draws them too: the allowance cards,
   `quotasOpened`, `panelQuotaFocus` and `panelUseFocus`. With the plugin
   off, its nav tab goes, and so do the ways to the page
@@ -181,19 +189,19 @@ The router strategy point says the order a pool of routes is tried in: a
 provider's accounts or keys, or the heads of a group's members. The gateway
 still lists the pool, and keeps rests, affinity, rules, pins and the walk
 over the order itself; a strategy only orders. Smart, the default, stays in
-the core. The five other routings are the built-in plugin `rotation`'s.
+the core. The seven other routings are the built-in plugin `rotation`'s.
 
 | Part | What it does | Source |
 | --- | --- | --- |
-| `routes.Strategy` | `Order(pool, seats) []int`: a permutation of the seats' indexes. `pool` is a provider's id or `group/<id>`, for a strategy that keeps a round per pool. `Exact` keeps the order as given; otherwise a provider's API keys that fit the request better go first, each in its order. `ByUse` puts each seat's recent tokens in the trace. | [`routes.go`](../../internal/routes/routes.go) |
-| `routes.Seat` | What a strategy weighs, read by `weighRouted` under the routing state's lock: its rest key, whether it is an account, whether its allowance is known or it learns it as it answers, the share used, when its windows renew, its weekly pace, its key's weight, whether it rests now and its tokens of the last hours. | [`routes.go`](../../internal/routes/routes.go), [`routing.go`](../../internal/gateway/routing.go) |
+| `routes.Strategy` | `Order(pool, seats) []int`: a permutation of the seats' indexes. `pool` is a provider's id or `group/<id>`, for a strategy that keeps a round per pool. `Exact` keeps the order as given; otherwise a provider's API keys that fit the request better go first, each in its order. `ByUse` puts each seat's recent tokens in the trace; `ByFree` has the gateway fill `Seat.Free`, and `BySpeed` `Seat.TTFT` and `TPS` (its speed lately, gateway `speed.go`), each only for a strategy that asks. | [`routes.go`](../../internal/routes/routes.go) |
+| `routes.Seat` | What a strategy weighs, read by `weighRouted` under the routing state's lock: its rest key, whether it is an account, whether its allowance is known or it learns it as it answers, the share used, when its windows renew, its weekly pace, its key's weight, whether it rests now, its tokens of the last hours, and, when the strategy asks, whether its model is free and its ms to the first token and tokens a second lately. | [`routes.go`](../../internal/routes/routes.go), [`routing.go`](../../internal/gateway/routing.go) |
 | `Register`, `Find`, `Apply` | `Register(routing, s)` serves a routing until its remove; registering again stacks, and the last one serves. `Find("")` is `Smart` always. `Apply` fails open: a strategy that panics, or answers what isn't a permutation, leaves the pool in its listed order, logged. Every route is still tried. | [`routes.go`](../../internal/routes/routes.go) |
-| Strategies | `Smart` (core), and `Ordered`, `Rotate`, `LeastUsed`, `Pace` and `Weighted` in `routes.Builtin`. `Rotate` keeps a turn per pool and `Weighted` a smooth weighted round (`Round`, `MoveRound`), both moved out of the gateway; `Forget` clears them. | [`strategies.go`](../../internal/routes/strategies.go), [`round.go`](../../internal/routes/round.go) |
+| Strategies | `Smart` (core), and `Ordered`, `Rotate`, `LeastUsed`, `Pace`, `Weighted`, `FreeFirst` and `Fastest` in `routes.Builtin`. `Rotate` keeps a turn per pool and `Weighted` a smooth weighted round (`Round`, `MoveRound`), both moved out of the gateway, and `Fastest` a probe count per pool, so a seat not measured lately gets one request in `ProbeEvery`; `Forget` clears them. | [`strategies.go`](../../internal/routes/strategies.go), [`round.go`](../../internal/routes/round.go) |
 | Off | A routing no strategy serves is its listed order. `routingOf` in the gateway reads it as `order` wherever the core asks about a routing (a turn's mark, `sinks`, a rotate group's sessions, a group's heads), so nothing of the routing is left half on. | [`routing.go`](../../internal/gateway/routing.go) |
 | `plugins/rotation` | Requires `providers` and `gateway`, `Essential`. Apply registers every `routes.Builtin` and removes them when turned off. `InUse` counts the providers and groups providers.json routes by one of them (`provider.Routings`, the file alone, not the catalog); an unreadable providers.json is an error, so it stays on. The gateway's `KeepFresh` watches providers.json too, so a routing set from the CLI or the TUI turns it on within 2s. Off, the window's routing pickers (the provider editor, the Routing page's pools and groups) offer Smart alone: their options are marked `data-feature="rotation"` (`routingSegs`). | [`rotation.go`](../../plugins/rotation/rotation.go), [`provider.go`](../../internal/provider/provider.go), [`app.js`](../../internal/gui/assets/app.js) |
 
 The user's own routing groups are the `groups` plugin's on this point. The
-groups magpie finds (a model two providers serve, `auto-<model>`) stay the
+groups magpie finds (a model two providers serve, `auto/<model>`) stay the
 core's, as Smart does: they are how a model several providers serve is one
 model with failover, which a user has with the Essentials preset,
 where `groups` is off. `planGroup` and the walk over a group's members are
@@ -216,6 +224,7 @@ failure policy, in [`internal/gwmw`](../../internal/gwmw/gwmw.go):
 | `gwmw.Agent` | A middleware on a request an agent sent, in the agent's own API, before the gateway routes it, and on its reply as the agent gets it: `Begin(Info) Run`, and the run's `Request` (a `Reject` ends the request in the agent's error shape), `Wrap` and `End`. `Use(a)` registers one until its remove; `Agents` lists them in order. `serveAgent` runs each in turn; with none it calls `serve` directly. It fails open, as the JS middleware always did. | [`gwmw.go`](../../internal/gwmw/gwmw.go), [`middleware.go`](../../internal/gateway/middleware.go) |
 | `plugins/middleware` | Requires `gateway`, Essential. Apply registers `middleware.Chain`, the JS gateway middleware ([Gateway middleware](gateway-middleware.md)), whose place, API, limits and fail-open policy are unchanged. `InUse` is `middleware.On()`, the middleware plugins.json has on. Off, agents' requests go as they came and no middleware is called, while plugins.json is left as it is. The gateway's `KeepFresh` watches plugins.json too, so a middleware added from the CLI or the window turns it on within 2s, and a request before then asks the gate's refresh itself (`gwmw.AgentsWanted`: with no agent middleware registered and `middleware.On()` above 0, at most once a second), so the middleware runs on that request, as it did within a second before it was a plugin. | [`middleware.go`](../../plugins/middleware/middleware.go), [`run.go`](../../internal/middleware/run.go) |
 | `gwmw.Masker` | Masks what magpie sends a vendor and puts the values back in what comes back: `JSON`, `Text`, `Restore` and `Writer`. `Mask(m)` serves one until its remove (the last registered serves). It fails closed: `Masking(wanted)` is the masker for a request, or `ErrUnmasked` when the settings ask for masking and none serves, and `Safely` makes a masker that panics an error. The gateway's call sites (`serve`, count_tokens, embeddings and audio, transcriptions, images, video, the search stand-ins and their queries, the Codex backend) answer either with 503 "…nothing was sent", and the vendor gets nothing. `Served`, with none, asks the gate's refresh (the gateway's is `pluginrt.Refresh`, set by `gwmw.Refresh` in `ListenAndServe`) at most once a second and never from inside one, then looks again, so masking turned on a moment ago turns the plugin on for the request that needs it. | [`gwmw.go`](../../internal/gwmw/gwmw.go), [`redact.go`](../../internal/gateway/redact.go), [`gateway.go`](../../internal/gateway/gateway.go) |
+| `gwmw.Teller` | What a masker can say besides masking: `JSONHits` and `TextHits` mask as `JSON` and `Text` do and also return each placeholder made or reused (`Hit`: placeholder, kind, finder, head, length), and `Value` is what a placeholder stood for while this masker remembers it. Optional: the gateway records a request's masking only when the served masker is one (`masking.Masker` is), and Settings → Privacy's records and values need it; a masker without it masks the same and leaves no record. | [`gwmw.go`](../../internal/gwmw/gwmw.go), [`masked.go`](../../internal/gateway/masked.go), [`masking.go`](../../internal/masking/masking.go) |
 | `plugins/redact` | Requires `settings` and `gateway`, Essential. Apply serves `masking.Masker`, which reads settings.json on each call and masks with `internal/redact` as before (it lives in `internal/masking` because `settings` imports `redact`). `InUse` is `masking.Wanted`: *Mask secrets*, *Mask personal data* or a word of the user's own; settings.json that can't be read is an error, so it stays on. Since it is in use whenever masking is asked for, it can only be off while nothing is; the 503 is for a refresh not yet seen or a plugins.yml edited by hand. | [`redact.go`](../../plugins/redact/redact.go), [`masking.go`](../../internal/masking/masking.go) |
 
 ## Gateway extension points (P3): tool

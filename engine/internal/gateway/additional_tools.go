@@ -3,6 +3,9 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
+
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // Codex's Responses Lite, for the models its catalog marks so (the ChatGPT
@@ -16,35 +19,110 @@ import (
 // anywhere else has its tools in the tools, the "functions" namespace
 // opened into them, as Codex sends a model that isn't Lite.
 
+// Lite also asks for reasoning context "all_turns" (the ChatGPT backend
+// turns a Lite request away without it, #534) and says it is Lite in the
+// X-OpenAI-Internal-Codex-Responses-Lite header. Neither is in the
+// Responses API anyone else serves. A subagent a GPT lead spawns on another
+// model is sent in the lead's Lite shape, its model name alone changed
+// (codex-rs builds the child's request from the lead's catalog entry), and
+// OpenCode Go's DeepSeek answered it with 503 "Endpoint is unavailable"
+// while the same subagent under a DeepSeek lead, not Lite, was answered
+// (TangForX on X). So a request leaving Lite has both taken off too
+// (fromLite, liteHeaderKept).
+
+// liteHeader says a Codex request is Responses Lite.
+const liteHeader = "X-OpenAI-Internal-Codex-Responses-Lite"
+
+// fromLite is a Responses request Codex sent as Responses Lite in the shape
+// it sends a model that isn't Lite: its additional_tools in its tools
+// (liftAdditionalTools) and no reasoning context. A request that isn't
+// Lite is returned as it was.
+func fromLite(body []byte) []byte {
+	return withoutReasoningContext(liftAdditionalTools(body))
+}
+
+// withoutReasoningContext is body without reasoning.context, the rest of
+// reasoning and every other member byte for byte as they were.
+func withoutReasoningContext(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"context"`)) {
+		return body
+	}
+	r, found, ok := topMember(body, "reasoning")
+	if !found || !ok {
+		return body
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(r, &m) != nil || m == nil {
+		return body
+	}
+	if _, has := m["context"]; !has {
+		return body
+	}
+	delete(m, "context")
+	nb, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return withMembers(body, map[string][]byte{"reasoning": nb})
+}
+
+// liteKept says a Responses request to p goes in Codex's Lite shape as it
+// was sent: to OpenAI, to a ChatGPT account, and to a relay that takes
+// Codex's requests as Codex sent them (Provider.CodexAsSent, #1758).
+func liteKept(p provider.Provider, to provider.Protocol, codex bool) bool {
+	if to != provider.Responses {
+		return false
+	}
+	return p.Account != nil && p.Account.Agent == "codex" ||
+		strings.HasSuffix(p.Host(), "openai.com") ||
+		p.CodexAsSent && p.Account == nil && codex
+}
+
 // liteNamespace is the namespace Responses Lite groups Codex's own
 // functions in (codex_protocol::DEFAULT_FUNCTION_NAMESPACE).
 const liteNamespace = "functions"
 
 // liftAdditionalTools is a Responses request with its additional_tools items
 // moved into its tools, or the request as it was when it has none.
+//
+// Only the additional_tools items and the tools are decoded; every other
+// item, and every other member of the request, goes byte for byte as it
+// came. Decoding the whole conversation into maps to move one item cost
+// ~7.5 times the body on every read of a Lite request, and each Codex
+// request was read so twice (its turn and its folder): ~110 MB of a
+// 4 MB conversation, held at once by each request in flight, so a few
+// subagents at once took the app toward 2 GB (XiaoYin_OK on X).
 func liftAdditionalTools(body []byte) []byte {
 	if !bytes.Contains(body, []byte(`"additional_tools"`)) {
 		return body
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var m map[string]any
-	if dec.Decode(&m) != nil || m == nil {
+	in, found, ok := topMember(body, "input")
+	if !ok || !found || len(in) == 0 || in[0] != '[' {
 		return body
 	}
-	items, ok := m["input"].([]any)
-	if !ok {
-		return body
+	var tools []any
+	if raw, has, _ := topMember(body, "tools"); has {
+		if t, ok := decodeAny(raw).([]any); ok {
+			tools = t
+		}
 	}
-	tools, _ := m["tools"].([]any)
 	have := toolsByName(tools)
-	kept := items[:0:0]
-	lifted := false
-	for _, it := range items {
-		im, _ := it.(map[string]any)
-		if im["type"] != "additional_tools" {
+	var kept [][]byte
+	lifted, bad := false, false
+	eachElement(in, func(it []byte) bool {
+		if ty, ok := stringBytes(memberOrNil(it, "type")); !ok || string(ty) != "additional_tools" {
+			// a call the model made to one of Codex's own tools, under the
+			// namespace they were grouped in, is the plain call it now is
+			if ns, ok := stringBytes(memberOrNil(it, "namespace")); ok && string(ns) == liteNamespace {
+				it = withoutTopMember(it, "namespace")
+			}
 			kept = append(kept, it)
-			continue
+			return true
+		}
+		im, _ := decodeAny(it).(map[string]any)
+		if im == nil {
+			bad = true
+			return false
 		}
 		lifted = true
 		more, _ := im["tools"].([]any)
@@ -64,26 +142,63 @@ func liftAdditionalTools(body []byte) []byte {
 			}
 			tools = addTool(tools, have, tm)
 		}
-	}
-	if !lifted {
+		return true
+	})
+	if !lifted || bad {
 		return body
 	}
-	// a call the model made to one of Codex's own tools, under the
-	// namespace they were grouped in, is the plain call it now is
-	for _, it := range kept {
-		if im, _ := it.(map[string]any); im != nil && im["namespace"] == liteNamespace {
-			delete(im, "namespace")
-		}
-	}
-	m["input"] = kept
+	var toolsJSON []byte
 	if len(tools) > 0 {
-		m["tools"] = tools
+		t, err := marshalPlain(tools)
+		if err != nil {
+			return body
+		}
+		toolsJSON = t
 	}
-	out, err := marshalPlain(m)
-	if err != nil {
-		return body
+	// written once, at its size: the input with the kept items, the tools
+	// given again, every other byte of the body as it was
+	raw := trimJSON(body)
+	out := make([]byte, 0, len(raw)+len(toolsJSON)+len(`,"tools":`))
+	last, hadTools := 0, false
+	eachMemberAt(raw, func(k0, k1, v0, v1 int) bool {
+		switch key := raw[k0:k1]; {
+		case keyIs(key, "input"):
+			out = append(append(out, raw[last:v0]...), '[')
+			for i, it := range kept {
+				if i > 0 {
+					out = append(out, ',')
+				}
+				out = append(out, it...)
+			}
+			out = append(out, ']')
+			last = v1
+		case keyIs(key, "tools"):
+			hadTools = true
+			if toolsJSON != nil {
+				out = append(append(out, raw[last:v0]...), toolsJSON...)
+				last = v1
+			}
+		}
+		return true
+	})
+	out = append(out, raw[last:len(raw)-1]...)
+	if toolsJSON != nil && !hadTools {
+		out = append(append(out, `,"tools":`...), toolsJSON...)
 	}
-	return out
+	return append(out, '}')
+}
+
+// decodeAny is raw, a valid JSON value, decoded as encoding/json decodes
+// into an any, its numbers as they were written; nil when it doesn't
+// decode.
+func decodeAny(raw []byte) any {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return nil
+	}
+	return v
 }
 
 // toolsByName is a request's tools by their names, a hosted tool without

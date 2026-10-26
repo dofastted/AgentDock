@@ -29,6 +29,9 @@ type ctxPoint struct {
 	Tokens int       `json:"tokens"`
 	Window int       `json:"window,omitempty"`
 	Cache  int       `json:"cache,omitempty"` // of Tokens, read from the vendor's cache
+	// CacheUnknown: the vendor counted no cache for it, so Cache's 0 is
+	// not a miss (#3464)
+	CacheUnknown bool `json:"cache_unknown,omitempty"`
 }
 
 type ctxSession struct {
@@ -150,6 +153,13 @@ func cacheOf(r gateway.Route) int {
 	return r.Usage[len(r.Usage)-1].CacheRead
 }
 
+// cacheKnown is whether the vendor counted the cache of r's answering try:
+// one that counts none (Kiro) is left out of a hit rate rather than read as
+// a miss (#3464).
+func cacheKnown(r gateway.Route) bool {
+	return len(r.Usage) == 0 || !cacheNotCounted(r.Usage[len(r.Usage)-1])
+}
+
 // sessionOfRoute is the conversation a route is part of.
 func sessionOfRoute(r gateway.Route) string {
 	switch {
@@ -159,6 +169,43 @@ func sessionOfRoute(r gateway.Route) string {
 		return r.Session
 	}
 	return r.Conv
+}
+
+// joinConvs puts a route that names no session under the agent's session
+// its conversation id was read from (sessions' Convs): dsh's
+// chat-completions and messages routes send no session id, so the gateway
+// keys each request by its first prompt's hash, and the page showed
+// "magpie-a…" where the Sessions page shows the session's title (Kumo31
+// on Discord). An id two sessions share stays as it is.
+func joinConvs(routes []gateway.Route, list func() []sessions.Session) {
+	loose := false
+	for _, r := range routes {
+		if r.Session == "" && r.ParentSession == "" && r.Conv != "" {
+			loose = true
+			break
+		}
+	}
+	if !loose {
+		return
+	}
+	of := map[string]string{}
+	for _, s := range list() {
+		for _, c := range s.Convs {
+			k := s.Agent + "\x00" + c
+			if id, ok := of[k]; ok && id != s.ID {
+				of[k] = ""
+			} else if !ok {
+				of[k] = s.ID
+			}
+		}
+	}
+	for i, r := range routes {
+		if r.Session == "" && r.ParentSession == "" && r.Conv != "" {
+			if id := of[r.Agent+"\x00"+r.Conv]; id != "" {
+				routes[i].Session = id
+			}
+		}
+	}
 }
 
 // compacted says a prompt is a compaction of the one before it: under 60%
@@ -211,6 +258,14 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 	}
 	agents := map[string]*agentAcc{}
 	sess := map[string]*ctxSession{}
+	var listed []sessions.Session
+	list := func() []sessions.Session {
+		if listed == nil {
+			listed = sessions.List(0)
+		}
+		return listed
+	}
+	joinConvs(routes, list)
 	tooled := toolSessions(routes)
 	var order []string
 	for _, r := range routes {
@@ -239,12 +294,12 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 		}
 		acc.a.Requests++
 		acc.prompts = append(acc.prompts, p.Tokens)
-		acc.bases = append(acc.bases, partTokens(p, gateway.PartSystem, gateway.PartTools, gateway.PartMemory))
+		acc.bases = append(acc.bases, partTokens(p, gateway.PartSystem, gateway.PartTools, gateway.PartSkills, gateway.PartMemory))
 		acc.mcps = append(acc.mcps, mcpTokens(p))
 		for _, x := range p.Parts {
 			acc.parts[x.Kind] += x.Tokens
 		}
-		if p.Counted {
+		if p.Counted && cacheKnown(r) {
 			acc.counted += p.Tokens
 			acc.cached += min(cacheOf(r), p.Tokens)
 		}
@@ -276,7 +331,7 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 				acc.growths = append(acc.growths, d)
 			}
 		}
-		s.Points = append(s.Points, ctxPoint{ID: r.ID, Time: r.Time, Tokens: p.Tokens, Window: p.Window, Cache: cacheOf(r)})
+		s.Points = append(s.Points, ctxPoint{ID: r.ID, Time: r.Time, Tokens: p.Tokens, Window: p.Window, Cache: cacheOf(r), CacheUnknown: !cacheKnown(r)})
 		s.Requests++
 		s.Last, s.Latest, s.LatestID, s.Model = r.Time, p, r.ID, r.Model
 		s.Peak = max(s.Peak, p.Tokens)
@@ -341,7 +396,7 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 		}
 	}
 	if len(untitled) > 0 {
-		for _, s := range sessions.List(0) {
+		for _, s := range list() {
 			if i, ok := untitled[s.Agent+"\x00"+s.ID]; ok && s.Title != "" {
 				out.Sessions[i].Title = s.Title
 			}
@@ -485,6 +540,11 @@ func contextRoutes(r *http.Request, days int) []gateway.Route {
 				out = append(out, x)
 			}
 		}
+	}
+	// a group magpie found by the id agents pick it by (publicRoute)
+	pub := publicRefs()
+	for i := range out {
+		out[i].Model = pub(out[i].Model)
 	}
 	return out
 }

@@ -57,7 +57,7 @@ func askClaude(ctx context.Context, configDir, model string) error {
 	cmd.Env = binary.env(env, configDir)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
-	runErr := runClaudeTree(cmd)
+	runErr := runClaudeTree(ctx, cmd, "a Claude Code test on "+model)
 	if res, ok := claudeResult(out.Bytes()); ok && res.IsError {
 		return errors.New("Claude Code: " + clip(res.Result))
 	}
@@ -112,7 +112,11 @@ func claudeUsage(ctx context.Context, configDir string) (string, error) {
 	cmd.Env = binary.env(env, configDir)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
-	runErr := runClaudeTree(cmd)
+	runErr := runClaudeTree(ctx, cmd, "a Claude Code /usage read")
+	var full *claudeFull
+	if errors.As(runErr, &full) {
+		return "", runErr
+	}
 	if res, ok := claudeResult(out.Bytes()); ok {
 		if res.IsError {
 			return "", errors.New("Claude Code: " + clip(res.Result))
@@ -136,7 +140,12 @@ func claudeUsage(ctx context.Context, configDir string) (string, error) {
 // (#1894). In a tree, a job on Windows and a session elsewhere, what is
 // left once the head is gone is ended with it, and on Windows when magpie
 // exits mid-run.
-func runClaudeTree(cmd *exec.Cmd) error {
+func runClaudeTree(ctx context.Context, cmd *exec.Cmd, what string) error {
+	room, err := claudeRoom.take(ctx, what)
+	if err != nil {
+		return err
+	}
+	defer room(false)
 	t, err := proc.StartTree(cmd)
 	if err != nil {
 		return err

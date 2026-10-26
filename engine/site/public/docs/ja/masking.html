@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>プライバシーマスキング · magpie ドキュメント</title>
+<meta name="description" content="magpie のローカルなプライバシーマスキングの使い方：リクエストがコンピュータを出る前に何をマスクするか、応答でどう戻るか、効いているかの確かめ方、そして制限。">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#fafafa">
+<script>
+(() => {
+  let mode = "system";
+  try { mode = localStorage.getItem("theme") || "system"; } catch {}
+  const q = matchMedia("(prefers-color-scheme: dark)");
+  const apply = () => {
+    const t = mode === "system" ? (q.matches ? "dark" : "light") : mode;
+    document.documentElement.dataset.theme = t;
+    document.querySelector('meta[name="theme-color"]').content = t === "dark" ? "#0b0b0c" : "#fafafa";
+    document.querySelectorAll("button.theme").forEach((b) => { b.dataset.mode = mode; b.title = "Theme: " + mode; });
+  };
+  q.addEventListener("change", () => mode === "system" && apply());
+  window.setTheme = (m) => { mode = m; try { m === "system" ? localStorage.removeItem("theme") : localStorage.setItem("theme", m); } catch {} apply(); };
+  window.themeMode = () => mode;
+  apply();
+})();
+</script>
+<script>try{if(/Linux/.test(navigator.userAgent)&&!/Android/.test(navigator.userAgent)||localStorage.getItem("omarchy")||/[?&]omarchy=/.test(location.search))document.write('<script src="/omarchy.js"><\/script>')}catch(e){}</script>
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="/img/icon-256.png">
+<link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/masking">
+<link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/masking">
+<link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/masking">
+<link rel="stylesheet" href="/docs.css">
+<meta property="og:title" content="プライバシーマスキング">
+<meta property="og:description" content="キー、パスワード、個人情報をコンピュータに留める：送る前にマスクし、応答で元に戻します。">
+<meta property="og:image" content="https://usemagpie.ai/img/og.png">
+<meta property="og:url" content="https://usemagpie.ai/docs/ja/masking">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="brand" href="/ja/"><img class="bird" src="/img/magpie-small.svg" alt="">magpie <small>ドキュメント</small></a>
+  <div class="links">
+    <a href="/ja/">ホーム</a>
+    <a href="/docs/ja/start">はじめに</a>
+    <a href="/docs/ja/intent">インテントルーティング</a>
+    <a href="/docs/ja/plugins">プラグイン</a>
+    <a class="toc-only" href="/docs/ja/remote">リモート magpie</a>
+    <a class="toc-only" href="/docs/ja/docker">Docker</a>
+    <a class="toc-only" href="/docs/ja/privacy">プライバシー</a>
+    <a class="toc-only" href="/docs/ja/masking">プライバシーマスキング</a>
+    <a href="/docs/ja/import">magpie に追加</a>
+    <a href="/docs/integrate">アプリ連携</a>
+    <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
+  </div>
+  <div class="langs">
+    <button class="icon-btn lang" type="button" aria-label="言語" title="言語" aria-haspopup="true" aria-expanded="false" aria-controls="langs"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M1.75 8h12.5M8 1.75c1.7 1.75 2.55 3.83 2.55 6.25S9.7 12.5 8 14.25M8 1.75C6.3 3.5 5.45 5.58 5.45 8S6.3 12.5 8 14.25"/></svg></button>
+    <div class="lang-menu" id="langs" hidden>
+      <a href="/docs/masking" hreflang="en" lang="en">English</a>
+      <a href="/docs/zh/masking" hreflang="zh" lang="zh">中文</a>
+      <a href="/docs/ja/masking" hreflang="ja" lang="ja">日本語</a>
+    </div>
+  </div>
+  <a class="icon-btn" href="https://discord.gg/vGSnD3ZKQF" aria-label="Discord の magpie" title="Discord に参加"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg></a>
+  <a class="icon-btn" href="https://github.com/yetone/magpie" aria-label="GitHub の magpie" title="GitHub のソースコード"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></a>
+  <button class="icon-btn theme" type="button" aria-label="Theme" title="Theme: system"><svg class="i-system" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.75" y="2.75" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11.25V14"/></svg><svg class="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1 1M12 12l1 1M3 13l1-1M12 4l1-1"/></svg><svg class="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7Z"/></svg></button>
+  <a class="btn small" href="/#get">ダウンロード</a>
+</div></nav>
+
+<main class="wrap doc">
+  <aside class="toc">
+    <p>プライバシーマスキング</p>
+    <a href="#overview">概要</a>
+    <a href="#on">オンにする</a>
+    <a href="#what">マスクされるもの</a>
+    <a href="#example">例</a>
+    <a href="#check">効いているか確かめる</a>
+    <a href="#found">値が見つかったとき</a>
+    <a href="#limits">対象外のものと制限</a>
+  </aside>
+
+  <article>
+    <p class="eyebrow" id="overview">ドキュメント · プライバシーマスキング</p>
+    <h1>プライバシーマスキング</h1>
+    <p class="lede">magpie は、エージェントが送る内容をこのコンピュータから出る前にマスクできます。API キー、パスワード、トークン、そして選べばメールアドレス、電話番号、自分で決めた語が、<code>{{API_KEY_es6eu6jk}}</code> のようなプレースホルダーとしてベンダーに送られます。応答の中のプレースホルダーは元の値に戻るので、エージェントとファイルには本物の値が残り、ベンダーには見えません。処理はこのコンピュータの magpie のゲートウェイで行われ、<b>既定ではオフ</b>です。</p>
+
+    <div class="callout"><b>magpie を通る内容だけが対象です。</b><a href="/docs/ja/start">magpie に接続した</a>エージェントはゲートウェイ経由でリクエストを送り、どのプロバイダやアカウントが答えてもマスクされます。magpie を通さずベンダーに直接送るエージェントは対象外です。</div>
+
+    <h2 id="on"><a class="anchor" href="#on">オンにする</a></h2>
+    <ol class="steps">
+      <li><b>ページを開く</b><span class="ui">設定</span> → <span class="ui">プライバシー</span> を開きます。</li>
+      <li><b>シークレットをマスク</b><span class="ui">マスクするもの</span> の <span class="ui">シークレットをマスク</span> を <span class="ui">オン</span> にします。API キー、秘密鍵、トークン、パスワードが対象です。</li>
+      <li><b>必要なら個人情報も</b><span class="ui">個人情報をマスク</span> を <span class="ui">オン</span> にすると、メールアドレス、電話番号、ID 番号、銀行カード番号もマスクされます。オンにすると、その下に個人情報の種類ごとのスイッチが並びます。</li>
+      <li><b>自分の語</b><span class="ui">マスクする語</span> に、ベンダーに見せたくない名前、コードネーム、ホスト名をカンマ区切りで入れます。<span class="ui">マスクする語の大文字・小文字を区別しない</span> をオンにすると、<em>Nightjar</em> で <em>NIGHTJAR</em> もマスクされます。magpie が知らないシークレット（自分のゲートウェイのキーなど）は <span class="ui">マスクルール</span> に、先頭の文字列か正規表現で追加します。</li>
+      <li><b>試す</b><span class="ui">試す</span> にテキストを貼ると、ベンダーが実際に受け取る内容が表示されます。貼った内容は保存されません。</li>
+    </ol>
+    <p>変更は次のリクエストから効き、再起動もエージェント側の変更もいりません。実際にマスクするのは組み込みプラグイン <span class="ui">プライバシーマスキング</span>（<code>redact</code>、<span class="ui">設定</span> → <span class="ui">プラグイン</span>）で、何かのマスクが求められている間は常にオンです。</p>
+    <p>専用の CLI コマンドはありません。ウィンドウがないとき（<code>magpie serve</code>、<a href="/docs/ja/docker">Docker</a>）は <code>magpie web</code> で同じページを開くか、<code>~/.config/magpie/settings.json</code>（Docker では <code>/config/magpie/settings.json</code>）に書きます。ファイルはリクエストごとに読み直されます。</p>
+    <div class="code">
+      <span class="lang">settings.json</span>
+      <button class="copy" data-copy="ex-settings">コピー</button>
+      <pre id="ex-settings">{
+  <span class="s">"redact"</span>: true,
+  <span class="s">"redactPersonal"</span>: true,
+  <span class="s">"redactWords"</span>: [<span class="s">"Nightjar"</span>, <span class="s">"db.acme-corp.cn"</span>]
+}</pre>
+    </div>
+
+    <h2 id="what"><a class="anchor" href="#what">マスクされるもの</a></h2>
+    <div class="table-wrap"><table>
+      <tr><th>スイッチ</th><th>見つけるもの</th></tr>
+      <tr><td><span class="ui">シークレットをマスク</span></td><td>秘密鍵のブロック（<code>-----BEGIN … PRIVATE KEY-----</code>）。形で見分ける API キー：<code>sk-…</code>（OpenAI、Anthropic、OpenRouter）、<code>ghp_</code>/<code>github_pat_</code>、<code>glpat-</code>、<code>AIza…</code>、<code>xox…-</code>、<code>sk_live_</code>、<code>AKIA</code>/<code>ASIA</code>、<code>hf_</code>、<code>gsk_</code>、<code>xai-</code>、<code>npm_</code>、<code>pypi-</code>、<code>dop_v1_</code>、<code>SG.</code>、それに <code>oc_sk_…</code> のような中継サービスのキー。JWT。<code>user:password@host</code> のパスワード。<code>.env</code> や設定ファイルでシークレットの名前が付いたフィールドの値：<code>DB_PASSWORD=…</code>、<code>api_key: …</code>、<code>client_secret</code>、<code>token</code>、<code>credential</code>。それと自分の <span class="ui">マスクルール</span>。</td></tr>
+      <tr><td><span class="ui">個人情報をマスク</span></td><td>メールアドレス、中国本土の携帯番号、チェックサムの合う中国の身分証番号と銀行カード番号。既定でオンのもの：米国の社会保障番号、パスポート番号（<em>passport</em>、护照、パスポートの後）、IBAN、誕生日（<em>birthday</em>、<em>DOB</em>、生日の近くにある、一年以上前の日付。今日の日付はそのまま）、MAC アドレス、シリアル番号（<em>S/N</em> の後）。エージェントがほぼ毎回送るので、自分でオンにするまでオフのもの：ホームフォルダのユーザー名、ユーザー名とコンピュータ名（<code>user@host</code>）、パブリック IP アドレス、クラウドストレージのバケット。</td></tr>
+      <tr><td><span class="ui">マスクする語</span></td><td>入れた語そのままを <code>{{TERM_…}}</code> に。</td></tr>
+      <tr><td><span class="ui">ローカルモデルで検出</span></td><td><span class="ui">検出方法</span> の中にあります。このコンピュータで動くモデルが、ルールでは見つからない自由文中の名前や住所を見つけます。<span class="ui">シークレットをマスク</span> か <span class="ui">個人情報をマスク</span> がオンのときに使え、見つけたものは同じスイッチに従います。横のメニューでモデルを選べます：AstrLink Guard（中国語と英語、39 MB のダウンロード、コードでの誤検出が少ない。既定）か OpenAI の Privacy Filter（1.6 GB、GPU を使える、コード中の普通の値も多く隠す）。</td></tr>
+    </table></div>
+    <p>プレースホルダーは「種類 + 鍵付きハッシュの 8 文字」です。同じ値はいつも同じプレースホルダーになるので、会話は毎ターン同じに読め、ベンダーのプロンプトキャッシュも有効なままです。値はメモリにだけ置かれます。</p>
+
+    <h2 id="example"><a class="anchor" href="#example">例</a></h2>
+    <p><span class="ui">シークレットをマスク</span> と <span class="ui">個人情報をマスク</span> をオンにし、<span class="ui">マスクする語</span> に <em>Nightjar</em> を入れた状態で、エージェントがこう送ったとします。</p>
+    <div class="code">
+      <span class="lang">エージェントが送る内容</span>
+      <pre>Deploy Nightjar with OPENAI_API_KEY=sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd, then mail li.wei@acme-corp.cn or call 13800138000.</pre>
+    </div>
+    <div class="code">
+      <span class="lang">ベンダーが受け取る内容</span>
+      <pre>Deploy {{TERM_5hmsrhdc}} with OPENAI_API_KEY={{API_KEY_srhjgvja}}, then mail {{EMAIL_eh5um6mb}} or call {{PHONE_uf7iy2qq}}.</pre>
+    </div>
+    <p>モデルが <em>「.env の OPENAI_API_KEY を {{API_KEY_srhjgvja}} にしました」</em> と答えると、エージェントにはストリームのテキストでもツール呼び出しの引数でも本物のキーが届き、書き込むファイルにも本物のキーが入ります。モデルが少し書き換えたプレースホルダー（波括弧の中の空白、大文字・小文字の違い）も元に戻ります。</p>
+
+    <h2 id="check"><a class="anchor" href="#check">効いているか確かめる</a></h2>
+    <ul>
+      <li><b>事前に：</b><span class="ui">設定</span> → <span class="ui">プライバシー</span> の <span class="ui">試す</span> が、ベンダーが受け取るテキストと各値の種類を表示します。</li>
+      <li><b>リクエストごとに：</b><span class="ui">ゲートウェイ</span> ページの最近の呼び出しと <span class="ui">ルーティング</span> のログで、マスクされたリクエストに盾のバッジと件数が付きます。ポインタを合わせると種類が、クリックするとそのリクエストの記録が開きます。</li>
+      <li><b>期間で：</b><span class="ui">観測</span> → <span class="ui">マスク</span>（プライバシーページの <span class="ui">マスクの記録</span> からも開けます）が、7 日間または 30 日間にマスクした値を種類、エージェント、プロバイダ別に示し、各リクエストがベンダーにどう見えたかをプレースホルダーに印を付けて表示します。</li>
+    </ul>
+    <p>記録は <code>~/.config/magpie/masking</code> に 30 日間残ります。エージェント、プロバイダ、モデル、各プレースホルダーの種類、長さ、先頭の数文字だけで、値そのものは残りません。</p>
+
+    <h2 id="found"><a class="anchor" href="#found">値が見つかったとき</a></h2>
+    <p><span class="ui">値が見つかったとき</span> で、種類ごとに選べます。</p>
+    <ul>
+      <li><span class="ui">マスク</span>（既定）：プレースホルダーにして送ります。</li>
+      <li><span class="ui">警告</span>：そのまま送り、バッジが琥珀色で数えます。</li>
+      <li><span class="ui">ブロック</span>：リクエストを止め、400 を返します：<em>“magpie held this request back: Settings › Privacy blocks API_KEY, and it has one (sk-…, 33 characters). Nothing was sent.”</em> メッセージに値は含まれません。</li>
+    </ul>
+    <p>タスクでそのまま使う必要のある値（チームのアドレス、テスト用のキー）は <span class="ui">マスクしない</span> に入れます。値全体が一致すれば、そのまま送られます。</p>
+
+    <h2 id="limits"><a class="anchor" href="#limits">対象外のものと制限</a></h2>
+    <ul>
+      <li><b>思考はベンダーが書いたまま。</b>署名付きの thinking ブロック、Gemini の thoughts、Responses の暗号化された推論はベンダーが署名したものなので、署名が合うよう変えずに送り返します。中で置き換えるのは、リクエストの他の場所ですでにマスクした値だけです。</li>
+      <li><b>ID とツール定義はそのまま：</b>モデル ID、メッセージや呼び出しの ID、UUID、ツール名、MCP サーバー名、ツールのスキーマ（説明文はマスクされます）。ベンダーやツールが検証できるようにするためです。</li>
+      <li><b>画像とファイルのデータはそのまま送られます。</b>スクリーンショット内の文字はマスクされません。</li>
+      <li><b>動かなければ送りません。</b>マスクがオンなのに動かないとき（<span class="ui">プライバシーマスキング</span> プラグインを手で止めた、ローカルモデルがオンなのに応答しない）、リクエストは何も送らなかったことを示す 503 になります。マスクなしで送ることはありません。</li>
+      <li><b>ローカルモデルは外せます。</b>すべてのアドレスがこのコンピュータかローカルネットワーク上にあるプロバイダ（Ollama、LM Studio）は、<span class="ui">リクエストをマスクしない</span> でそのまま送れます。CLI では <code>magpie provider set ollama unmasked=yes</code>。ログにはマスク後の内容が残ります。</li>
+      <li><b>モデルにはプレースホルダーしか見えません。</b>マスクされた値を読んだり推論したりはできず、受け渡すだけです。モデルが読む必要のある値は <span class="ui">マスクしない</span> へ。</li>
+      <li><b>ルールは形で見つけます。</b>他の国の形式の電話番号や自由文中の名前には、<span class="ui">ローカルモデルで検出</span>、または自分の <span class="ui">マスクする語</span> と <span class="ui">マスクルール</span> が必要です。まず自分のテキストを <span class="ui">試す</span> で確かめてください。</li>
+    </ul>
+    <p>magpie が自分で送るものは <a href="/docs/ja/privacy">プライバシー</a> を参照してください。コードは <a href="https://github.com/yetone/magpie/tree/main/internal/redact">internal/redact</a> と <a href="https://github.com/yetone/magpie/blob/main/internal/masking/masking.go">internal/masking</a> です。</p>
+  </article>
+</main>
+
+<footer><div class="wrap">
+  <span>© 2026 magpie · MIT</span>
+  <div class="links">
+    <a href="/ja/">ホーム</a>
+    <a href="/docs/ja/start">はじめに</a>
+    <a href="/docs/ja/intent">インテントルーティング</a>
+    <a href="/docs/ja/plugins">プラグイン</a>
+    <a href="/docs/ja/remote">リモート magpie</a>
+    <a href="/docs/ja/docker">Docker</a>
+    <a href="/docs/ja/privacy">プライバシー</a>
+    <a href="/docs/ja/masking">プライバシーマスキング</a>
+    <a href="/docs/ja/import">magpie に追加</a>
+    <a href="/docs/integrate">アプリ連携</a>
+    <a href="https://github.com/yetone/magpie">GitHub</a>
+    <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
+  </div>
+</div></footer>
+
+<script>
+(() => {
+  const next = { system: "light", light: "dark", dark: "system" };
+  document.querySelectorAll("button.theme").forEach((b) => {
+    b.dataset.mode = themeMode();
+    b.title = "Theme: " + themeMode();
+    b.addEventListener("click", () => setTheme(next[themeMode()]));
+  });
+
+  document.querySelectorAll(".copy").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
+      b.textContent = "コピーしました"; setTimeout(() => (b.textContent = "コピー"), 1400);
+    } catch {}
+  }));
+})();
+</script>
+<script src="/docs.js"></script>
+</body>
+</html>

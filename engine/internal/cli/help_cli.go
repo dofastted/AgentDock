@@ -37,6 +37,9 @@ func helpFor(args []string) string {
 	case "-h", "--help", "help":
 		return usage
 	case "model":
+		if len(args) > 1 && (args[1] == "spec" || args[1] == "specs") {
+			return specUsage
+		}
 		return modelUsage
 	case "group", "groups":
 		if len(args) > 1 && (args[1] == "rule" || args[1] == "rules") {
@@ -55,10 +58,14 @@ func helpFor(args []string) string {
 		return heapUsage
 	case "cpu":
 		return cpuUsage
+	case "goroutines":
+		return goroutinesUsage
 	case "sessions":
 		return sessionsUsage
 	case "search":
 		return searchUsage
+	case "tool", "tools":
+		return toolUsage
 	case "visible":
 		return visibleUsage
 	case "webdav", "dav":

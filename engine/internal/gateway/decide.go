@@ -350,10 +350,23 @@ func (s *Server) jevLevelled(ctx context.Context, p provider.Provider, model str
 	return l, nil
 }
 
+// errNoAnswer is a System One call the classifier's wait cut off; askJev
+// says which provider and how long it was given.
+var errNoAnswer = errors.New("no answer in the classifier's wait")
+
 // askJev asks a decision provider's model through its System One API.
-func (s *Server) askJev(p provider.Provider, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
-	defer cancel()
+func (s *Server) askJev(p provider.Provider, model string, intents []string, prev before, effort bool, text string) (v verdict, err error) {
+	wait := classifyTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer func() {
+		// only a call cut off by the wait is reworded: a refusal or an
+		// answer read as the wait ran out keeps its own type, which
+		// askDecideTries rests the account by
+		if errors.Is(err, errNoAnswer) {
+			err = fmt.Errorf("%s gave no answer in %s", p.Name, wait)
+		}
+		cancel()
+	}()
 	if model == "" {
 		model = p.Jev()
 	}
@@ -363,7 +376,7 @@ func (s *Server) askJev(p provider.Provider, model string, intents []string, pre
 	// remote Jev is none of those members
 	if !p.SkipsRedaction() {
 		var err error
-		if text, prev.User, prev.Reply, err = maskedState(text, prev.User, prev.Reply); err != nil {
+		if text, prev.User, prev.Reply, err = maskedState(ctx, text, prev.User, prev.Reply); err != nil {
 			return verdict{}, err // fails closed: never sent unmasked
 		}
 	}
@@ -382,18 +395,21 @@ func (s *Server) askJev(p provider.Provider, model string, intents []string, pre
 }
 
 // maskedState masks what Jev is told of a turn, each as maskedText does.
-func maskedState(text, user, reply string) (string, string, string, error) {
+func maskedState(ctx context.Context, text, user, reply string) (string, string, string, error) {
 	out := [3]string{text, user, reply}
+	var all maskHits
 	for i, v := range out {
 		if v == "" {
 			continue
 		}
-		m, _, err := maskedText(v)
+		_, m, h, err := maskTextHits(ctx, v)
 		if err != nil {
 			return "", "", "", err
 		}
 		out[i] = m
+		all.add(h)
 	}
+	noteMasked(nil, "decide", all, strings.Join(out[:], "\n"), 0, "", "")
 	return out[0], out[1], out[2], nil
 }
 
@@ -405,7 +421,7 @@ func (s *Server) systemOne(ctx context.Context, p provider.Provider, model strin
 	status, b, header, err := s.postDecide(ctx, p, model, body)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("%s gave no answer in %s", p.Name, classifyTimeout)
+			return nil, errNoAnswer
 		}
 		return nil, err
 	}

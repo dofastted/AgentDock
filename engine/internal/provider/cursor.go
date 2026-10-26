@@ -56,7 +56,29 @@ func isCursorAgent(path string) bool {
 	return err == nil && strings.Contains(real, "cursor-agent")
 }
 
-var cursorStatus = &cliIdentity{name: "cursor", exe: func() string { return CursorExecutable() }, ask: askCursorStatus}
+var cursorStatus = &cliIdentity{name: "cursor", exe: func() string { return CursorExecutable() }, ask: askCursorStatus, mark: cursorSignInMark}
+
+// cursorSignInMark is who cli-config.json says signed in, its authInfo, as
+// the mark cliIdentity asks again on a change of: about rewrites the file
+// on every run, so its size and time can't be the mark. "" when it can't
+// be read.
+func cursorSignInMark() string {
+	home, _ := os.UserHomeDir()
+	b, err := os.ReadFile(filepath.Join(home, ".cursor", "cli-config.json"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "none"
+		}
+		return ""
+	}
+	var c struct {
+		AuthInfo json.RawMessage `json:"authInfo"`
+	}
+	if json.Unmarshal(b, &c) != nil {
+		return "" // half-written: asked
+	}
+	return "auth:" + string(c.AuthInfo)
+}
 
 // cursorIdentity is who Cursor's CLI says is signed in; see cliIdentity.
 func cursorIdentity() (user, plan string, ok bool) {

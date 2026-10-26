@@ -26,7 +26,7 @@ const PLUGINS = [
   { id: "middleware", name: "JS gateway plugins", sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers", one: "1 gateway plugin on", many: "{n} gateway plugins on" },
   { id: "otel", name: "Observability", sub: "Send each request's traces and metrics to an OpenTelemetry collector, such as Langfuse", one: "Sending to a collector", many: "Sending to a collector" },
   { id: "redact", name: "Privacy masking", sub: "Secrets, personal data and your own words go to vendors as placeholders, and come back as they were", one: "Masking is on", many: "Masking is on" },
-  { id: "rotation", name: "Routing strategies", sub: "The routings besides Smart: In order, In turn, Least used first, Weekly pace and By weight", one: "1 provider or group routed so", many: "{n} providers and groups routed so" },
+  { id: "rotation", name: "Routing strategies", sub: "The routings besides Smart: In order, In turn, Least used first, Weekly pace, By weight, Free first and Speed first", one: "1 provider or group routed so", many: "{n} providers and groups routed so" },
   { id: "routing", name: "Routing", sub: "Each request as the gateway routes it, the accounts it weighed and what each answered, and your routing groups", one: "1 group in use", many: "{n} groups in use" },
   { id: "search", name: "Web search", sub: "Models that can't search the web search with a provider that can, or a search API", one: "1 search source set up", many: "{n} search sources set up" },
   { id: "sessions", name: "Sessions", sub: "Your agents' past conversations: read, search, resume and export them", one: "Recording gateway conversations", many: "Recording gateway conversations" },
@@ -111,7 +111,8 @@ function server(lang, posts, broken) {
 // the pages' tabs shown, the page shown
 const tabs = (page) => page.evaluate(() => [...document.querySelectorAll("#nav button[data-view]")].filter((b) => !b.hidden && b.offsetParent && getComputedStyle(b).display !== "none").map((b) => b.dataset.view));
 const viewShown = (page) => page.evaluate(() => [...document.querySelectorAll("main.view")].filter((v) => !v.hidden).map((v) => v.id));
-const KEPT = ["agents", "providers", "routing", "gateway", "usage", "plugins"];
+// the tabs with Sessions and Library off, the preset's masking on
+const KEPT = ["agents", "providers", "routing", "gateway", "usage", "masking", "plugins"];
 const rowsOf = (page) => page.evaluate(() => [...document.querySelectorAll("#builtinList .feat-row")].map((r) => {
   const b = r.querySelector('[role="switch"]');
   return { id: r.dataset.id, name: r.querySelector(".name").textContent, on: b.getAttribute("aria-checked"), disabled: b.disabled, why: r.querySelector(".feat-why")?.textContent || "" };
@@ -206,20 +207,29 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(posts, [["library", true]], where);
         if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...KEPT.slice(1)], `${where}: Library back`);
         assert.deepEqual(await viewShown(page), ["view-plugins"], `${where}: Plugins stays`);
+        // Observability's, Routing's and Usage's rows can be below the fold:
+        // the reader scrolls to them with the wheel, since the page puts back
+        // a scroll that isn't the reader's (scrollOnPurpose), a click's own
+        // too. The wheel turns over what shows of the list (its top may have
+        // scrolled away, and a wheel there scrolls nothing), as often as the
+        // row needs: at 420 the rows wrap and Usage's is more than one turn
+        // down
+        const below = (id) => page.evaluate((id) => { const r = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect(), foot = document.querySelector("footer.foot"); return r.bottom > Math.min(document.getElementById("view-plugins").getBoundingClientRect().bottom, foot && foot.offsetParent ? foot.getBoundingClientRect().top : Infinity); }, id);
+        const wheelTo = async (id) => {
+          for (let i = 0; i < 5 && await below(id); i++) {
+            const at = await page.evaluate(() => { const l = document.getElementById("builtinList").getBoundingClientRect(), v = document.getElementById("view-plugins").getBoundingClientRect(); return { x: l.x + 20, y: (Math.max(l.top, v.top) + Math.min(l.bottom, v.bottom)) / 2 }; });
+            await page.mouse.move(at.x, at.y);
+            await page.mouse.wheel(0, 400);
+            await page.waitForFunction(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))));
+          }
+          assert.equal(await below(id), false, `${where}: ${id}'s row reached by the wheel`);
+        };
         // and Observability: its Settings tab is back
+        await wheelTo("otel");
         await page.locator('#builtinList [data-id="otel"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="otel"] [aria-checked="true"]');
         assert.ok(await page.locator("#setTab-otel").evaluate((b) => getComputedStyle(b).display !== "none"), `${where}: Observability back`);
         // Routing switched off: its tab and the panel's go, the page stays.
-        // Its row and Usage's can be below the fold: the reader scrolls to
-        // them with the wheel, since the page puts back a scroll that isn't
-        // the reader's (scrollOnPurpose), a click's own too
-        const wheelTo = async (id) => {
-          const list = await page.locator("#builtinList").boundingBox();
-          await page.mouse.move(list.x + 20, list.y + 20);
-          await page.mouse.wheel(0, 400);
-          await page.waitForFunction((id) => { const r = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect(), foot = document.querySelector("footer.foot"); return r.bottom <= Math.min(document.getElementById("view-plugins").getBoundingClientRect().bottom, foot && foot.offsetParent ? foot.getBoundingClientRect().top : Infinity); }, id);
-        };
         await wheelTo("routing");
         await page.locator('#builtinList [data-id="routing"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="routing"] [aria-checked="false"]');

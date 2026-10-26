@@ -34,3 +34,27 @@ func TestRouteKeptGrokServingNameNotSwapped(t *testing.T) {
 		t.Fatalf("a real swap was cleared: %+v", r)
 	}
 }
+
+// A route kept with a try marked swapped for ClinePass's
+// cline-pass/deepseek-v4.1-flash-1017 answered as
+// vmc/deepseek-v4p1-flash-1017 (its virtual model config's name, zRain on
+// Discord) is read as not swapped; deepseek-v4-pro answered by
+// vmc/deepseek-v4p1-flash stays swapped.
+func TestRouteKeptClineServingNameNotSwapped(t *testing.T) {
+	r := &Route{Swapped: true, Served: "vmc/deepseek-v4p1-flash-1017", Tries: []Try{{Model: "cline-pass/deepseek-v4.1-flash-1017", Served: "vmc/deepseek-v4p1-flash-1017", Swapped: true, Upstream: "deepseek"}}}
+	r.routedAgain()
+	if r.Swapped || r.Tries[0].Swapped {
+		t.Fatalf("still swapped: %+v", r)
+	}
+	r = &Route{Swapped: true, Served: "vmc/deepseek-v4p1-flash", Tries: []Try{{Model: "cline-pass/deepseek-v4-pro", Served: "vmc/deepseek-v4p1-flash", Swapped: true}}}
+	r.routedAgain()
+	if !r.Swapped || !r.Tries[0].Swapped {
+		t.Fatalf("a real swap was cleared: %+v", r)
+	}
+	// a contributor-fallbacks config is another deployment (plugins#351)
+	r = &Route{Swapped: true, Served: "vmc/deepseek-v4p1-flash-1017-contributor-fallbacks", Tries: []Try{{Model: "cline-pass/deepseek-v4.1-flash-1017", Served: "vmc/deepseek-v4p1-flash-1017-contributor-fallbacks", Swapped: true}}}
+	r.routedAgain()
+	if !r.Swapped || !r.Tries[0].Swapped {
+		t.Fatalf("a contributor-fallbacks route was cleared: %+v", r)
+	}
+}

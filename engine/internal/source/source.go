@@ -26,6 +26,7 @@ const (
 	// plugin list at jsDelivr, both copies of the very files
 	bunMirror  = "https://registry.npmmirror.com/-/binary/bun"
 	listMirror = "https://cdn.jsdelivr.net/gh/magpie-community/plugins@"
+	hfMirror   = "https://hf-mirror.com"
 )
 
 // NPMMirror is npm's registry in China, npmmirror.
@@ -39,7 +40,7 @@ var China = func() bool { return settings.Load().ChinaMirror }
 // "" when there is none. Only mirrors that serve the same bytes as the
 // official address: npmmirror for npm's registry and Bun's releases (whose
 // zips are checked against Bun's checksums all the same), jsDelivr for the
-// community repo's plugin list. Never a proxy such as gh-proxy, which
+// community repo's plugin list, hf-mirror for the masking models. Never a proxy such as gh-proxy, which
 // would hand magpie whatever it liked.
 func chinaFirst(raw string) string {
 	u, err := url.Parse(raw)
@@ -52,6 +53,15 @@ func chinaFirst(raw string) string {
 	case "github.com":
 		if rest, ok := strings.CutPrefix(u.EscapedPath(), "/oven-sh/bun/releases/download/"); ok && rest != "" {
 			return bunMirror + "/" + rest
+		}
+	case "huggingface.co":
+		// the local masking models (internal/pii), at the revision their
+		// sha256 were pinned at: hf-mirror serves Hugging Face's files,
+		// and what it serves is checked against those pins
+		for _, repo := range []string{"/LocalAI-io/privacy-filter-GGUF/resolve/", "/QuantumNous/astrlink-guard/resolve/"} {
+			if strings.HasPrefix(u.EscapedPath(), repo) && u.RawQuery == "" {
+				return hfMirror + u.EscapedPath()
+			}
 		}
 	case "raw.githubusercontent.com":
 		// /magpie-community/plugins/<branch>/<path>

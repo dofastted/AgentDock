@@ -86,6 +86,7 @@ type aRequest struct {
 		Description  string          `json:"description,omitempty"`
 		InputSchema  json.RawMessage `json:"input_schema,omitempty"`
 		CacheControl json.RawMessage `json:"cache_control,omitempty"`
+		DeferLoading bool            `json:"defer_loading,omitempty"`
 	} `json:"tools,omitempty"`
 	ToolChoice *struct {
 		Type                   string `json:"type"`
@@ -118,8 +119,19 @@ func parseAnthropic(body []byte) (*Request, error) {
 }
 
 func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
+	return readAnthropic(body, clientMarks, false)
+}
+
+// readAnthropic is parseAnthropicRequest; for facts (readFacts) it leaves
+// out what they never read, as readChat does: the assistant's blocks, the
+// tools' outputs, and the copies of raw values a parse kept would need.
+func readAnthropic(body []byte, clientMarks, facts bool) (*Request, error) {
+	decode := decodeJSON
+	if facts {
+		decode = decodeJSONView
+	}
 	var a aRequest
-	if err := decodeJSON(body, &a); err != nil {
+	if err := decode(body, &a); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
 	r := &Request{Model: a.Model, System: stringOrText(a.System), MaxTokens: a.MaxTokens,
@@ -143,6 +155,10 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 	}
 	for mi, m := range a.Messages {
 		msg := Message{Role: m.Role}
+		if facts && m.Role == "assistant" {
+			r.Messages = append(r.Messages, msg)
+			continue
+		}
 		var s string
 		if decodeJSON(m.Content, &s) == nil {
 			if s != "" {
@@ -150,7 +166,7 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 			}
 		} else {
 			var blocks []aBlock
-			if err := decodeJSON(m.Content, &blocks); err != nil {
+			if err := decode(m.Content, &blocks); err != nil {
 				return nil, fmt.Errorf("invalid message content: %v", err)
 			}
 			var raws []json.RawMessage // each block as the client sent it
@@ -166,8 +182,12 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 				case "tool_use":
 					msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: anthropicInID(b.ID), Name: b.Name, Args: b.Input})
 				case "tool_result":
+					if facts {
+						msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: anthropicInID(b.ToolUseID)})
+						break
+					}
 					out, images := toolOutput(b.Content)
-					msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: anthropicInID(b.ToolUseID), Text: out, Images: images, IsError: b.IsError})
+					msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: anthropicInID(b.ToolUseID), Text: out, Images: images, IsError: b.IsError, Loads: toolRefs(b.Content)})
 				case "thinking":
 					msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: b.Thinking, Signature: b.Signature})
 				case "redacted_thinking":
@@ -218,7 +238,7 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 			// only keeps Anthropic's deferred loading on; never to be called
 			continue
 		}
-		r.Tools = append(r.Tools, Tool{Name: t.Name, Description: t.Description, Schema: t.InputSchema})
+		r.Tools = append(r.Tools, Tool{Name: t.Name, Description: t.Description, Schema: t.InputSchema, Deferred: t.DeferLoading})
 	}
 	if tc := a.ToolChoice; tc != nil {
 		switch tc.Type {
@@ -371,7 +391,7 @@ func withThinkingOnToolTurns(body []byte) []byte {
 		return body
 	}
 	q["messages"], _ = json.Marshal(msgs)
-	nb, err := json.Marshal(q)
+	nb, err := marshalJSON(q)
 	if err != nil {
 		return body
 	}
@@ -426,7 +446,7 @@ func withoutThinkingOff(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	delete(q, "thinking")
-	out, err := json.Marshal(q)
+	out, err := marshalJSON(q)
 	return out, err == nil
 }
 
@@ -758,11 +778,52 @@ func AdaptiveThinking(model string) bool { return adaptiveOnly(model) }
 // effortInOutputConfig is a model that takes how hard it thinks from
 // output_config.effort, beside thinking turned on, as ZCode asks it: Z.ai's
 // GLM-5.2 and GLM-5.3 on their Anthropic endpoints. A budget alone leaves
-// them at their own default.
-var effortInOutputConfig = regexp.MustCompile(`(?i)glm-5\.[23](?:$|[-.:/\[])`)
+// them at their own default. MiniMax's MiniMax-M3.1-Flash and its
+// -Preview, which think at low…max (MiniMax Code's catalog: forced_on),
+// are asked the same way as MiniMax Code asks them: a budget alone gave
+// medium to max one budget under an 8192 cap, so the level was lost
+// (shin4 on plugins#316).
+var effortInOutputConfig = regexp.MustCompile(`(?i)glm-5\.[23](?:$|[-.:/\[])|minimax-m3\.1-flash(?:$|[-.:/\[])`)
+
+// deepseekHost is DeepSeek's own API, whose Anthropic endpoint
+// (api.deepseek.com/anthropic) takes the effort in output_config.
+const deepseekHost = "api.deepseek.com"
+
+// deepseekEfforts are the levels DeepSeek's models think at: its thinking
+// guide maps minimal to low, medium and xhigh to high, and ultra to max.
+// A budget a client sent is fitted to them when the model's own list is
+// unknown, so 32000 (max, as budgetOf gives it) asks max, not xhigh,
+// which DeepSeek would read as high.
+var deepseekEfforts = []string{"low", "high", "max"}
+
+// outputEffortAt is effortInOutputConfig for a model at host: those
+// models anywhere, and every model on DeepSeek's own endpoint. DeepSeek's
+// Anthropic API docs (api-docs.deepseek.com/guides/anthropic_api, read
+// 2026-10-23) list thinking as "Supported (budget_tokens is ignored)" and
+// output_config as "Only effort is supported", and its thinking guide
+// (guides/thinking_mode) names output_config.effort as the Anthropic
+// format's effort control: a budget alone left DSH's low and max at
+// DeepSeek's default, high (#3298). Another host serving a DeepSeek model
+// is not covered by those docs and goes as it did.
+func outputEffortAt(host, model string) bool {
+	return host == deepseekHost || effortInOutputConfig.MatchString(model)
+}
+
+// AdaptiveWithEffort is, for agents told how to ask a model, one of
+// effortInOutputConfig's that takes thinking adaptive with its level in
+// output_config.effort: Z.ai's GLM-5.2 and GLM-5.3 (tried live on GLM-5.3,
+// 10-24: max thought about three times high's). An agent whose budget
+// can't say max (pi-ai clamps it to high's) asks them so. MiniMax's
+// M3.1-Flash isn't, until it is tried (#3496).
+func AdaptiveWithEffort(model string) bool { return glmOutputEffort.MatchString(model) }
+
+// glmOutputEffort is effortInOutputConfig's Z.ai half.
+var glmOutputEffort = regexp.MustCompile(`(?i)glm-5\.[23](?:$|[-.:/\[])`)
 
 // withOutputEffort is body asking, in output_config.effort, for the level
 // of levels nearest the reasoning it asks for; body when it asks for none.
+// Thinking asked for adaptively (DSH asks these models so, its Max not
+// clamped to a high budget) stays adaptive: Z.ai takes it with the level.
 func withOutputEffort(body []byte, levels []string) []byte {
 	e := requestEffort(provider.Anthropic, body)
 	var v struct {
@@ -808,13 +869,14 @@ const interruptedTool = "[The result of this tool call is unavailable: the turn 
 
 // buildAnthropic renders a request for an Anthropic-style upstream.
 func buildAnthropic(r *Request, model string) []byte {
-	return anthropicBody(r, model, false)
+	return anthropicBody(r, model, "", false)
 }
 
 // anthropicBody is buildAnthropic; with replay, for an upstream that wants
 // a turn's thinking back (anthropicReplaysThinking), thinking with no
-// signature goes as its text instead of being left out.
-func anthropicBody(r *Request, model string, replay bool) []byte {
+// signature goes as its text instead of being left out. host is the
+// upstream's (outputEffortAt).
+func anthropicBody(r *Request, model, host string, replay bool) []byte {
 	if r.Format != nil && r.Format.schema() == nil {
 		// output_config.format takes a schema only: any JSON object is
 		// asked for in words
@@ -940,7 +1002,7 @@ func anthropicBody(r *Request, model string, replay bool) []byte {
 			maxTokens = budget + 4096
 		}
 		out["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
-		if r.Effort != "" && effortInOutputConfig.MatchString(model) {
+		if r.Effort != "" && outputEffortAt(host, model) {
 			out["output_config"] = map[string]any{"effort": r.Effort}
 		}
 	} else if r.Temp != nil {
@@ -967,9 +1029,20 @@ func anthropicBody(r *Request, model string, replay bool) []byte {
 		// auto mode's review, which Claude alone does (automode.go)
 		out["safeguards"] = r.Safeguards
 	}
-	if len(r.Tools) > 0 || r.WebSearch {
+	// a history of calls with no tools to go with it, which Anthropic
+	// turns away ("must define tools", undeclared_tools.go): each tool
+	// it called is declared, and none of them may be called
+	rTools := r.Tools
+	stubbed := false
+	if len(rTools) == 0 && !r.WebSearch {
+		for _, n := range historyCallNames(r) {
+			rTools = append(rTools, Tool{Name: n, Description: stubToolDescription})
+			stubbed = true
+		}
+	}
+	if len(rTools) > 0 || r.WebSearch {
 		var tools []map[string]any
-		for _, t := range r.Tools {
+		for _, t := range rTools {
 			schema := t.Schema
 			if len(schema) == 0 {
 				schema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -987,14 +1060,14 @@ func anthropicBody(r *Request, model string, replay bool) []byte {
 		out["tools"] = tools
 		var tc map[string]any
 		switch {
+		case stubbed || r.ToolChoice == "none":
+			tc = map[string]any{"type": "none"}
 		case r.ToolChoice == "auto" || r.ToolChoice == "":
 			if r.Parallel != nil && !*r.Parallel {
 				tc = map[string]any{"type": "auto"}
 			}
 		case r.ToolChoice == "required":
 			tc = map[string]any{"type": "any"}
-		case r.ToolChoice == "none":
-			tc = map[string]any{"type": "none"}
 		case strings.HasPrefix(r.ToolChoice, "name:"):
 			tc = map[string]any{"type": "tool", "name": strings.TrimPrefix(r.ToolChoice, "name:")}
 		}
@@ -1254,7 +1327,8 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		}
 		emit(Event{Kind: KUsage, Usage: ev.Usage.usage(), SafeguardResults: review, StopDetails: stopDetails(ev.Delta.StopDetails)})
 	case "error":
-		emit(Event{Kind: KError, Text: cmp.Or(ev.Error.Message, ev.Error.Type, streamErrorText(data)), Code: refusedCode(data)})
+		code, status, said := filterRefused(data)
+		emit(Event{Kind: KError, Text: cmp.Or(ev.Error.Message, ev.Error.Type, streamErrorText(data)), Code: code, Status: status, Said: said})
 	}
 	return nil
 }
@@ -1268,6 +1342,11 @@ type aUsage struct {
 	// which Anthropic bills apart: 1.25× input for 5 minutes, 2× for an
 	// hour
 	CacheCreation *aCacheCreation `json:"cache_creation,omitempty"`
+	// CacheUnknown: a plugin's usage saying its vendor gave no cache
+	// counts (magpie_cache_unknown), so the zero above is not a miss:
+	// Kiro caches but tells only credits, never tokens (zeewell on X).
+	// It is read, never told: anthropic() leaves it false.
+	CacheUnknown bool `json:"magpie_cache_unknown,omitempty"`
 }
 
 type aCacheCreation struct {
@@ -1276,7 +1355,7 @@ type aCacheCreation struct {
 }
 
 func (u aUsage) usage() Usage {
-	out := Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens}
+	out := Usage{Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CacheReadInputTokens, CacheWrite: u.CacheCreationInputTokens, cacheUnknown: u.CacheUnknown}
 	if c := u.CacheCreation; c != nil {
 		out.cacheCreationReported = true
 		out.cacheCreationHasCounts = c.Ephemeral5m+c.Ephemeral1h > 0
@@ -1340,6 +1419,11 @@ type anthropicEncoder struct {
 	fresh   bool
 	started bool
 	col     collector
+	// cite cuts the text said after a search into lines, each naming a
+	// page found its own block with citations (search_cite.go); cited:
+	// the open text block is such a line's
+	cite  citer
+	cited bool
 }
 
 // anthropicID is a reply's id as Anthropic's API gives one, msg_…: an
@@ -1456,9 +1540,40 @@ func (e *anthropicEncoder) delta(d map[string]any) {
 	e.w.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": e.index, "delta": d})
 }
 
+// sayCited says a line of text after a search (citer): a line that cites
+// a page is a text block of its own, its citations first, as Anthropic's
+// stream gives them (citations_delta); one that cites none goes on in the
+// open text block unless that block cites; the whitespace left at the end
+// (tail) goes on whatever text block is open.
+func (e *anthropicEncoder) sayCited(text string, cites []map[string]any, tail bool) {
+	switch {
+	case len(cites) > 0:
+		e.close()
+		e.openBlock(Text, map[string]any{"text": ""})
+		e.cited = true
+		for _, c := range cites {
+			e.delta(map[string]any{"type": "citations_delta", "citation": c})
+		}
+	case tail && e.open == Text:
+	default:
+		if e.cited {
+			e.close()
+		}
+		e.openBlock(Text, map[string]any{"text": ""})
+		e.cited = false
+	}
+	e.delta(map[string]any{"type": "text_delta", "text": text})
+}
+
 func (e *anthropicEncoder) event(ev Event) {
 	if ev.Kind != KStart && !e.started {
 		e.start(Event{})
+	}
+	switch ev.Kind {
+	case KText, KUsage, KStart, KTextSig, KStop, KAlive:
+	default:
+		// anything else ends the text: its last line is said
+		e.cite.flush(e.sayCited)
 	}
 	switch ev.Kind {
 	case KStart:
@@ -1466,6 +1581,10 @@ func (e *anthropicEncoder) event(ev Event) {
 	case KText:
 		if ev.Text == "" {
 			return
+		}
+		if e.cite.on() {
+			e.cite.feed(ev.Text, e.sayCited)
+			break
 		}
 		e.openBlock(Text, map[string]any{"text": ""})
 		e.delta(map[string]any{"type": "text_delta", "text": ev.Text})
@@ -1519,6 +1638,7 @@ func (e *anthropicEncoder) event(ev Event) {
 		e.index++
 		e.w.event("content_block_start", map[string]any{"type": "content_block_start", "index": e.index,
 			"content_block": searchResultBlock(id, ev.Hits)})
+		e.cite.hits = append(e.cite.hits, ev.Hits...)
 		e.w.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": e.index})
 		e.index++
 	case KError:
@@ -1548,6 +1668,7 @@ func (e *anthropicEncoder) finish() {
 	if !e.started {
 		e.start(Event{})
 	}
+	e.cite.flush(e.sayCited)
 	e.close()
 	res := e.col.finish()
 	delta := map[string]any{"stop_reason": stopToAnthropic(res.Stop), "stop_sequence": nil}
@@ -1566,11 +1687,16 @@ func (e *anthropicEncoder) finish() {
 // renderAnthropic is the non-streaming reply.
 func renderAnthropic(res Result, model string) []byte {
 	content := []any{}
+	var cite citer
 	for _, p := range res.Parts {
 		switch p.Kind {
 		case Text:
 			if p.Text == "" && p.Signature != "" {
 				continue // only Gemini's signature, which is Gemini's
+			}
+			if cite.on() {
+				content = append(content, citedBlocks(&cite, p.Text)...)
+				continue
 			}
 			content = append(content, map[string]any{"type": "text", "text": p.Text})
 		case Thinking:
@@ -1593,6 +1719,7 @@ func renderAnthropic(res Result, model string) []byte {
 			content = append(content,
 				map[string]any{"type": "server_tool_use", "id": id, "name": "web_search", "input": map[string]any{"query": p.Text}},
 				searchResultBlock(id, p.Hits))
+			cite.hits = append(cite.hits, p.Hits...)
 		}
 	}
 	id := anthropicID(res.ID)
@@ -1609,6 +1736,32 @@ func renderAnthropic(res Result, model string) []byte {
 	}
 	b, _ := json.Marshal(reply)
 	return b
+}
+
+// citedBlocks are the text blocks of text said after a search, as the
+// stream's sayCited makes them.
+func citedBlocks(c *citer, text string) []any {
+	var blocks []any
+	var open map[string]any // the last text block, while it may go on
+	cited := false
+	say := func(t string, cites []map[string]any, tail bool) {
+		switch {
+		case len(cites) > 0:
+			open = map[string]any{"type": "text", "text": t, "citations": cites}
+			blocks = append(blocks, open)
+			cited = true
+			return
+		case tail && open != nil, open != nil && !cited:
+			open["text"] = open["text"].(string) + t
+			return
+		}
+		open = map[string]any{"type": "text", "text": t}
+		blocks = append(blocks, open)
+		cited = false
+	}
+	c.feed(text, say)
+	c.flush(say)
+	return blocks
 }
 
 // searchResultBlock is a web_search_tool_result block of the pages a

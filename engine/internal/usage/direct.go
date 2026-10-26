@@ -4,6 +4,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
 )
 
@@ -64,7 +65,7 @@ func directRows(p Period, now time.Time) []Row {
 			}
 		}
 		duplicates := foldCodexRows([]*rowChunk{local})
-		pairs := codexChunkResponsePairs(gateways, []*rowChunk{local}, duplicates)
+		pairs, _ := codexChunkResponsePairs(gateways, []*rowChunk{local}, duplicates)
 		for ref := range matchedBlocks(gateways, []*rowChunk{local}, duplicates, pairs, since, false) {
 			matched[ref.Index] = true
 		}
@@ -92,6 +93,7 @@ func direct(p Period, now time.Time, rows []Row) Summary {
 		}
 		m[k].addRow(r)
 	}
+	alias := provider.UsageAlias() // each row priced by its own id already
 	for _, r := range rows {
 		if r.Source != "log" || r.IsRejected() || r.Time.Before(s.Since) || after(until, r.Time) {
 			continue
@@ -99,7 +101,11 @@ func direct(p Period, now time.Time, rows []Row) Summary {
 		s.Totals.addRow(r)
 		id := ReportedAs(r.Agent)
 		put(agents, id, Group{ID: id}, r)
-		put(models, r.Provider+"/"+r.Model, Group{ID: r.Provider + "/" + r.Model, Provider: r.Provider, Model: r.Model}, r)
+		model := r.Model
+		if alias != nil {
+			model = alias(model)
+		}
+		put(models, r.Provider+"/"+model, Group{ID: r.Provider + "/" + model, Provider: r.Provider, Model: model}, r)
 		if who := r.Account(); who != "" {
 			put(accounts, r.Provider+"@"+who, Group{ID: r.Provider + "@" + who, Provider: r.Provider, Account: who}, r)
 		}

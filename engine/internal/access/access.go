@@ -206,6 +206,12 @@ func List() ([]Key, error) {
 // requests the gateway takes only with a named key; "" while the gateway
 // isn't shared, or that key is off.
 func LANSecret() string {
+	// not shared, the usual case, is told by the settings alone, before
+	// the lock: taken first, every agent's sync (keeping) made and locked
+	// caller-keys.json.lock, ~100 times in a start's first 20s (#1665)
+	if !settings.Load().LAN {
+		return ""
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	s := settings.Load()

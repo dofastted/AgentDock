@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/gateway"
@@ -129,8 +131,59 @@ func isMagpie(v string) bool {
 	if pid, _, ok := strings.Cut(v, "/"); ok && dryProviders[pid] {
 		return true
 	}
-	_, _, ok := provider.Resolve(v)
-	return ok && strings.Contains(v, "/")
+	if !strings.Contains(v, "/") {
+		return false
+	}
+	return magpieRefs.get(v, func() bool {
+		_, _, ok := provider.Resolve(v)
+		return ok
+	})
+}
+
+// magpieRefs keeps isMagpie's answers while provider.StampNow stays the
+// same, for a minute at most. Outside a request that holds the catalog,
+// each Resolve built every provider's entries again: the window's drift
+// poll, every 15s, asked it for each agent's values, ~6 MB a poll (the
+// procmem heap profile: 235 MB of 1.37 GB in 10 minutes of GUI use).
+var magpieRefs stampedRefs
+
+// stampedRefs is a model value → answer, dropped when the stamp moves,
+// after a minute (what the stamp can't see: an account another program
+// signed in to), or once it holds more values than any config has.
+type stampedRefs struct {
+	mu    sync.Mutex
+	stamp provider.Stamp
+	at    time.Time
+	of    map[string]bool
+}
+
+const (
+	stampedRefsFor = time.Minute
+	stampedRefsMax = 4096
+)
+
+func (s *stampedRefs) get(v string, build func() bool) bool {
+	st := provider.StampNow()
+	s.mu.Lock()
+	if s.stamp != st || time.Since(s.at) >= stampedRefsFor || len(s.of) >= stampedRefsMax {
+		s.stamp, s.at, s.of = st, time.Now(), nil
+	}
+	if ok, found := s.of[v]; found {
+		s.mu.Unlock()
+		return ok
+	}
+	s.mu.Unlock()
+	// built from what is there after st was taken: never older than st
+	ok := build()
+	s.mu.Lock()
+	if s.stamp == st {
+		if s.of == nil {
+			s.of = map[string]bool{}
+		}
+		s.of[v] = ok
+	}
+	s.mu.Unlock()
+	return ok
 }
 
 func firstOf(xs []string) string {
@@ -152,6 +205,7 @@ func magpieModels(agent string) []catalog.Model {
 	// a model magpie describes images to takes them (provider.Described)
 	seen := provider.Described != nil && provider.Described()
 	st, find := settings.Load(), provider.GroupFinder()
+	priceOf := provider.EntryPricer(st, find)
 	members := func(id string) []provider.Member {
 		_, ms, _ := find(id)
 		return ms
@@ -164,7 +218,7 @@ func magpieModels(agent string) []catalog.Model {
 		// answers from the settings it is given
 		m.Compact = provider.CompactFor(st, e, find)
 		// what a call costs the user (Pi's cost, #781)
-		if pr, ok := provider.EntryPriceIn(st, find, e); ok {
+		if pr, ok := priceOf(e); ok {
 			m.Price = &pr
 		}
 		if seen && !e.Images {
@@ -188,6 +242,9 @@ func magpieModels(agent string) []catalog.Model {
 		// lists offer them: Fast in the Codex CLI magpie writes
 		// magpie-models.json for (#1530)
 		provider.CodexTiers(&m, e, members)
+		// the gateway paths it goes on untranslated, as /v1/models says
+		// them: what an agent plugin's connect is told (cleary5779)
+		m.Endpoints = provider.NativeEndpoints(e)
 		// Codex's /fast on a ChatGPT account's own GPT model, which
 		// OpenCode has no command for and takes as variants (#2379); a
 		// group is sent fast as the group says, as a fast pick is

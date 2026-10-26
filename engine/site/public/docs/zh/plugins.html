@@ -49,6 +49,7 @@
     <a class="toc-only" href="/docs/zh/remote">远程 magpie</a>
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
+    <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -79,6 +80,7 @@
     <a href="#requests">请求</a>
     <a href="#signin-state">登录状态</a>
     <a href="#usage">用量</a>
+    <a href="#checkin">签到</a>
     <a href="#input">插件能拿到什么</a>
     <a href="#ids">供应商 id</a>
     <a href="#test">测试</a>
@@ -105,6 +107,7 @@
         <li><code>provider.models</code> 列出某个账号有哪些模型。</li>
         <li><code>auth.usage</code> 说明套餐用了多少。这是 magpie 自己的钩子，OpenCode 会忽略它。</li>
         <li><code>auth.refresh</code> 在账号的 token 过期前续期，同一时间只续一次。它也是 magpie 自己的钩子。</li>
+        <li><code>auth.checkin</code> 替账号按下供应商的每日签到。它也是 magpie 自己的 hook。</li>
       </ul>
       agent 用什么 API 发来都可以。网关把请求转成模型使用的 API（chat completions、Responses、Anthropic Messages 或 Gemini），交给插件的 <code>fetch</code>，再把回答流式传回去。</div>
 
@@ -362,7 +365,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     <p>如果失败的原因是登录失效，就抛出带 <code>signIn: "expired"</code> 的错误，这个账号会被标记为需要重新登录（见<a href="#signin-state">登录状态</a>）。</p>
 
     <h2 id="signin"><a class="anchor" href="#signin">登录</a></h2>
-    <p><code>auth</code> 钩子的形式是 <code>{ provider, methods, loader, usage?, refresh?, refreshLead?, icon?, maxConcurrency? }</code>。每个 method 是用户可选的一种登录方式。在应用里它们是按钮；在终端里，<code>magpie plugin login &lt;id&gt; [&lt;method&gt;]</code> 会询问选哪个。</p>
+    <p><code>auth</code> 钩子的形式是 <code>{ provider, methods, loader, usage?, refresh?, refreshLead?, checkin?, icon?, maxConcurrency? }</code>。每个 method 是用户可选的一种登录方式。在应用里它们是按钮；在终端里，<code>magpie plugin login &lt;id&gt; [&lt;method&gt;]</code> 会询问选哪个。</p>
     <h3>API key</h3>
     <div class="code">
       <span class="lang">api 方式</span>
@@ -538,6 +541,32 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     </div>
     <p>时间可以是 ISO 字符串，也可以是以秒或毫秒为单位的时间戳。没有 <code>signIn</code> 时，提示要重新登录的 <code>error</code> 会标记账号，一次正常读取会清除标记。</p>
 
+    <h2 id="checkin"><a class="anchor" href="#checkin">签到</a></h2>
+    <p>每日签到送额度的供应商，可以让插件用 <code>auth.checkin</code> 去签，这是 magpie 自己的 hook（OpenCode 会忽略）。用户为这个供应商开着签到时，magpie 每个北京日为每个已登录账号调用一次，结果显示在账号的用量卡片和设置里。</p>
+    <div class="code">
+      <span class="lang">auth hook</span>
+      <pre>auth: {
+  provider: <span class="s">"acme"</span>,
+  <span class="k">async</span> checkin(getAuth, provider) {
+    <span class="k">const</span> auth = <span class="k">await</span> getAuth()
+    <span class="k">const</span> r = <span class="k">await</span> claim(auth.access)
+    <span class="k">if</span> (r.already) <span class="k">return</span> { outcome: <span class="s">"done"</span> }
+    <span class="k">return</span> { outcome: <span class="s">"claimed"</span>, credit: r.points, streak: r.days, message: r.text }
+  },
+}</pre>
+    </div>
+    <p>它返回 <code>{ outcome, credit?, streak?, message? }</code>：</p>
+    <div class="table-wrap"><table>
+      <tr><th><code>outcome</code></th><th>含义</th></tr>
+      <tr><td><code>claimed</code></td><td>刚签到成功。<code>credit</code> 是这次给的额度。</td></tr>
+      <tr><td><code>done</code></td><td>今天已经签过。供应商返回 2xx 但没有可领的，是 <code>done</code>，不是 <code>failed</code>。</td></tr>
+      <tr><td><code>ineligible</code></td><td>这个账号不能参加。</td></tr>
+      <tr><td><code>inactive</code></td><td>当前没有签到活动。</td></tr>
+      <tr><td><code>captcha</code></td><td>供应商要求验证码。不要去解：用户在供应商自己的应用里签到。</td></tr>
+      <tr><td><code>failed</code></td><td>没成功。magpie 当天稍后会再试。</td></tr>
+    </table></div>
+    <p><code>streak</code> 是连续天数，<code>message</code> 原样显示。抛出异常，或返回的 outcome 不在上表里，都算 <code>failed</code>。它在账号的作用域里运行，所以用 <code>client.auth.set</code> 续期的 token 会存到这个账号。</p>
+
     <h2 id="input"><a class="anchor" href="#input">插件能拿到什么</a></h2>
     <p>magpie 交给插件的是 OpenCode <code>PluginInput</code> 里的内容，只要它在没有 OpenCode 服务端时还有意义：</p>
     <div class="table-wrap"><table>
@@ -552,7 +581,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <tr><td><code>$</code></td><td>Bun 的 shell。</td></tr>
       <tr><td><code>serverUrl</code></td><td>占位值，后面没有 OpenCode 服务端。</td></tr>
     </table></div>
-    <p>magpie 调用的钩子是 <code>config</code>、<code>auth</code>（它的 methods、<code>loader</code> 和 <code>usage</code>）、<code>provider.models</code> 和 <code>chat.headers</code>。插件的其他钩子（<code>tool</code>、<code>event</code>、<code>chat.params</code> 等）不会被调用，工具由 agent 自己运行。</p>
+    <p>magpie 调用的钩子是 <code>config</code>、<code>auth</code>（它的 methods、<code>loader</code>、<code>usage</code>、<code>refresh</code> 和 <code>checkin</code>）、<code>provider.models</code> 和 <code>chat.headers</code>。插件的其他钩子（<code>tool</code>、<code>event</code>、<code>chat.params</code> 等）不会被调用，工具由 agent 自己运行。</p>
 
     <h2 id="ids"><a class="anchor" href="#ids">供应商 id</a></h2>
     <ul>
@@ -788,7 +817,7 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
       <tr><td><code>library</code></td><td>Agent 从哪里读<span class="ui">资源库</span>给它的东西：<code>instructions</code>（每次对话前读的 Markdown 文件）、<code>mcp</code>（它的 MCP 服务器文件）和 <code>mcpFormat</code>（这个文件的写法跟哪个 Agent 的一样：<code>alma</code>, <code>antigravity</code>, <code>claude</code>, <code>cline</code>, <code>codex</code>, <code>commandcode</code>, <code>copilot</code>, <code>crush</code>, <code>cursor</code>, <code>devin</code>, <code>gemini</code>, <code>goose</code>, <code>grok</code>, <code>hermes</code>, <code>kimi</code>, <code>omp</code>, <code>opencode</code>, <code>zed</code>；<code>claude</code> 即 <code>{"mcpServers": {…}}</code>），以及 <code>skills</code>（放 <code>SKILL.md</code> 文件夹的目录）。每项都可省略，<code>~</code> 和 <code>$VAR</code> 会展开：<code>library: { instructions: "~/.toy/AGENTS.md", mcp: "~/.toy/mcp.json", mcpFormat: "claude", skills: "~/.toy/skills" }</code>。不写的话，资源库不会给它任何东西，给它某一项时会被拒绝，并说明插件该写哪个键。</td></tr>
     </table></div>
     <h3>connect</h3>
-    <p><code>connect(input)</code> 返回要在模型旁边一起写入的其他键，按键路径给出各自的值；可以是 <code>async</code>。它拿到 <code>gateway</code>（<code>url</code>、<code>v1</code>——以 <code>/v1</code> 结尾的地址——和 <code>key</code>，即这个 Agent 自己的 key，请求会按它的 id 计入用量）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>）、<code>models</code>（magpie 给这个 Agent 的所有模型，格式相同）和 <code>agent</code>（<code>id</code>、<code>config</code>）。没有 <code>connect</code> 的插件只写模型。magpie 的模型有变化时会再调用一次 <code>connect</code>，它写的模型列表因此保持最新。</p>
+    <p><code>connect(input)</code> 返回要在模型旁边一起写入的其他键，按键路径给出各自的值；可以是 <code>async</code>。它拿到 <code>gateway</code>（<code>url</code>、<code>v1</code>——以 <code>/v1</code> 结尾的地址——和 <code>key</code>，即这个 Agent 自己的 key，请求会按它的 id 计入用量）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>，以及与 <code>/v1/models</code> 同名的 <code>native_endpoints</code>——请求不经转换直接走的网关路径，如 <code>["/v1/chat/completions"]</code>——和 <code>pricing</code>——每 token 的美元价格，十进制字符串：<code>prompt</code>、<code>completion</code>、<code>input_cache_read</code>、<code>input_cache_write</code>；不知道的就不给，绝不是空或 0）、<code>models</code>（magpie 给这个 Agent 的所有模型，格式相同）和 <code>agent</code>（<code>id</code>、<code>config</code>）。没有 <code>connect</code> 的插件只写模型。magpie 的模型有变化时会再调用一次 <code>connect</code>，它写的模型列表因此保持最新。</p>
     <h3>magpie 怎么用它</h3>
     <ul>
       <li><b>写入。</b>每个键原地修改，用户的注释和其他键都保留。第一次写之前，每个键原来的值会按原类型存起来（数字仍是数字）。</li>
@@ -960,6 +989,7 @@ document.getElementById(<span class="s">"calls"</span>).textContent = `${s.calls
     <a href="/docs/zh/remote">远程 magpie</a>
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
+    <a href="/docs/zh/masking">本地脱敏</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

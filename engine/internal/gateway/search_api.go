@@ -105,7 +105,7 @@ func SearcherUnused() string {
 
 // apiSearch asks the search APIs, in their order, until one answers.
 func (s *Server) apiSearch(ctx context.Context, query string) (string, []Hit, error) {
-	query, err := maskedQuery(query, nil)
+	query, err := maskedQuery(ctx, query, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -195,7 +195,7 @@ func pagesSaid(pages []foundPage) (string, []Hit) {
 			b.WriteString(p.Text + "\n")
 		}
 		b.WriteString("\n")
-		hits = append(hits, Hit{Title: p.Title, URL: p.URL, PageAge: p.Age})
+		hits = append(hits, Hit{Title: p.Title, URL: p.URL, PageAge: p.Age, Cited: p.Text})
 	}
 	return strings.TrimSpace(b.String()), hits
 }

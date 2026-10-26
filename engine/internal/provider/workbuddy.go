@@ -230,6 +230,16 @@ func wbLogins(w *wbSite) []wbAccount {
 		}
 		out = append(out, a)
 	}
+	// one magpie signed in under the desktop's name stands for the
+	// desktop's only when it is the same uid: a nickname is no one's own, so
+	// another account of that name leaves the desktop's its own place
+	// (wakkana on Discord), as the plugin keeps both
+	// (one removed in magpie stays out)
+	if hasOwn && !slices.ContainsFunc(out, func(a wbAccount) bool { return a.own || a.creds.UID == own.UID }) &&
+		slices.ContainsFunc(out, func(a wbAccount) bool { return strings.EqualFold(a.User, ownUser) }) &&
+		!slices.ContainsFunc(readLogins(), func(l savedLogin) bool { return l.Agent == w.id && l.own() && l.Hidden != "" }) {
+		out = append(out, wbAccount{Login: Login{Agent: w.id, User: ownUser, On: true, Own: true}, site: w, own: true, creds: own})
+	}
 	return out
 }
 
@@ -240,6 +250,14 @@ func wbLogins(w *wbSite) []wbAccount {
 // The gateway reads it as the account restricted (failRestricted), the
 // plugin adds the same words, and the Routing page says it apart.
 const WBRestrictedHint = "WorkBuddy restricted this account for unusual activity; it stays out until WorkBuddy lifts that, which an appeal (Submit feedback in WorkBuddy) asks for"
+
+// ZCodeRestrictedHint is what the ZCode plugin (0.1.27 on) adds to the
+// Start Plan's 405 code 3012, "request has been blocked due to unusual
+// activity": ZCode's risk control blocked the account, ZCode's own app
+// included (plugins#348), until ZCode support lifts it. The gateway reads
+// it as the account restricted (failRestricted), and the Routing page says
+// it apart.
+const ZCodeRestrictedHint = "ZCode's risk control blocked this account for unusual activity (code 3012); it rests, and the group's other providers are used. If the ZCode app fails on this account too, only ZCode support can lift the block"
 
 // wbRestrictedWords are the restriction as WorkBuddy's 11140 words it in
 // its displayMsg and displayTips: English, Simplified and Traditional

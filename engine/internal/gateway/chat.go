@@ -73,11 +73,22 @@ type cRequest struct {
 	AccessPrograms json.RawMessage `json:"access_programs,omitempty"`
 }
 
-func parseChat(body []byte) (*Request, error) {
+func parseChat(body []byte) (*Request, error) { return readChat(body, false) }
+
+// readChat is parseChat; for facts (readFacts) it leaves out what they
+// never read, as readResponses does: the assistant's words and calls, the
+// tools' outputs, and the copies of raw values a parse kept would need. A
+// plugin's request is read for its work folder on every try (tellWorkPlace),
+// and a long conversation's history was most of what that allocated (#3472).
+func readChat(body []byte, facts bool) (*Request, error) {
+	decode := decodeJSON
+	if facts {
+		decode = decodeJSONView
+	}
 	body = liftMessageTools(body) // a request handle didn't see (#2322)
 	body = shapeChatTools(body)   // and its tools in another API's shape (#2622)
 	var c cRequest
-	if err := decodeJSON(body, &c); err != nil {
+	if err := decode(body, &c); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
 	r := &Request{Model: c.Model, MaxTokens: c.MaxCompletionTokens, Temp: c.Temperature, TopP: c.TopP,
@@ -104,6 +115,10 @@ func parseChat(body []byte) (*Request, error) {
 		case "user":
 			r.Messages = append(r.Messages, Message{Role: "user", Parts: chatParts(m.Content)})
 		case "assistant":
+			if facts {
+				r.Messages = append(r.Messages, Message{Role: "assistant"})
+				continue
+			}
 			msg := Message{Role: "assistant"}
 			// an earlier turn's thinking comes back in any of
 			// messageReasoning's spellings, and every upstream that
@@ -122,6 +137,10 @@ func parseChat(body []byte) (*Request, error) {
 			}
 			r.Messages = append(r.Messages, msg)
 		case "tool":
+			if facts {
+				r.Messages = append(r.Messages, Message{Role: "user", Parts: []Part{{Kind: ToolResult, CallID: m.ToolCallID}}})
+				continue
+			}
 			out, images := toolOutput(m.Content)
 			r.Messages = append(r.Messages, Message{Role: "user", Parts: []Part{{Kind: ToolResult, CallID: m.ToolCallID, Text: out, Images: images}}})
 		}
@@ -167,7 +186,8 @@ func chatParts(raw json.RawMessage) []Part {
 		Type     string `json:"type"`
 		Text     string `json:"text"`
 		ImageURL struct {
-			URL string `json:"url"`
+			URL    string `json:"url"`
+			Detail string `json:"detail"`
 		} `json:"image_url"`
 		File struct {
 			FileData string `json:"file_data"`
@@ -182,7 +202,9 @@ func chatParts(raw json.RawMessage) []Part {
 		case "text":
 			out = append(out, Part{Kind: Text, Text: it.Text})
 		case "image_url":
-			out = append(out, imagePart(it.ImageURL.URL))
+			im := imagePart(it.ImageURL.URL)
+			im.Detail = it.ImageURL.Detail
+			out = append(out, im)
 		case "file":
 			if p, ok := chatFile(it.File.FileData, it.File.FileID, it.File.Filename); ok {
 				out = append(out, p)
@@ -223,6 +245,38 @@ func imagePart(u string) Part {
 		}
 	}
 	return Part{Kind: Image, URL: u}
+}
+
+// chatImage is an image as a Chat Completions image_url, with the detail
+// the client asked for: Chat takes low, high and auto as they are, and
+// Responses' original, which Chat lacks, is high, the closest it has.
+func chatImage(p Part) map[string]any {
+	u := map[string]any{"url": dataURL(p)}
+	if d := chatDetail(p.Detail); d != "" {
+		u["detail"] = d
+	}
+	return map[string]any{"type": "image_url", "image_url": u}
+}
+
+// chatDetail is detail as Chat Completions takes it, or "" for none.
+func chatDetail(detail string) string {
+	switch d := strings.ToLower(strings.TrimSpace(detail)); d {
+	case "low", "high", "auto":
+		return d
+	case "original":
+		return "high"
+	}
+	return ""
+}
+
+// responsesDetail is detail as a Responses input_image takes it: the
+// client's own when the API knows it, else auto.
+func responsesDetail(detail string) string {
+	switch d := strings.ToLower(strings.TrimSpace(detail)); d {
+	case "low", "high", "auto", "original":
+		return d
+	}
+	return "auto"
 }
 
 func dataURL(p Part) string {
@@ -298,7 +352,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 		}
 		seen = append(seen, map[string]any{"type": "text", "text": "[From the result of " + of + ":]"})
 		for _, im := range p.Images {
-			seen = append(seen, map[string]any{"type": "image_url", "image_url": map[string]any{"url": dataURL(im)}})
+			seen = append(seen, chatImage(im))
 		}
 	}
 	showSeen := func() {
@@ -420,7 +474,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 				content = append(content, map[string]any{"type": "text", "text": attachmentText(p)})
 			case Image:
 				plain = false
-				content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": dataURL(p)}})
+				content = append(content, chatImage(p))
 			case ToolResult:
 				out := p.Text
 				if n := len(p.Images); n > 0 {
@@ -538,8 +592,8 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 // 400 "tool_call_id is not found" or "an assistant message with
 // 'tool_calls' must be followed by tool messages…", and OpenAI-style
 // upstreams refuse the same shapes. It runs on every request built for a
-// Chat upstream (Zed's xAI path included); Chat→Chat traffic relays
-// as-is and never reaches this path.
+// Chat upstream (Zed's xAI path included), and on a Chat client's own
+// body relayed whose exchange doesn't pair (toolPairsOut).
 //
 //   - the tool messages answering an assistant's tool_calls go in the
 //     calls' order (an agent returns parallel results out of order);
@@ -591,7 +645,7 @@ func pairToolMessages(msgs []map[string]any) []map[string]any {
 	// the text in, so two user messages never stand in a row (some
 	// models' chat templates turn them away).
 	toolAsUser := func(m map[string]any) {
-		text, _ := m["content"].(string)
+		text := contentText(m["content"])
 		if strings.TrimSpace(text) == "" {
 			text = "Tool result received."
 		}
@@ -647,6 +701,26 @@ func pairToolMessages(msgs []map[string]any) []map[string]any {
 	}
 	flushPending()
 	return out
+}
+
+// contentText is a Chat message content's text: the string, or its text
+// parts joined, as a relayed client's tool message may hold them.
+func contentText(c any) string {
+	switch c := c.(type) {
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, p := range c {
+			if pm, _ := p.(map[string]any); pm != nil {
+				if t, _ := pm["text"].(string); t != "" {
+					parts = append(parts, t)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }
 
 // toolMsgID is a tool message's tool_call_id.
@@ -984,11 +1058,22 @@ func (u Usage) chat() map[string]any {
 
 // chatDecoder turns a Chat Completions stream into events. Tool calls come
 // as indexed fragments; it tracks which one is open.
+//
+// Events give a call's arguments to the call started last, but Chat may
+// send the fragments of several calls by turns (index 0, 1, 0, 1…): read
+// as one call after another, two calls came out as six, the last four
+// with no name and pieces of the arguments (mysterious_dove). So the open
+// call streams as it comes, and a call that starts while the open one's
+// arguments aren't yet whole JSON is held, by its index, and given whole,
+// in index order, when the reply ends.
 type chatDecoder struct {
-	started bool
-	tool    int    // index of the open tool call, -1 for none
-	toolID  string // id of the open tool call, as some relays repeat it on every fragment
-	choice  string // index of the first choice seen; an empty string means none yet
+	started   bool
+	tool      int       // index of the open tool call, -1 for none
+	toolID    string    // id of the open tool call, as some relays repeat it on every fragment
+	toolWhole jsonWhole // where the open call's arguments stand in their JSON
+	toolDone  bool      // they are whole JSON: a call that starts now comes after it
+	held      []*heldCall
+	choice    string // index of the first choice seen; an empty string means none yet
 	// Gemini's OpenAI-compatible API, asked for thoughts, may give them
 	// in the text as a leading <thought>…</thought>, and MiniMax's Chat
 	// API (#1267), like the open models served without a reasoning
@@ -1187,6 +1272,7 @@ func (d *chatDecoder) end(emit func(Event)) {
 
 func (d *chatDecoder) decode(data string, emit func(Event)) error {
 	if strings.TrimSpace(data) == "[DONE]" {
+		d.giveHeld(emit)
 		return nil
 	}
 	var ch struct {
@@ -1223,7 +1309,8 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		return nil
 	}
 	if ch.Error != nil {
-		emit(Event{Kind: KError, Text: cmp.Or(ch.Error.Message, streamErrorText(data)), Code: refusedCode(data)})
+		code, status, said := filterRefused(data)
+		emit(Event{Kind: KError, Text: cmp.Or(ch.Error.Message, streamErrorText(data)), Code: code, Status: status, Said: said})
 		return nil
 	}
 	if !d.started {
@@ -1286,23 +1373,11 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 			if tc.Index != nil {
 				idx = *tc.Index
 			}
-			// A delta carrying the id the open call already goes by — some
-			// relays repeat it on every fragment, where the spec sends it
-			// only on the first — or one more fragment of the open index,
-			// continues that call; only a new id or a new index starts the
-			// next one.
-			if idx != d.tool || (tc.ID != "" && tc.ID != d.toolID) {
-				d.tool, d.toolID = idx, tc.ID
-				// a call Gemini signed goes to the client with an id
-				// carrying the signature, which comes back with it
-				emit(Event{Kind: KToolStart, ID: signedID(tc.ID, googleSignature(tc.ExtraContent)), Name: tc.Function.Name})
-			}
-			if tc.Function.Arguments != "" {
-				emit(Event{Kind: KToolArgs, Text: tc.Function.Arguments})
-			}
+			d.toolCall(idx, tc, emit)
 		}
 		if c.FinishReason != "" {
 			d.end(emit)
+			d.giveHeld(emit)
 			emit(Event{Kind: KStop, Stop: stopFromChat(c.FinishReason)})
 		}
 	}
@@ -1310,6 +1385,74 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KUsage, Usage: ch.Usage.usage()})
 	}
 	return nil
+}
+
+// heldCall is a tool call whose fragments came by turns with another's,
+// held until the reply ends.
+type heldCall struct {
+	index    int
+	id, sent string // the id the upstream gave, and the one the client is given
+	name     string
+	args     strings.Builder
+}
+
+// toolCall reads one fragment of a tool call, the call at index idx. A
+// fragment carrying the id its call already goes by (some relays repeat it
+// on every fragment, where the spec sends it only on the first) or none
+// continues the latest call of its index; a new id or a new index starts
+// the next one.
+func (d *chatDecoder) toolCall(idx int, tc cToolCall, emit func(Event)) {
+	args := tc.Function.Arguments
+	newID := func(id string) bool { return tc.ID != "" && tc.ID != id }
+	for _, h := range slices.Backward(d.held) {
+		if h.index == idx {
+			if newID(h.id) {
+				break
+			}
+			h.args.WriteString(args)
+			return
+		}
+	}
+	if d.tool >= 0 && idx == d.tool && !newID(d.toolID) {
+		d.toolArgs(args, emit)
+		return
+	}
+	// a call Gemini signed goes to the client with an id carrying the
+	// signature, which comes back with it
+	sent := signedID(tc.ID, googleSignature(tc.ExtraContent))
+	if d.tool >= 0 && (!d.toolDone || len(d.held) > 0) {
+		h := &heldCall{index: idx, id: tc.ID, sent: sent, name: tc.Function.Name}
+		h.args.WriteString(args)
+		d.held = append(d.held, h)
+		return
+	}
+	d.tool, d.toolID, d.toolWhole, d.toolDone = idx, tc.ID, jsonWhole{}, false
+	emit(Event{Kind: KToolStart, ID: sent, Name: tc.Function.Name})
+	d.toolArgs(args, emit)
+}
+
+// toolArgs gives a piece of the open call's arguments.
+func (d *chatDecoder) toolArgs(args string, emit func(Event)) {
+	if args == "" {
+		return
+	}
+	d.toolDone = d.toolWhole.feed(args)
+	emit(Event{Kind: KToolArgs, Text: args})
+}
+
+// giveHeld gives the calls held, each whole, in index order.
+func (d *chatDecoder) giveHeld(emit func(Event)) {
+	if len(d.held) == 0 {
+		return
+	}
+	slices.SortStableFunc(d.held, func(a, b *heldCall) int { return a.index - b.index })
+	for _, h := range d.held {
+		emit(Event{Kind: KToolStart, ID: h.sent, Name: h.name})
+		if h.args.Len() > 0 {
+			emit(Event{Kind: KToolArgs, Text: h.args.String()})
+		}
+	}
+	d.held, d.tool, d.toolID, d.toolWhole, d.toolDone = nil, -1, "", jsonWhole{}, false
 }
 
 // chatChoiceIndex accepts numeric indexes and numeric strings without

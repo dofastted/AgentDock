@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/yetone/magpie/internal/dirent"
 )
 
 // Antigravity CLI's (agy's) calls (#2097, parkavenue9639: a call agy made
@@ -45,21 +43,7 @@ func AgyDir() string {
 }
 
 // agyCallFiles are each conversation's transcript_full.jsonl.
-func agyCallFiles() []file {
-	dirs, _ := os.ReadDir(filepath.Join(AgyDir(), "brain"))
-	var out []file
-	for _, d := range dirs {
-		if !dirent.IsFolder(filepath.Join(AgyDir(), "brain"), d) {
-			continue
-		}
-		p := filepath.Join(AgyDir(), "brain", d.Name(), ".system_generated", "logs", "transcript_full.jsonl")
-		f := file{agent: "agy", key: "agy:" + d.Name(), path: p, main: true}
-		if stat(&f) {
-			out = append(out, f)
-		}
-	}
-	return out
-}
+func agyCallFiles() []file { return agyTranscripts(AgyDir()) }
 
 type agyStep struct {
 	Step      *int   `json:"step_index"`
@@ -82,7 +66,7 @@ func readAgyCalls(f file) (*callFile, bool) {
 	defer r.Close()
 	st := &callFile{Agent: "agy", Path: f.path, Session: strings.TrimPrefix(f.key, "agy:")}
 	at := map[int]int{} // a step's index → its call in st.Calls
-	br := bufio.NewReaderSize(r, 1<<20)
+	br := bufio.NewReaderSize(r, scanBuffer(r, 0))
 	for {
 		b, err := br.ReadBytes('\n')
 		if err != nil && (!errors.Is(err, io.EOF) || len(bytes.TrimSpace(b)) == 0) {

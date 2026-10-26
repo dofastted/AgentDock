@@ -34,7 +34,7 @@ const statuslineUsage = `usage: magpie statusline [<provider|account>…]
   ~/.claude/settings.json yourself (magpie doesn't write it, a status line such as
   claude-hud may hold it):
     "statusLine": {"type": "command", "command": "magpie statusline"}
-  It asks the gateway on this computer (Settings' Gateway port, or MAGPIE_ADDR), never
+  It asks the gateway on this computer (the port in Settings' Gateway address, or MAGPIE_ADDR), never
   a vendor, and prints nothing when the gateway isn't running.`
 
 // statuslineWait bounds each ask of the gateway: Claude Code shows the line
@@ -155,6 +155,9 @@ func statuslineCard(q provider.Quota, now time.Time) string {
 		switch {
 		case w.Unlimited:
 			cells = append(cells, n+" ∞")
+		case w.Text:
+			// a row of text alone (a plugin's balance) has no share
+			cells = append(cells, n+" "+w.Display)
 		case w.ResetsAt != nil && !w.ResetsAt.After(now):
 			// its window has started again since it was read
 			cells = append(cells, n+" 0%")

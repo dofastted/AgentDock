@@ -32,6 +32,11 @@ magpie.plugin("sessions", (ctx) => {
   const SEARCH_WAIT = 300;
   const needleOf = (q) => q.trim().split(/\s+/).filter(Boolean).join(" ").toLowerCase();
   let trashOn = false;
+  // Picking sessions to delete is a mode of its own, as in Finder and Mail:
+  // off, no row carries a checkbox and there is no bar over the list
+  // (yetone: a box on every row, and a lone Delete under the Trash).
+  let selecting = false;
+  let othersOpen = false;     // the folders an app or the system made, unfolded
   const picked = new Set();   // ids picked to delete, of the agent shown
   const opened = new Set();   // folders unfolded, by cwd
   const folderBoxes = new Map(); // each folder's box as drawn, by cwd
@@ -70,6 +75,7 @@ magpie.plugin("sessions", (ctx) => {
   // elements, held every click on the page for over a second, and slowed
   // the Library page after it (yetone).
   const FOLDERS = "\x00folders";
+  const OTHERS = "\x00others";
 
   // A session seen only through magpie's gateway has no folder magpie knows
   // (its agent's files are on another computer, in a container or under
@@ -79,9 +85,34 @@ magpie.plugin("sessions", (ctx) => {
   const groupOf = (s) => s.cwd || (s.gateway ? GW : "");
   const groupName = (k) => k === GW ? t("Seen through the gateway") : k ? baseName(k) : t("No folder");
 
+  // A folder an app or the system made, not a project of the reader's: the
+  // disk's root, a temp folder, or one under a hidden folder of a home
+  // (~/.some-agent/…). They go under a fold of their own after the
+  // projects (yetone: "/", "T" and folders named by UUIDs led the list).
+  const scratch = (k) => {
+    if (!k || k === GW) return false;
+    const p = k.replace(/\\/g, "/").replace(/\/+$/, "");
+    return p === "" || /^[a-z]:$/i.test(p)
+      || /^\/(private\/)?(tmp|var\/tmp|var\/folders)(\/|$)/.test(p)
+      || /\/AppData\/Local\/Temp(\/|$)/i.test(p)
+      || /^([a-z]:)?\/(Users|home)\/[^/]+\/\.[^/]/i.test(p) || /^\/root\/\./.test(p);
+  };
+  // where a folder is, as its row says it: the folder it is in, with the
+  // home folder as ~; the whole path is the row's title
+  const whereOf = (p) => {
+    const home = data?.home || "";
+    const up = p.replace(/[\\/]+$/, "");
+    const cut = Math.max(up.lastIndexOf("/"), up.lastIndexOf("\\"));
+    if (home && up === home) return "~";
+    const parent = cut < 0 ? "" : cut === 0 ? "/" : up.slice(0, cut);
+    if (!home || !parent) return parent;
+    return parent === home ? "~" : parent.startsWith(home + "/") || parent.startsWith(home + "\\") ? "~" + parent.slice(home.length) : parent;
+  };
+
   const TRASH = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v4M9 7v4";
   const TERM = "M3 4.5 6 7.5 3 10.5M7.5 11.5h5.5";
   const UNDO = "M5.5 3.5 2.5 6.5l3 3M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7";
+  const MOVE = "M2.5 8h10M9.5 5l3 3-3 3";
 
   async function load(name) {
     const n = ++loading;
@@ -234,6 +265,7 @@ magpie.plugin("sessions", (ctx) => {
   function chooseAgent(name) {
     if (name === data.agent && !trashOn) return;
     trashOn = false;
+    selecting = false;
     agent = name;
     try { localStorage.setItem("magpie.sessionsAgent", name); } catch {}
     picked.clear();
@@ -327,11 +359,12 @@ magpie.plugin("sessions", (ctx) => {
       pick.onclick = (e) => {
         e.stopPropagation();
         if (pick.classList.contains("open")) return closeProtoMenu();
-        const opts = data.agents.map((x) => ({ v: x.agent, name: x.name, note: String(x.count), literalName: true }));
+        const opts = data.agents.map((x) => ({ v: x.agent, name: x.name, icon: x.icon, note: String(x.count), literalName: true }));
         openProtoMenu(pick, opts, data.agent, (name) => {
           pick.focus({ preventScroll: true });
           chooseAgent(name);
         }, "Agent", "sm-agent-menu");
+        iconItems(opts);
       };
     }
     wrap.append(tabs, pick);
@@ -345,13 +378,22 @@ magpie.plugin("sessions", (ctx) => {
     q.hidden = trashOn;
     q.oninput = () => { query = q.value; drawnIn.clear(); searchSoon(); redrawList(); };
     q.onkeydown = (e) => { if (e.key === "Escape" && q.value) { e.stopPropagation(); q.value = ""; query = ""; drawnIn.clear(); searchSoon(); redrawList(); } };
+    const sel = el("button", "text sm-select" + (selecting ? " on" : ""), t(selecting ? "Done" : "Select"));
+    sel.type = "button";
+    sel.setAttribute("aria-pressed", String(selecting));
+    sel.hidden = trashOn || !a?.deletable || !data?.sessions?.some((s) => s.deletable);
+    sel.onclick = () => {
+      selecting = !selecting;
+      if (!selecting) picked.clear();
+      draw();
+    };
     const tr = el("button", "text sm-trash-btn" + (trashOn ? " on" : ""));
     tr.type = "button";
     tr.setAttribute("aria-pressed", String(trashOn));
     tr.append(svg(TRASH, 13, 1.4), el("span", "", t("Trash")));
     if (data?.trash.length) tr.append(el("em", "", String(data.trash.length)));
-    tr.onclick = () => { trashOn = !trashOn; draw(); };
-    h.append(q, tr);
+    tr.onclick = () => { trashOn = !trashOn; selecting = false; picked.clear(); draw(); };
+    h.append(q, sel, tr);
     return h;
   }
 
@@ -509,11 +551,12 @@ magpie.plugin("sessions", (ctx) => {
     cancel.focus({ preventScroll: true });
   }
 
-  // the bar over the tree: pick every session shown, and delete those picked
+  // the bar over the tree while picking: pick every session shown, and
+  // delete those picked
   function selectBar() {
     const bar = el("div", "row-head sm-bar");
     const a = current();
-    if (!a?.deletable) { bar.hidden = true; return bar; }
+    if (!a?.deletable || !selecting) { bar.hidden = true; return bar; }
     const list = shown().filter((s) => s.deletable);
     const all = el("input", "sm-check");
     all.type = "checkbox";
@@ -551,12 +594,14 @@ magpie.plugin("sessions", (ctx) => {
     const bar = page.querySelector(".sm-bar");
     if (bar) bar.replaceWith(selectBar());
     const list = shown();
-    // the folder of the latest session is open the first time an agent is shown
+    // the project of the latest session is open the first time an agent is
+    // shown
     if (openedFor !== data.agent) {
       openedFor = data.agent;
       opened.clear();
       drawnIn.clear();
-      if (list[0]) opened.add(groupOf(list[0]));
+      const first = list.find((s) => !scratch(groupOf(s))) || list[0];
+      if (first) opened.add(groupOf(first));
     }
     nest(list);
     // a session shown under another stays in sight: its folder and every
@@ -582,15 +627,45 @@ magpie.plugin("sessions", (ctx) => {
       return;
     }
     const q = query.trim();
-    const all = [...groups];
-    // a page of folders, or as many as were drawn before, and down to the
-    // folder of the session opened to its details
+    // the projects in one list, and the folders apps and the system made
+    // folded under them
+    const all = [...groups].filter(([k]) => !scratch(k));
+    const rest = [...groups].filter(([k]) => scratch(k));
+    if (all.length) tree.append(folderList(el("div", "list sm-folders"), all, FOLDERS, q));
+    if (rest.length) tree.append(othersBox(rest, q));
+    toFocus();
+  }
+
+  // folderList draws into box a page of folders, or as many as were drawn
+  // before, and down to the folder of the session opened to its details
+  function folderList(box, all, key, q) {
     const top = rootOf.get(detail) || detail;
     const at = detail ? all.findIndex(([, items]) => items.some((s) => s.id === top)) : -1;
-    const n = Math.min(all.length, Math.max(drawnIn.get(FOLDERS) || SM_PAGE, at + 1));
-    for (const [cwd, items] of all.slice(0, n)) tree.append(folder(cwd, items, q));
-    if (n < all.length) tree.append(moreFolders(all, n, q));
-    toFocus();
+    const n = Math.min(all.length, Math.max(drawnIn.get(key) || SM_PAGE, at + 1));
+    for (const [cwd, items] of all.slice(0, n)) box.append(folder(cwd, items, q));
+    if (n < all.length) box.append(moreFolders(all, n, q, key));
+    return box;
+  }
+
+  // othersBox is the fold of the folders apps and the system made: shut
+  // until the reader opens it, a search finds something in it, or the
+  // session opened to its details is in it
+  function othersBox(rest, q) {
+    const box = el("div", "list sm-others");
+    const top = rootOf.get(detail) || detail;
+    const open = othersOpen || !!q || (!!detail && rest.some(([, items]) => items.some((s) => s.id === top)));
+    const r = el("div", "row sm-others-row");
+    const fold = el("button", "fold sm-others-fold");
+    fold.type = "button";
+    fold.setAttribute("aria-expanded", String(open));
+    const words = el("span", "sm-fwords");
+    words.append(el("span", "name", t("Other folders")), el("span", "sm-latest", t("Temporary folders, the disk's root and apps' hidden folders")));
+    fold.append(svg(CHEV_R, 10, 1.6), words);
+    fold.onclick = () => { othersOpen = !open; redrawList(); };
+    r.append(fold, el("span", "note", t(rest.length === 1 ? "{n} folder" : "{n} folders", { n: rest.length })));
+    box.append(r);
+    if (open) folderList(box, rest, OTHERS, q);
+    return box;
   }
 
   // nest finds the sessions shown that are under another one shown: a
@@ -619,8 +694,8 @@ magpie.plugin("sessions", (ctx) => {
 
   // moreFolders adds the next page of folders above itself, as moreRow does
   // a folder's sessions
-  function moreFolders(all, n, q) {
-    drawnIn.set(FOLDERS, n);
+  function moreFolders(all, n, q, key) {
+    drawnIn.set(key, n);
     const b = el("button", "text sess-page-more sm-more-folders");
     b.type = "button";
     b.dataset.unrolls = ""; // it goes down with the folders it opens
@@ -631,16 +706,19 @@ magpie.plugin("sessions", (ctx) => {
       const next = Math.min(all.length, n + SM_PAGE);
       b.before(...all.slice(n, next).map(([cwd, items]) => folder(cwd, items, q)));
       n = next;
-      drawnIn.set(FOLDERS, n);
+      drawnIn.set(key, n);
       if (n >= all.length) b.remove();
       else b.textContent = label();
     };
     return b;
   }
 
+  // A folder's row: its name and where it is, the latest session's title
+  // under them, and when that was and how many there are on the right.
+  // What can be done to the whole folder is in its ⋯ menu, shown on hover.
   function folder(cwd, items, q) {
     const open = !!q || opened.has(cwd);
-    const g = el("div", "list sm-group");
+    const g = el("div", "sm-group");
     const r = el("div", "row sm-folder");
     // the sessions under those on top are the folder's too
     const members = [];
@@ -649,7 +727,7 @@ magpie.plugin("sessions", (ctx) => {
     const writable = members.filter((s) => s.deletable);
     // the folder's box picks every session of it shown, folded or not,
     // for the bar's Delete; the bar still counts sessions (#527)
-    if (current()?.deletable && writable.length) {
+    if (selecting && current()?.deletable && writable.length) {
       const c = el("input", "sm-check sm-folder-check");
       c.type = "checkbox";
       // a session's own box ticked or not shows here at once
@@ -670,20 +748,47 @@ magpie.plugin("sessions", (ctx) => {
     const fold = el("button", "fold");
     fold.type = "button";
     fold.setAttribute("aria-expanded", String(open));
-    fold.append(svg(CHEV_R, 10, 1.6), el("span", "name", groupName(cwd)));
+    const path = cwd === GW ? "" : cwd;
+    const line = el("span", "sm-fline");
+    line.append(el("span", "name", groupName(cwd)));
+    const where = path ? whereOf(path) : "";
+    if (where) line.append(el("span", "sub sm-path", where));
+    const words = el("span", "sm-fwords");
+    words.append(line);
+    const latest = members.reduce((x, s) => (s.last || "") > (x.last || "") ? s : x, members[0]);
+    if (latest) words.append(el("span", "sm-latest", latest.title || t("(no prompt)")));
+    fold.append(svg(CHEV_R, 10, 1.6), words);
     fold.onclick = () => {
       if (opened.has(cwd)) opened.delete(cwd); else opened.add(cwd);
       redrawList();
     };
-    const path = cwd === GW ? "" : cwd;
-    r.append(fold, el("span", "sub sm-path", path), el("span", "grow"), el("span", "note", t(members.length === 1 ? "{n} session" : "{n} sessions", { n: members.length })));
+    const when = el("span", "sm-when");
+    if (latest?.last) when.append(el("span", "sm-ago", ago(latest.last)));
+    when.append(el("span", "note", t(members.length === 1 ? "{n} session" : "{n} sessions", { n: members.length })));
+    r.append(fold, when);
+    const acts = [];
     const allInFolder = (data.sessions || []).filter((s) => s.cwd === cwd);
     if (data.agent === "claude" && path && allInFolder.every((s) => !s.read_only && !s.gateway)
       && new Set(allInFolder.map((s) => s.wsl || "")).size === 1) {
-      const move = el("button", "text", t("Relocate project"));
-      move.type = "button";
-      move.onclick = (e) => { e.stopPropagation(); askRelocate(cwd, allInFolder[0].wsl || ""); };
-      r.append(move);
+      acts.push({ name: "Relocate project", icon: MOVE, run: () => askRelocate(cwd, allInFolder[0].wsl || "") });
+    }
+    if (current()?.deletable && writable.length) {
+      acts.push({ name: "Delete all sessions", icon: TRASH, sep: acts.length > 0, run: () => askDelete(writable.map((s) => s.id), wholeFolder(writable.map((s) => s.id))) });
+    }
+    if (acts.length) {
+      const more = el("button", "copy sm-folder-more");
+      more.type = "button";
+      more.title = t("More");
+      more.setAttribute("aria-label", t("More"));
+      more.setAttribute("aria-haspopup", "menu");
+      more.append(svg(DOTS, 14, 2));
+      more.onclick = (e) => {
+        e.stopPropagation();
+        if (more.classList.contains("open")) return closeAgentMenu();
+        openRowMenu(more, acts);
+      };
+      r.append(more);
+      r.oncontextmenu = (e) => { e.preventDefault(); openRowMenu(more, acts); };
     }
 
     r.title = path;
@@ -727,7 +832,7 @@ magpie.plugin("sessions", (ctx) => {
     wrap.dataset.depth = String(depth);
     const r = el("div", "row sess sm-sess");
     r.dataset.id = s.id;
-    if (a?.deletable && s.deletable) {
+    if (selecting && a?.deletable && s.deletable) {
       const c = el("input", "sm-check");
       c.type = "checkbox";
       c.checked = picked.has(s.id);
@@ -914,7 +1019,17 @@ magpie.plugin("sessions", (ctx) => {
     if (s.cwd) line(t("Folder"), s.cwd);
     line(t("Session ID"), s.id, copyBtn(s.id, t("Session id")));
     if (s.resume) line(t("Resume"), el("code", "", s.resume), copyBtn(s.resume, t("Resume command")));
-    for (const c of s.carry || []) line(t("Continue in {agent}", { agent: agentOf(c.agent).name }), el("code", "", c.command), copyBtn(c.command, t("Command")));
+    for (const c of s.carry || []) {
+      const agent = agentOf(c.agent).name;
+      if (!c.convert) line(t("Continue in {agent}", { agent }), el("code", "", c.command), copyBtn(c.command, t("Command")));
+      else {
+        // made only when asked: a new session of that agent's, this one only read
+        const b = copyBtn("", t("Command"));
+        b.title = t("Convert, then copy the command");
+        b.onclick = (e) => { e.stopPropagation(); carryOver(s, c.agent, false, b); };
+        line(t("Continue in {agent}", { agent }), el("span", "v", t("A new {agent} session is made from this conversation", { agent })), b);
+      }
+    }
     sessUsageDetail(d, s, line);
     if (s.path) line(t("File"), s.path + (s.files > 1 ? " " + t("+{n} more", { n: s.files - 1 }) : ""));
     if (s.transcript) {
@@ -977,11 +1092,14 @@ magpie.plugin("sessions", (ctx) => {
 
   // agentOf is an agent as the page names it: of those with sessions, else
   // by its id
+  // iconItems gives each agent in the menu just opened its icon, as its button has
+  const iconItems = (opts) => document.querySelectorAll(".proto-menu .pm-item").forEach((b, i) => opts[i]?.icon && b.firstChild.after(icon(opts[i].icon)));
   const agentOf = (id) => data?.agents.find((x) => x.agent === id) || { agent: id, name: id, icon: id };
 
-  // carryPick is the other agents that can carry a session on from its
-  // file as it is (#845; oh-my-pi forks a Pi session), in the app's menu:
-  // copy the command, or open it in the session terminal.
+  // carryPick is the other agents that can carry a session on (#845):
+  // from its file as it is (oh-my-pi forks a Pi session), or from a new
+  // session of theirs converted from it (Claude Code and Codex), in the
+  // app's menu: copy the command, or open it in the session terminal.
   function carryPick(s) {
     const b = el("button", "sess-pick sess-carry");
     b.type = "button";
@@ -994,20 +1112,34 @@ magpie.plugin("sessions", (ctx) => {
       if (b.classList.contains("open")) return closeProtoMenu();
       const opts = [];
       for (const c of s.carry) {
-        const name = agentOf(c.agent).name;
-        opts.push({ v: "copy\x01" + c.agent, name, literalName: true, note: "Copy the command", title: c.command });
-        if (data.terminal) opts.push({ v: "term\x01" + c.agent, name, literalName: true, note: "Open in session terminal", title: c.command });
+        const { name, icon: ic } = agentOf(c.agent);
+        const title = c.convert ? t("A new {agent} session is made from this conversation", { agent: name }) : c.command;
+        opts.push({ v: "copy\x01" + c.agent, name, icon: ic, literalName: true, note: c.convert ? "Convert, then copy the command" : "Copy the command", title });
+        if (data.terminal) opts.push({ v: "term\x01" + c.agent, name, icon: ic, literalName: true, note: c.convert ? "Convert, then open in session terminal" : "Open in session terminal", title });
       }
       openProtoMenu(b, opts, "", (v) => {
         b.focus({ preventScroll: true });
         const [how, to] = v.split("\x01");
         const c = s.carry.find((x) => x.agent === to);
         if (!c) return;
-        if (how === "copy") copy(c.command, t("Command"));
+        if (c.convert) carryOver(s, to, how === "term");
+        else if (how === "copy") copy(c.command, t("Command"));
         else api("sessions/terminal", { agent: s.agent, id: s.id, in: to }).then(() => status(t("Opening in session terminal"), "ok"), (err) => status(err.message, "err"));
       }, "Continue in another agent", "sess-carry-menu", "right");
+      iconItems(opts);
     };
     return b;
+  }
+
+  // carryOver converts a session for another agent (Claude Code's for
+  // Codex, Codex's for Claude Code) when the user picks it, then copies the
+  // line that opens the new one, or opens it in the session terminal
+  function carryOver(s, to, open, btn) {
+    const agent = agentOf(to).name;
+    api("sessions/carry", { agent: s.agent, id: s.id, to, open }).then((r) => {
+      if (open) status(t("Made a new {agent} session from this one, opening in session terminal", { agent }), "ok");
+      else copy(r.command, t("Command"), btn, t("Made a new {agent} session from this one, and copied the command that opens it", { agent }));
+    }, (err) => status(err.message, "err"));
   }
 
   // drawTalk fills box with what was said in a session, read from the

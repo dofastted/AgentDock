@@ -15,7 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const vendors = [
@@ -95,6 +95,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (let i = 0; ; i++) {
         try { await head.scrollIntoViewIfNeeded({ timeout: 1000 }); break; } catch (e) { if (i >= 4) throw e; }
       }
+      // the clicks below are at the row's buttons' places, so the whole row
+      // is brought on screen, by the wheel: magpie puts back a scroll the
+      // reader didn't make, and a row only partly shown is left where it is
+      // by scrollIntoViewIfNeeded; Settings' own landing can still put the
+      // view back, so the row is on screen twice, a second apart
+      for (let i = 0, seen = 0; ; i++) {
+        const below = await head.evaluate((e) => Math.ceil(e.getBoundingClientRect().bottom - innerHeight + 24));
+        if (below <= 0 && ++seen === 2) break;
+        assert(i < 12, `the search row comes on screen: ${below}px below`);
+        if (below > 0) {
+          seen = 0;
+          await page.mouse.move(width / 2, 700);
+          await page.mouse.wheel(0, below);
+        }
+        await page.waitForTimeout(below > 0 ? 200 : 1000);
+      }
       assert.equal(await list.locator("xpath=preceding-sibling::div[1]").textContent(), w.head);
       assert.equal(await head.locator(".name").innerText(), w.name);
       assert((await head.locator(".sub").innerText()).includes(w.none));
@@ -115,7 +131,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const b = await loc.boundingBox();
         await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
       };
-      const before = await where();
+      let before = await where();
       // SearXNG: its address
       await click(head.locator("button.search-vendor"));
       await click(page.locator(".proto-menu .pm-item", { hasText: "SearXNG" }));
@@ -177,6 +193,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await list.locator(".row.search-api").nth(1).locator("button.search-eye").count(), 0);
       assert.equal(await tavily.locator(".sub").innerText(), "tvly…abcd");
       const sent = posted.length;
+      // the clicks so far moved nothing; Image generation timeout, drawn
+      // above, puts the saved keys past the window's foot at 420, so the
+      // reader wheels down to them, and the clicks from there move nothing
+      assert.deepEqual(await where(), before, "the clicks moved nothing");
+      await reach(page, tavily.locator("button.search-eye"));
+      before = await where();
       await click(tavily.locator("button.search-eye"));
       await page.waitForFunction(() => document.querySelector("#searchList .row.search-api .sub.revealed"));
       assert.equal(await tavily.locator(".sub").innerText(), "tvly-dev-0123456789abcd");

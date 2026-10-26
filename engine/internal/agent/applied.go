@@ -101,6 +101,11 @@ func (a *Agent) Apply(key, v string) error {
 	if f == nil {
 		return nil
 	}
+	// a found group named by its old id is written as it is listed now,
+	// auto/<model> (autoref.go)
+	if pub, ok := a.publicValue(v); ok {
+		v = pub
+	}
 	was := a.Values()
 	if err := f.Set(v); err != nil {
 		return err
@@ -314,8 +319,8 @@ func groupNamed(v string) string {
 	// magpie set (GroupFor takes it off; so does GroupFinder)
 	v = strings.TrimSuffix(strings.TrimSpace(v), "[1m]")
 	v = strings.TrimPrefix(v, magpieID+"/")
-	if strings.HasPrefix(v, provider.GroupPrefix) {
-		return v
+	if provider.IsGroupRef(v) {
+		return provider.CanonicalRef(v) // auto/<model> and group/auto-<slug> are one group
 	}
 	g, _ := provider.GroupFor(v)
 	return g
@@ -731,6 +736,8 @@ func (a *Agent) Disconnect() error {
 	// by itself (a start's Sync, Codex's account failover) puts magpie back
 	// in, this Disconnect's own writes included (paynezhuang on Discord)
 	stash(map[string]string{a.ID + disconnectedKey: "1"})
+	// the user's own say over a harness Kiro Crew's connect put on
+	kiroCrewUserLeft(a.ID)
 	before, rec := a.Values(), appliedOf(a.ID)
 	if a.Unwire != nil {
 		if err := a.Unwire(); err != nil {

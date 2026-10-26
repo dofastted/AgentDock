@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -49,11 +50,43 @@ func accountAgent(p provider.Provider) string {
 // the one Claude Code and its Agent SDK (Claude Desktop's chats) send: its
 // billing line or the SDK's identity line anywhere in the system
 // instruction turns the request away, on every model, while the same words
-// in a message go through (#666). magpie doesn't hide them from Google; it
-// says why, so no one chases a quota that isn't spent.
+// in a message go through (#666). Codex's own identity line for its GPT-5
+// models is turned away the same way (antigravityTurnsCodexAway). magpie
+// doesn't hide them from Google; it says why, so no one chases a quota that
+// isn't spent.
 func antigravityTurnsAway(system string) bool {
 	return strings.Contains(system, "x-anthropic-billing-header:") ||
-		strings.Contains(system, "built on Anthropic's Claude Agent SDK")
+		strings.Contains(system, "built on Anthropic's Claude Agent SDK") ||
+		antigravityTurnsCodexAway(system)
+}
+
+// codexTurnedAway are the identity lines of Codex's own prompts for its
+// GPT-5 models (gpt-5.6-sol's "You are Codex, an agent based on GPT-5. You
+// and the user share one workspace…"), lower-cased: Antigravity turns them
+// away in the system instruction, in any case, on every model, with the
+// same 429. Codex sends its model's prompt as the conversation's first
+// developer message, and a thread begun on a GPT model keeps it when it is
+// switched to another (/model, resume -m) or forked as an agent's thread,
+// so such a thread on an Antigravity model never got an answer (Jodiezzzzzz
+// on X, 10-27: "exceeded retry limit, last status: 429" from Codex while
+// dsh was served on the same account and model). magpie's own Codex prompt
+// for other models ("You are Codex, based on GPT-5."), "an AI agent based on
+// GPT-5" and GPT-6's prompt go through, tried on a real account.
+var codexTurnedAway = []string{
+	"you are codex, an agent based on gpt-5",
+	"you are codex, a coding agent based on gpt-5",
+}
+
+// antigravityTurnsCodexAway says whether system carries Codex's GPT-5
+// identity line that Antigravity turns away.
+func antigravityTurnsCodexAway(system string) bool {
+	low := strings.ToLower(system)
+	for _, line := range codexTurnedAway {
+		if strings.Contains(low, line) {
+			return true
+		}
+	}
+	return false
 }
 
 // antigravityRefuses is what Antigravity says when it turns such a request
@@ -85,22 +118,41 @@ const agForeseeing = 6 * time.Hour
 // Antigravity has refused it within agForeseeing. It holds for exactly the
 // requests antigravityTurnedAway would tell as the refusal, and it changes
 // nothing about the account.
-func (s *Server) antigravityForeseen(p provider.Provider, from provider.Protocol, body []byte) bool {
+// What it gives is the hint for that system prompt, or "" when p would be
+// asked.
+func (s *Server) antigravityForeseen(p provider.Provider, from provider.Protocol, body []byte) string {
 	if accountAgent(p) != "antigravity" {
-		return false
+		return ""
 	}
 	at := s.agTurnedAway.Load()
 	if at == 0 || time.Since(time.Unix(0, at)) > agForeseeing {
-		return false
+		return ""
 	}
 	req, err := parse(from, body)
-	return err == nil && antigravityTurnsAway(req.System)
+	if err != nil || !antigravityTurnsAway(req.System) {
+		return ""
+	}
+	return antigravityHint(req.System)
 }
 
 // antigravityTurnedAwayHint is what magpie adds to Antigravity's words, after
 // " — ", for the agent and the Routing page, which says it apart from them in
 // its own language (routing/client.js AG_TURNED_AWAY).
 const antigravityTurnedAwayHint = "Antigravity answers this 429 to the system prompt of Claude Code and the Claude Agent SDK (Claude Desktop's chats) whatever quota is left, so it is not a quota and waiting won't help; use another provider for these chats, or put one after Antigravity in a routing group"
+
+// antigravityCodexHint is the hint for Codex's GPT-5 system prompt
+// (routing/client.js AG_CODEX): the thread keeps the prompt it began with,
+// and a new one on the Antigravity model is sent magpie's own.
+const antigravityCodexHint = "Antigravity answers this 429 to Codex's own system prompt for GPT-5 models whatever quota is left, so it is not a quota and waiting won't help; a Codex chat begun on a GPT model keeps that prompt after a model switch or a fork, so start a new chat on this model"
+
+// antigravityHint is the hint for what Antigravity turned away with system
+// as its system instruction.
+func antigravityHint(system string) string {
+	if antigravityTurnsCodexAway(system) {
+		return antigravityCodexHint
+	}
+	return antigravityTurnedAwayHint
+}
 
 // turnedAwayStatus is what the agent is told when nobody is left to answer
 // what Antigravity turned away: a request it shouldn't send again as it is.
@@ -794,6 +846,13 @@ func plainSchema(raw json.RawMessage) json.RawMessage {
 					out["type"] = "array"
 				}
 			}
+			if out["type"] == "array" && out["items"] == nil {
+				// Google wants items on every array, and turns the whole
+				// request away over one with none ("…properties[batch].
+				// items: missing field", Claude Desktop's own MCP tools,
+				// plugins#375): any item is what JSON Schema means by none
+				out["items"] = map[string]any{}
+			}
 			if req, ok := out["required"].([]any); ok {
 				// required names only the properties there are
 				props, _ := out["properties"].(map[string]any)
@@ -1220,4 +1279,43 @@ func hasResponse(parts []map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// antigravityRound is ask, a round of magpie's own search for p, told as
+// the refusal it is when Antigravity turns the system prompt away: its 429
+// or the reply's own error event gets the hint, and the attempt is marked
+// so the account doesn't rest. Codex asks every turn with its web_search
+// tool, which an Antigravity model is given magpie's search for, so its
+// turns went this way and came back as the plain 429 that Codex retried to
+// its limit (Jodiezzzzzz on X, 10-27).
+func antigravityRound(w http.ResponseWriter, p provider.Provider, ask round) round {
+	if accountAgent(p) != "antigravity" {
+		return ask
+	}
+	return func(ctx context.Context, req *Request) (<-chan Event, int, string) {
+		in, status, msg := ask(ctx, req)
+		if in == nil {
+			if status == http.StatusTooManyRequests && antigravityTurnedAway(p, req.System, msg) {
+				markAntigravityTurnsAway(w, req.System)
+				msg += " — " + antigravityHint(req.System)
+			}
+			return in, status, msg
+		}
+		out := make(chan Event, cap(in))
+		go func() {
+			defer close(out)
+			for ev := range in {
+				if ev.Kind == KError && markAntigravityRefused(w, p, req.System, ev.Text) {
+					ev.Text += " — " + antigravityHint(req.System)
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					// in's own reader stops sending once ctx is done
+					return
+				}
+			}
+		}()
+		return out, status, msg
+	}
 }

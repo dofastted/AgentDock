@@ -214,6 +214,10 @@ type agentJSON struct {
 	// StaleCopies: those copies, each with what it is and when it
 	// started, for the opened row to say which is left to reopen and how
 	StaleCopies []agent.StaleCopy `json:"staleCopies,omitempty"`
+	// AppRestart: its desktop app (Claude Desktop, WorkBuddy) running on
+	// what it read before magpie's last change, for the row's Restart
+	// (agent.AppBehind)
+	AppRestart *agent.AppRun `json:"appRestart,omitempty"`
 	// Joined: connected with its own models still in its list (Codex
 	// signed in with ChatGPT, agent.Agent.Join)
 	Joined bool `json:"joined,omitempty"`
@@ -395,8 +399,11 @@ type settingsJSON struct {
 	// settings, environment, system, off or none
 	ProxyNow    string `json:"proxyNow"`
 	ProxySource string `json:"proxySource"`
-	// whether magpie opens at login: the system's record, not a setting
-	Login bool `json:"login"`
+	// whether magpie opens at login: the system's record, not a setting;
+	// LoginAllow, the record is there but the user switched it off in
+	// System Settings › Login Items, which is where it's allowed again
+	Login      bool `json:"login"`
+	LoginAllow bool `json:"loginAllow,omitempty"`
 	// the model that describes images when Vision names none, and those
 	// that can be named
 	VisionAuto   string     `json:"visionAuto,omitempty"`
@@ -404,6 +411,10 @@ type settingsJSON struct {
 	// the Vision the user picked when magpie can't find it any more:
 	// VisionAuto describes in its place, and the row says so
 	VisionMissing string `json:"visionMissing,omitempty"`
+	// VisionNotMarked are the custom providers (AddedByAddress) with a model left
+	// out of VisionModels only because nothing says it takes images: the
+	// user can say so in the provider's Names & levels (nexnull on Discord)
+	VisionNotMarked []string `json:"visionNotMarked,omitempty"`
 	// the reasoning levels of the model that describes images now, and the
 	// one it is asked at when one is picked (VisionEffort fitted to them)
 	VisionEfforts   []string `json:"visionEfforts,omitempty"`
@@ -462,6 +473,10 @@ type settingsJSON struct {
 	// the ChatGPT accounts signed in, each of which can have a daily
 	// warm-up time of its own (#957)
 	CodexUsers []string `json:"codexUsers,omitempty"`
+	// the Codexes here that kept the background compaction's table (and
+	// its share) out of the config at the last sync: too old for it
+	// (before 0.163.0-alpha.8), or of no known version (codex_async.go)
+	CodexAsyncHeld []agent.CodexReader `json:"codexAsyncHeld,omitempty"`
 	// whether a WorkBuddy (China) account is signed in, and each one's
 	// last daily check-in
 	WorkBuddy         bool                        `json:"workbuddy"`
@@ -583,6 +598,10 @@ type searchFailedJSON struct {
 	At           time.Time `json:"at"`
 }
 
+// loginState is whether magpie opens at login, as the system will act on
+// it. A var for the tests: the real one asks the user's own system.
+var loginState = autostart.Enabled
+
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
@@ -622,12 +641,14 @@ func settingsState() settingsJSON {
 			s.OTelEnv = true
 		}
 	}
-	s.Login = autostart.Enabled()
+	login := loginState()
+	s.Login, s.LoginAllow = login != autostart.Off, login == autostart.NeedsAllowing
 	if s.LAN {
 		s.LANURLs, s.LANContainer = gateway.LANURLs(), gateway.ContainerAddrs()
 	}
 	s.CodexWarmed, s.ClaudeWarmed = latest(provider.CodexWarmed()), latest(provider.ClaudeWarmed())
 	s.CodexUsers = codexUsers()
+	s.CodexAsyncHeld = agent.CodexAsyncHeld()
 	s.WorkBuddy, s.WorkBuddyCheckins = provider.HasWorkBuddy(), provider.WorkBuddyCheckins()
 	s.Trae, s.TraeCheckins = provider.HasTrae(), provider.TraeCheckins()
 	s.MiniMax, s.MiniMaxCheckins = provider.HasMiniMax(), provider.MiniMaxCheckins()
@@ -643,6 +664,11 @@ func settingsState() settingsJSON {
 				m.Provider, m.PName = "", e.Group
 			}
 			s.VisionModels = append(s.VisionModels, m)
+		} else if e.Group == "" && !e.Images && e.ImageInput == nil && e.Provider.AddedByAddress() && e.Provider.Ready() &&
+			!slices.Contains(s.VisionNotMarked, cmp.Or(e.Provider.Name, e.Provider.ID)) {
+			// unknown, not answered: one its list or the user said no to
+			// (ModelImages) isn't counted
+			s.VisionNotMarked = append(s.VisionNotMarked, cmp.Or(e.Provider.Name, e.Provider.ID))
 		}
 	}
 	s.TitleModels = []modelRef{}
@@ -819,6 +845,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// before the first paint rather than after the settings come
 		list := builtinsState()
 		boot["featuresOff"] = builtinsOff(list)
+		// and where the gateway listens, so the sidebar's line at its foot
+		// is drawn from the start, not held back until providers has come
+		// in (#1519's read waits for the agents); only this process's own,
+		// for one served by another magpie is the providers' read to find
+		if served.Load() != nil {
+			boot["sideGateway"] = map[string]any{"url": gateway.URL(), "running": true, "boot": true}
+		}
 		// and the settings of those the page draws (kernel.js)
 		boot["pluginConfig"] = builtinConfig(list)
 		// on Omarchy the page takes its theme's look before it paints
@@ -959,6 +992,22 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		writeJSON(rw, c)
+	})
+	// quits the agent's desktop app and opens it again, so it reads what
+	// magpie wrote: the row's Restart, after the user said yes to it
+	mux.HandleFunc("POST /api/agents/restart/{id}", func(rw http.ResponseWriter, r *http.Request) {
+		a, err := agent.Find(r.PathValue("id"))
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		if err := a.RestartApp(ctx); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, state())
 	})
 	// what disconnecting an agent changes in its files, line by line, for
 	// the dialog asking it (agent.DisconnectPreview); its files when the
@@ -1128,6 +1177,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	cliBehindRoutes(mux)
 	gatewayFixRoutes(mux)
 	gatewayModeRoutes(mux)
+	privacyModelRoutes(mux)
+	maskingRoutes(mux)
 	builtinRoutes(mux)
 	environmentRoutes(mux)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
@@ -1173,6 +1224,26 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if _, sent := fields["noAutoDownload"]; !sent {
 			in.NoAutoDownload = cur.NoAutoDownload
 		}
+		// nor the update channel (ssharpcc on X)
+		if _, sent := fields["updateChannel"]; !sent {
+			in.UpdateChannel = cur.UpdateChannel
+		}
+		// nor whether the masked words match in any case
+		if _, sent := fields["redactWordsAnyCase"]; !sent {
+			in.RedactWordsAnyCase = cur.RedactWordsAnyCase
+		}
+		// nor whether a key goes as a made-up one of its form
+		if _, sent := fields["redactShape"]; !sent {
+			in.RedactShape = cur.RedactShape
+		}
+		// nor how long an image is given to be drawn
+		if _, sent := fields["imageTimeout"]; !sent {
+			in.ImageTimeout = cur.ImageTimeout
+		}
+		// nor how long a routing group's classifier is given (#2934)
+		if _, sent := fields["classifyTimeout"]; !sent {
+			in.ClassifyTimeout = cur.ClassifyTimeout
+		}
 		// nor fitting images, which an older page does not send: off is the
 		// default, and a save must not turn a choice on back off
 		if _, sent := fields["imageFit"]; !sent {
@@ -1205,12 +1276,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.AllowIPs = cur.AllowIPs                         // set on its own (allowips below)
 		in.FetchPrivate = cur.FetchPrivate                 // in settings.json only
 		in.GitHubToken = cur.GitHubToken                   // set on its own (github-token below), never sent to the page
+		in.ProxyCustom = cur.ProxyCustom                   // set by settings.Save from the proxy, never by the page
 		in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
+		in.ClaudeRunsMost = cur.ClaudeRunsMost             // magpie claude-code runs, or settings.json (#2956)
 		in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
 		in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
+		in.RedactModel = cur.RedactModel                   // set on its own (privacy-model)
+		in.RedactModelName = cur.RedactModelName           // set on its own (privacy-model)
+		in.RedactActions = cur.RedactActions               // set on their own (redact-actions below)
+		in.RedactAllow = cur.RedactAllow                   // set on its own (redact-allow below)
 		in.DisabledModels = cur.DisabledModels             // set on their own (disabled-models below, #1867)
 		in.WSLDistrosOff = cur.WSLDistrosOff               // set on its own (/api/environments/{distro}/enabled)
+		// the request archive on this computer: the archive's switch while no
+		// S3 bucket, and its size in settings.json only
+		in.RequestArchiveLocal, in.RequestArchiveLocalMB = cur.RequestArchiveLocal, cur.RequestArchiveLocalMB
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
 		in.QuotaReads = cur.QuotaReads // set on its own (quota-reads below)
@@ -1219,6 +1299,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.PanelUsageHidden = cur.PanelUsageHidden
 		// and the clients the Usage page's Agents list leaves out, set there
 		in.UsageAgentsHidden = cur.UsageAgentsHidden
+		// and the names models' usage is counted under (magpie model alias)
+		in.UsageAliases = cur.UsageAliases
 		// and the clients it counts as agents, set there too (#1958)
 		in.ClientAgents = cur.ClientAgents
 		// how agents' lists name models, set on its own for the agents to be told
@@ -1317,6 +1399,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// tried again through it, not in six hours (#294), and marked so
 		// before this answers: the page stops asking on the old error
 		if strings.TrimSpace(in.Proxy) != strings.TrimSpace(cur.Proxy) && updates.json().State == "error" && updates.begin() {
+			go updates.run()
+		}
+		// another update channel: the feed is asked again on it, so the
+		// version row and the header's Update follow (a download from
+		// every version is dropped on Stable, run), unless automatic
+		// updates are off and nothing was found
+		if in.UpdateChannel != cur.UpdateChannel && (!in.NoAutoUpdate || updates.json().Latest != "") && updates.begin() {
 			go updates.run()
 		}
 		writeJSON(rw, settingsState())
@@ -1625,11 +1714,11 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		v := strings.TrimSpace(in.Model)
-		if v != "" {
+		if v != "" && v != settings.CodexAutoReviewSession {
 			// Resolve intentionally accepts arbitrary names under a known
 			// provider. An approval reviewer must be a model or group magpie
 			// actually lists, including providers kept unlisted for routing.
-			if !slices.ContainsFunc(provider.Served(), func(e provider.Entry) bool { return e.ID == v }) {
+			if !slices.ContainsFunc(provider.Served(), func(e provider.Entry) bool { return e.ID == v || e.Group != "" && provider.SameRef(e.ID, v) }) {
 				fail(rw, fmt.Errorf("no model %s for Codex's auto-review", v))
 				return
 			}
@@ -2085,6 +2174,41 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// what is done with a value of a kind found, other than masking it
+	// (warn, block), all of them each time (#1977)
+	mux.HandleFunc("POST /api/settings/redact-actions", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Actions map[string]string `json:"actions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.RedactActions = in.Actions
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// the values masking lets go as written, all of them each time (#1977)
+	mux.HandleFunc("POST /api/settings/redact-allow", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Allow []string `json:"allow"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.RedactAllow = in.Allow
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// the GitHub token the library's requests to GitHub carry: set, or
 	// taken away with ""
 	mux.HandleFunc("POST /api/settings/github-token", func(rw http.ResponseWriter, r *http.Request) {
@@ -2322,11 +2446,13 @@ func state() stateJSON {
 			aj.Source = a.Source()
 			aj.Failover = a.FailingOver != nil && a.FailingOver()
 		}
+		aj.AppRestart = a.AppBehind()
 		if a.Import != nil {
 			aj.Import = a.Import()
 			if a.Added != nil {
-				added := a.Added()
-				aj.Added = &added
+				if added, known := a.Added(); known {
+					aj.Added = &added
+				}
 			}
 		}
 		if a.Launch != nil {
@@ -2426,6 +2552,13 @@ func fail(rw http.ResponseWriter, err error) {
 			out["reason"] = admin.Err.Error()
 		}
 	}
+	// a bun this Windows or processor can't run at all: said, with what
+	// to do, in the reader's language (zgcwkj on Discord)
+	var bun *plugin.BunUnstartableError
+	if errors.As(err, &bun) {
+		out["code"], out["bun"], out["bunWhy"] = "bun_unstartable", bun.Bun, bun.Why
+		out["said"] = bunSaid[bun.Why]
+	}
 	_ = json.NewEncoder(rw).Encode(out)
 }
 
@@ -2499,4 +2632,12 @@ func countClient(m map[string]string, client, as string) (map[string]string, err
 	}
 	out[strings.ToLower(client)] = as
 	return out, nil
+}
+
+// bunSaid is what the page says for a bun that can't start, by why: an
+// i18n.js key the page's api() puts through t(), kept here so app.js
+// carries one line for it, not both sentences
+var bunSaid = map[string]string{
+	"windows": "Bun, which runs plugins, can't start on this version of Windows: it needs Windows 10 version 1809 or later, or Windows Server 2019 or later. Update Windows to use plugins, or set MAGPIE_BUN to a bun that runs here.",
+	"cpu":     "Bun, which runs plugins, can't start on this computer's processor: it needs an x64 processor with SSE4.2 (Intel or AMD from 2008 on; in a virtual machine, a CPU type that passes it through). Run magpie on such a processor to use plugins, or set MAGPIE_BUN to a bun that runs here.",
 }
