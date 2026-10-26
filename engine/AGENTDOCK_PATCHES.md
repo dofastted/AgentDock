@@ -2,8 +2,8 @@
 
 `engine/` is a squash `git subtree` of github.com/yetone/magpie `main`.
 
-- Split: `7597c13237c6eaecba89b478771f2f1d244108e4` (2026-10-16), pulled in `c00eb7543`. `main` had moved past the planned `674b6ca`; the pull includes that extra commit (`7597c1323`, provider curl-paste).
-- Last resolution: `internal/library/targets.go` conflicted. Kept upstream `SharedName` (Cursor editor files named for both apps) and AgentDock `switch targetKind(a.ID)`. Nothing dropped. `agents.go` and `i18n.js` auto-merged.
+- Split: `6afbe3f3047419bfd50e522526457bac3fa25f2c` (2026-10-27), pulled in `d47d96a02`. Previous split was `d783df46cbac9021e26a6bd71ca0b55544552eb2`.
+- Last resolution: ten files conflicted. Kept both sides where the hunks were different fields or calls (`agents.go` `WSLDistroOff` and `AgyStart`, `api.go` omit-preserves plus `WSLDistrosOff` and `RequestArchiveLocal`, `settings.go` `ImageFit` plus `ImageTimeout`/`ClassifyTimeout`, `app.js` `imageFit` plus `updateChannel`/`imageTimeout`/`classifyTimeout`, `index.html` Environments plus redact/otel, `settings_keep_test.go` both fixtures). `gateway.go` still runs `anthropicImagesFit`, then uses upstream's nil body and `SetBody` (the old `bytes.NewReader` would ignore that handoff). `targets.go` is `agentDir(a, ZCodeHome)`, so a WSL directory still wins and Windows `HOME` is used otherwise. Library MCP save keeps the `reaches` filter and adds `startupTimeout`. `wslClaudeClassifier` also skips a distro that is turned off. Nothing else was dropped.
 - Command: `git subtree pull --prefix=engine https://github.com/yetone/magpie.git main --squash`.
 - After every pull, on the Windows box: `cd engine && go vet ./... && go test -tags nogui ./...`.
 

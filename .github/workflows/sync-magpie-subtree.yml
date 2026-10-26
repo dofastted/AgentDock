@@ -1,0 +1,80 @@
+name: Sync magpie subtree
+
+on:
+  schedule:
+    # Once a day. A conflict fails the job; a clean pull opens a PR.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pull upstream magpie
+        id: sync
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          tip=$(git ls-remote https://github.com/yetone/magpie.git refs/heads/main | awk '{print $1}')
+          split=$(git log --grep='git-subtree-dir: engine' -1 --format=%B | awk '/^git-subtree-split: / { print $2; exit }')
+          echo "upstream $tip"
+          echo "split    $split"
+          if [ -z "$split" ]; then
+            echo "no engine subtree split in history" >&2
+            exit 1
+          fi
+          if [ "$tip" = "$split" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "engine/ is already at upstream main"
+            exit 0
+          fi
+
+          short=${tip:0:12}
+          branch="sync/magpie-${short}"
+          git checkout -B "$branch"
+          if ! git subtree pull --prefix=engine https://github.com/yetone/magpie.git main --squash -m "Merge magpie subtree: upstream ${short}"; then
+            echo "subtree pull conflicted; resolve with the hunk rule in engine/AGENTDOCK_PATCHES.md" >&2
+            git diff --name-only --diff-filter=U >&2 || true
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.sync.outputs.branch }}
+          SHORT: ${{ steps.sync.outputs.short }}
+          PR_BODY: |
+            Pulls yetone/magpie main into engine/ with git subtree pull --squash.
+
+            After merge, refresh engine/AGENTDOCK_PATCHES.md:
+
+                git diff --name-status SPLIT HEAD:engine
+
+            M is an edited upstream file. A is fork-only. On Windows, from engine/: go vet ./... and go test -tags nogui ./...
+
+            A conflict fails this workflow instead of pushing markers. Resolve hunk by hunk (keep both when they do not exclude each other; keep AgentDock when they do) and update the checklist.
+        run: |
+          set -euo pipefail
+          git push -u origin "$BRANCH"
+          if gh pr view "$BRANCH" --json number --jq .number >/dev/null 2>&1; then
+            echo "pull request already open for $BRANCH"
+            exit 0
+          fi
+          gh pr create --base master --head "$BRANCH" \
+            --title "Sync magpie subtree ${SHORT}" \
+            --body "$PR_BODY"
