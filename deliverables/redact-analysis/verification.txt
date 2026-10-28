@@ -1,0 +1,74 @@
+脱敏插件源码与技术路线验证记录
+日期：2026-10-28
+平台：Linux / amd64（WSL2）
+工具链：go version go1.26.8 linux/amd64
+验证对象：打包时当前工作树字节；未修改业务源码。
+
+[1] 依赖解析
+目录：原仓库 engine/
+命令：go list -tags nogui -deps -test -json ./internal/redact ./internal/masking ./internal/gwmw ./plugins/redact
+结果：成功；本地唯一包目录 21 个。归档来源分层及路径见 SOURCE-INDEX.tsv。
+
+[2] 原仓库核心现有测试
+目录：原仓库 engine/
+命令：env -u MAGPIE_EVAL_CACHE go test -count=1 -tags nogui ./internal/redact ./internal/masking ./internal/gwmw ./plugins/redact
+实际输出：
+ok  	github.com/yetone/magpie/internal/redact	1.064s
+ok  	github.com/yetone/magpie/internal/masking	0.008s
+ok  	github.com/yetone/magpie/internal/gwmw	0.003s
+ok  	github.com/yetone/magpie/plugins/redact	0.034s
+结果：四包通过；强制 count=1，不以测试结果缓存代替执行。
+
+[3] 原仓库网关边界现有测试
+目录：原仓库 engine/
+命令：env -u MAGPIE_EVAL_CACHE go test -count=1 -tags nogui ./internal/gateway -run '^(TestRedactedRequest|TestBlockedKindHoldsTheRequestBack|TestWarnedKindGoesAsWritten|TestSignedThinkingGoesBackAsSigned|TestToolCallIDsGoBackAsGiven)$'
+实际输出：
+ok  	github.com/yetone/magpie/internal/gateway	0.109s
+结果：通过。所选用例使用本地测试 upstream，覆盖实际发送内容、block 不发送、warn 原样、签名和工具 ID 往返。
+范围说明：并未运行整个 gateway 包的全部测试。
+
+[4] 精简源码解包复测
+目录：临时解包目录的 engine/
+来源：350 文件来源快照先写入临时 source-stage.zip，CRC 校验后解包。
+命令：env -u MAGPIE_EVAL_CACHE go test -count=1 -tags nogui ./internal/redact ./internal/masking ./internal/gwmw ./plugins/redact
+实际输出：
+ok  	github.com/yetone/magpie/internal/redact	1.009s
+ok  	github.com/yetone/magpie/internal/masking	0.008s
+ok  	github.com/yetone/magpie/internal/gwmw	0.003s
+ok  	github.com/yetone/magpie/plugins/redact	0.024s
+结果：四包通过；未删改既有目标测试来规避依赖。归档的 gateway/gui/provider 参考源码不作为完整包编译承诺。
+
+[5] 实际 core API smoke（不是新增永久测试）
+目录：临时解包目录的 engine/
+命令：go run -tags nogui ./cmd/redact-analysis-smoke
+环境：取消 MAGPIE_EVAL_CACHE；XDG_CONFIG_HOME/XDG_CACHE_HOME 指向临时隔离目录，保留现有 Go 构建缓存；没有设置持久化标签 key 路径。
+输入：代码中合成的 key 与邮箱，只用于本地处理，未访问外部 provider 或下载模型。
+实际退出码：0
+实际标准输出：
+TEXT masked=credential={{API_KEY_chxykjfs}}; contact={{EMAIL_medurpym}}; hits=2; restored_equal=true
+JSON valid=true; nested_arguments_restored=true; protocol_id_kept=true; hits=4
+SSE wire_fragments=6; content_events=3; placeholder_splits=2; keepalive_kept=true; restored_equal=true; restored_places=1
+WARN original_kept=true; replaced=0; action_reported=warn
+SMOKE PASS: synthetic data only; no external provider or model download
+
+断言：文本原值均被替换且 Restore 逐字相等；JSON 有效、协议 ID 未改、嵌套 arguments 往返相等；一个标签跨 3 个内容事件，事件再分为 6 个 Write 片段，拼接后的回复逐字相等；SSE keepalive 未丢；warn 原样保留并报告且替换数为 0。
+说明：标签 suffix 来自本次进程的随机 key，不是未来运行应固定匹配的测试常量。临时命令不纳入源码归档，完成后删除。
+
+[6] 来源快照完整性
+源码/资源：350 文件，2,455,501 bytes。
+分类：core=51，core-fixture=3，dependency=250，dependency-fixture=3，reference=28，client=4，native-reference=7，module=2，license=2。
+已核对：每个来源成员在仓库与临时解包中的字节相等；路径无绝对路径或 ..；无符号链接；包含 engine/LICENSE 与 LICENSES/magpie-MIT.txt；无运行态 redact.key/.env/settings.json/providers.json/auth.json 文件名。
+原始来源哈希：SOURCE-MANIFEST.sha256；分类、大小、路径：SOURCE-INDEX.tsv。
+临时 source-stage.zip：CRC 检查通过。
+
+[7] 验证限制
+- 未运行完整仓库全部测试，未构建完整 AgentDock，也未执行 Windows/macOS 构建或桌面 UI。
+- 模型采用提交在仓库中的回放；未加载真实权重、测试 GPU/CPU 实机推理或评估新的精度指标。
+- 未做生产吞吐/超大载荷基准、完整安全审计、哈希碰撞实验或任意协议兼容性穷举。
+- 不分发 Go 第三方模块缓存、上游原生依赖 checkout、模型权重或预编译程序，离线且依赖未缓存时不能保证复测成功。
+
+[8] 交付 ZIP 打包审计
+首轮 ZIP 已生成并校验：355 个唯一成员（350 来源文件 + 5 交付说明/清单）。
+检查通过：CRC、成员集合精确匹配、无重复/绝对/.. 路径、每个来源文件与工作树字节相同、逐项 SHA-256 与 SOURCE-MANIFEST 一致、归档中的说明文件与交付目录字节相同。
+已核对技术路线中的完整 engine/...:line 引用：目标存在于归档且行号在文件范围内；机制结论依据实际源码阅读，不把行号检查当作语义证明。
+本文验证记录纳入归档后重新封包，并对交付 ZIP 执行相同审计；最终 ZIP 身份单独写入包外 ARCHIVE.sha256，避免自引用哈希。
