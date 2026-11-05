@@ -795,7 +795,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	// the goroutine dump first, ahead of every lock the rest can be stuck
 	// on (dumpFirst)
-	return s.dumpFirst(s.counted(holdCatalog(corsGuard(callerGuard(withCaller(keyLimited(mux)))))))
+	return s.dumpFirst(s.counted(holdCatalog(corsGuard(callerGuard(withCaller(keyLimited(foldDoubledVersion(mux))))))))
 }
 
 // responsesOverHTTP answers a GET on /v1/responses, which is how a client
@@ -811,6 +811,51 @@ func responsesOverHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Allow", "POST")
 	writeError(w, provider.Responses, http.StatusMethodNotAllowed, "POST /v1/responses")
+}
+
+// foldDoubledVersion rewrites /v1/v1/… and /v1/v1beta/… onto the route a
+// client meant. Anthropic's SDK joins with string concatenation
+// (baseURL + "/v1/messages"), not URL resolution, so a base of
+// http://host/v1 — the same base OpenAI clients use — is asked at
+// /v1/v1/messages and answered by the catch-all 404. A /v1 that is
+// itself the route (/v1/messages, /v1/chat/completions) is left as it is.
+func foldDoubledVersion(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, ok := withoutDoubledVersion(r.URL.Path)
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = path
+		r2.URL.RawPath = ""
+		next.ServeHTTP(w, r2)
+	})
+}
+
+// withoutDoubledVersion drops a leading /v1 while what follows is /v1 or
+// /v1beta, repeating so /v1/v1/v1/messages lands on /v1/messages.
+func withoutDoubledVersion(path string) (string, bool) {
+	folded := false
+	for {
+		rest, ok := stripDoubledVersion(path)
+		if !ok {
+			return path, folded
+		}
+		path = rest
+		folded = true
+	}
+}
+
+func stripDoubledVersion(path string) (string, bool) {
+	const lead = "/v1"
+	switch {
+	case path == lead+"/v1", strings.HasPrefix(path, lead+"/v1/"):
+	case path == lead+"/v1beta", strings.HasPrefix(path, lead+"/v1beta/"):
+	default:
+		return "", false
+	}
+	return path[len(lead):], true
 }
 
 // catalogSize is how many models the catalog has, as info says, kept by

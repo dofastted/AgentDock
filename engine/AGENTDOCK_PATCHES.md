@@ -33,7 +33,7 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/appdir/env.go` | inherited CLI env is not rewritten to the engine dir |
 | `internal/appdir/env_test.go` | data-dir isolation |
 | `internal/gui/api.go` | `environmentRoutes`; native routes; a settings save that omits `imageFit` keeps it |
-| `internal/gateway/gateway.go` | calls `anthropicImagesFit` on the final Anthropic body |
+| `internal/gateway/gateway.go` | calls `anthropicImagesFit` on the final Anthropic body; folds a doubled `/v1` (`/v1/v1/…`, `/v1/v1beta/…`) onto the real route before the mux |
 | `internal/gui/assets/app.js` | Settings › Models › Images › Fit large images, default Off |
 | `internal/gui/assets/i18n.js` | Environments name/sub in zh, zh-TW, ja, de; Fit large images |
 | `docs/subsystems/gateway-routing.md` | why Fit large images defaults to off |
@@ -68,6 +68,7 @@ No upstream counterpart at split `422d057`.
 - `AGENTDOCK_PATCHES.md`
 - `internal/gateway/anthropic_images.go` — scale oversized Anthropic images only when `ImageFit` is on
 - `internal/gateway/anthropic_images_test.go` — default-off and the fifth-image gate
+- `internal/gateway/doubled_version_test.go` — `/v1/v1/messages` and `/v1/v1beta/…` hit the same route as the single prefix
 - `internal/agent/environments.go`
 - `internal/agent/wsl_discovery_test.go`
 - `internal/agent/wsl_distros_off_test.go`
