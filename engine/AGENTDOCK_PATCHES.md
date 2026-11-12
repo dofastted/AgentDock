@@ -2,8 +2,8 @@
 
 `engine/` is a squash `git subtree` of github.com/yetone/magpie `main`.
 
-- Split: `6afbe3f3047419bfd50e522526457bac3fa25f2c` (2026-10-27), pulled in `d47d96a02`. Previous split was `d783df46cbac9021e26a6bd71ca0b55544552eb2`.
-- Last resolution: ten files conflicted. Kept both sides where the hunks were different fields or calls (`agents.go` `WSLDistroOff` and `AgyStart`, `api.go` omit-preserves plus `WSLDistrosOff` and `RequestArchiveLocal`, `settings.go` `ImageFit` plus `ImageTimeout`/`ClassifyTimeout`, `app.js` `imageFit` plus `updateChannel`/`imageTimeout`/`classifyTimeout`, `index.html` Environments plus redact/otel, `settings_keep_test.go` both fixtures). `gateway.go` still runs `anthropicImagesFit`, then uses upstream's nil body and `SetBody` (the old `bytes.NewReader` would ignore that handoff). `targets.go` is `agentDir(a, ZCodeHome)`, so a WSL directory still wins and Windows `HOME` is used otherwise. Library MCP save keeps the `reaches` filter and adds `startupTimeout`. `wslClaudeClassifier` also skips a distro that is turned off. Nothing else was dropped.
+- Split: `9197804144c15c7765c0e8b13376981264dc02a2` (2026-11-12), pulled in `90568dc64`. Previous split was `6afbe3f3047419bfd50e522526457bac3fa25f2c`.
+- Last resolution: 27 files conflicted (3041 upstream commits). Upstream now has its own native WSL probe (`wslProbeScript`/`parseProbe`, Windows-drive launchers looked past, `place.open` for links #4502): AgentDock's duplicate probe in `wsl_probe.go` was dropped, and only what upstream lacks was ported onto it — distro path variables (`env:`), `user:`, `winbin:`, `ProbeErr`, `WSLDistrosOff` in `wslReady`/classifier/`wslRefreshRunning`. `distro.Bins` became upstream's `distro.Paths`. A failed `wsl.exe -l` sets `listed=false` so known distros aren't forgotten. `gateway.go`: `foldDoubledVersion` is outermost in upstream's new `Handler()`. Settings save moved to `settingsapi.Apply`: `imageFit` omit-preserve and `WSLDistrosOff` carry ported there. `wslTargetOf` is upstream's table (links, distro skill store) with discovered custom roots for claude/codex/pi/omo/gemini; any other WSL agent falls back to the host adapter with `dropHostLeaks`. Shared skills: upstream's `sharedEntry`/`readSharedOwn`/`readsSharedDir` gained per-environment `…In(dir)` forms. Upstream tests assuming no WSL hooks/subagents were adapted to AgentDock's. Upstream's new library `under` clashed with ours: ours is `underDir`. Nothing else was dropped.
 - Command: `git subtree pull --prefix=engine https://github.com/yetone/magpie.git main --squash`.
 - After every pull, on the Windows box: `cd engine && go vet ./... && go test -tags nogui ./...`.
 
@@ -23,6 +23,7 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/agent/primeagent.go` | same native-vs-launcher discovery |
 | `internal/agent/reasonix.go` | same native-vs-launcher discovery |
 | `internal/agent/rescan.go` | explicit rescan drops the stale discovery cache |
+| `internal/agent/wsl_links.go` | `distroAt` refreshes the running list before taking the lock |
 | `internal/agent/wsl.go` | distro switch, native fallback, running-distro gate |
 | `internal/agent/wsl_claude_test.go` | discovery regression |
 | `internal/agent/wsl_fake.go` | test double learns the native probe |
@@ -46,6 +47,7 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/gui/library.go` | native routes wired beside library routes |
 | `internal/gui/settings_keep_test.go` | `WSLDistrosOff` stays in `KeepOwn` |
 | `internal/gui/web.go` | sign-in title AgentDock |
+| `internal/settingsapi/settingsapi.go` | `imageFit` in Keys and kept when omitted; `WSLDistrosOff` carried |
 | `internal/library/hooks.go` | WSL hooks, command translation, Codex trust rekey |
 | `internal/library/library.go` | native inventory entry |
 | `internal/library/mcp.go` | Windows-only stdio command refused for a WSL target |
@@ -63,7 +65,7 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 
 ## Fork-only files
 
-No upstream counterpart at split `422d057`.
+No upstream counterpart at the current split.
 
 - `AGENTDOCK_PATCHES.md`
 - `internal/gateway/anthropic_images.go` — scale oversized Anthropic images only when `ImageFit` is on
@@ -72,7 +74,7 @@ No upstream counterpart at split `422d057`.
 - `internal/agent/environments.go`
 - `internal/agent/wsl_discovery_test.go`
 - `internal/agent/wsl_distros_off_test.go`
-- `internal/agent/wsl_probe.go`
+- `internal/agent/wsl_probe.go` — distro path variables the probe reads (`wslPathEnvs`, `wslEnvDirs`)
 - `internal/environments/` — reach probes, `.wslconfig` mirrored switch, cross-environment sync, WSL magpie import, other-magpie detection
 - `internal/gui/environments.go`, `internal/gui/environments_test.go`
 - `internal/gui/assets/plugins/environments/`
