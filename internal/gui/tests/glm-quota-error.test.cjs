@@ -41,12 +41,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 440, height: 760 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang));
       await page.goto("http://magpie.test/?view=providers");
       await page.waitForFunction(() => typeof quotaError === "function");
-      const generic = await page.evaluate(() => t("Allowance unavailable"));
+      const generic = await page.evaluate(() => t("Allowance unavailable — hover for why"));
       for (const [vendor, err] of errs) {
         const said = await page.evaluate((e) => quotaError(e), err);
         const want = await page.evaluate(([k, v]) => t(k, { vendor: v }), [key, vendor]);

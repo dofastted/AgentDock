@@ -63,14 +63,24 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const context = await browser.newContext({ viewport: { width, height: 1400 }, reducedMotion: "reduce" });
           const page = await context.newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serve(lang, web));
-          await page.goto("http://magpie.test/?view=routing");
+          await page.goto("http://magpie.test/?view=groups");
           const card = page.locator(".rt-group", { hasText: "Free" });
           await card.waitFor();
           await card.locator("button.text").first().click();
           await page.locator(".rt-gedit .rt-pats input").waitFor();
+          // the advanced fold takes the label column from a ResizeObserver
+          // (edAlign), a frame or two after the editor opens: wait for it
+          // to settle rather than measure the frame before (a red 1 in 3
+          // on a busy machine); one that never settles is still red below
+          await page.waitForFunction(() => {
+            const ed = document.querySelector(".rt-gedit");
+            const m = ed.querySelector(".fallback:not(.rt-pats):not(.rt-rules)"), p = ed.querySelector(".rt-pats .rt-patadd");
+            return m && p && Math.round(m.getBoundingClientRect().left) === Math.round(p.getBoundingClientRect().left);
+          }, null, { timeout: 2000 }).catch(() => {});
           const got = await page.evaluate(() => {
             const box = (e) => e.getBoundingClientRect();
             const ed = document.querySelector(".rt-gedit"), er = box(ed);

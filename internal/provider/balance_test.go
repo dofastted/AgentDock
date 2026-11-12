@@ -33,6 +33,8 @@ func TestBalanceReaders(t *testing.T) {
 		{"siliconflow", readSiliconFlow("¥"), `{"code":20000,"data":{"balance":"0.88","totalBalance":"88.88"}}`, "¥88.88"},
 		{"stepfun", readStepFun("¥"), `{"object":"account","type":"prepaid","balance":26.00,"total_cash_balance":0.00,"total_voucher_balance":26.00}`, "¥26.00"},
 		{"stepfun intl", readStepFun("$"), `{"object":"account","type":"prepaid","balance":0.00,"total_cash_balance":0.00,"total_voucher_balance":0.00}`, "$0.00"},
+		{"modelscope", readModelScope, `{"success":true,"data":{"total_balance":1500,"available_balance":1300,"frozen_amount":200},"request_id":"r1"}`, "1300 魔粒"},
+		{"modelscope half", readModelScope, `{"success":true,"data":{"total_balance":249.5,"available_balance":249.5,"frozen_amount":0}}`, "249.5 魔粒"},
 	} {
 		got, err := c.read([]byte(c.body))
 		if err != nil || got != c.want {
@@ -174,6 +176,7 @@ func TestBalanceSourceByHost(t *testing.T) {
 		"https://api.stepfun.com/step_plan/v1":   "https://api.stepfun.com/v1/accounts",
 		"https://api.stepfun.ai/v1":              "https://api.stepfun.ai/v1/accounts",
 		"https://ollama.com/v1":                  "https://ollama.com/api/balance",
+		"https://api-inference.modelscope.cn/v1": "https://modelscope.cn/openapi/v1/magicubes/balance",
 		"http://localhost:11434/v1":              "",
 		"https://relay.example.com/v1":           "",
 		"https://api.deepseek.com.evil/":         "",
@@ -308,6 +311,75 @@ func TestNamedBalanceWithAccessToken(t *testing.T) {
 	}
 }
 
+// zxc56823 on Discord typed their new-api user id into a header's name
+// box, value left empty, after magpie asked for "New-Api-User = your user
+// ID" in Headers. A relay answering as new-api v0.9's authHelper does (no
+// New-Api-User: 401 未提供) is asked with the digits as New-Api-User, on
+// the editor's check (the form's headers as they are) and once saved
+// (normalize), and the empty header is never sent.
+func TestNewAPIUserIDTypedAsHeaderName(t *testing.T) {
+	var asked []http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.Header.Clone())
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/user/self" || r.Header.Get("Authorization") != "tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"success":false,"message":"无权进行此操作，access token 无效"}`))
+			return
+		}
+		switch r.Header.Get("New-Api-User") {
+		case "":
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"success":false,"message":"无权进行此操作，未提供 New-Api-User"}`))
+		case "272298":
+			w.Write([]byte(`{"success":true,"message":"","data":{"id":272298,"username":"zxc","quota":2500000,"used_quota":120000,"group":"default"}}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"success":false,"message":"无权进行此操作，New-Api-User 与登录用户不匹配"}`))
+		}
+	}))
+	defer srv.Close()
+	base := Provider{ID: "relay", Chat: srv.URL + "/v1", Key: "sk-one", BalanceToken: "tok",
+		BalanceURL: srv.URL + "/api/user/self", BalancePath: "$data.quota / 500000"}
+	for _, c := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"as typed", map[string]string{"272298": ""}},
+		{"with spaces", map[string]string{" 272298 ": "  "}},
+		{"saved", normalize(Provider{ID: "relay", Chat: srv.URL + "/v1", Headers: map[string]string{"272298": ""}}).Headers},
+	} {
+		asked = nil
+		p := base
+		p.Headers = c.headers
+		got, ok, err := Balance(context.Background(), p)
+		if err != nil || !ok || got != "$5.00" {
+			t.Fatalf("%s: balance = %q %v %v", c.name, got, ok, err)
+		}
+		for k := range asked[len(asked)-1] {
+			if strings.TrimSpace(k) == "272298" {
+				t.Errorf("%s: the empty header went too: %v", c.name, asked[len(asked)-1])
+			}
+		}
+	}
+	if h := normalize(Provider{ID: "relay", Chat: srv.URL + "/v1", Headers: map[string]string{"272298": ""}}).Headers; len(h) != 1 || h["New-Api-User"] != "272298" {
+		t.Fatalf("saved headers = %v", h)
+	}
+	// a New-Api-User of the user's own wins; the stray digits go
+	p := base
+	p.Headers = map[string]string{"New-Api-User": "272298", "1": ""}
+	if got, _, err := Balance(context.Background(), p); err != nil || got != "$5.00" {
+		t.Fatalf("own header: %q %v", got, err)
+	}
+	if h := cleanHeaders(map[string]string{"new-api-user": "7", "272298": ""}); len(h) != 1 || h["new-api-user"] != "7" {
+		t.Fatalf("own header kept: %v", h)
+	}
+	// a header of any other name, or digits with a value, is the user's
+	if h := cleanHeaders(map[string]string{"X-1": "", "42": "v"}); len(h) != 2 || h["X-1"] != "" || h["42"] != "v" {
+		t.Fatalf("other headers: %v", h)
+	}
+}
+
 // A sub2api panel tells the account's balance to its login JWT, as a bearer.
 func TestNamedBalanceWithSub2APIJWT(t *testing.T) {
 	const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln"
@@ -413,9 +485,9 @@ func TestNewAPIUserRefusal(t *testing.T) {
 		body   string
 		want   []string
 	}{
-		{401, `{"success":false,"message":"无权进行此操作，未提供 New-Api-User"}`, []string{"401 Unauthorized: ", "add the header New-Api-User = your user ID", "未提供 New-Api-User"}},
-		{200, `{"success":false,"message":"Unauthorized, New-Api-User header not provided"}`, []string{"add the header New-Api-User = your user ID", "header not provided"}},
-		{401, `{"success":false,"message":"无权进行此操作，New-Api-User 与登录用户不匹配"}`, []string{"add the header New-Api-User", "不匹配"}},
+		{401, `{"success":false,"message":"无权进行此操作，未提供 New-Api-User"}`, []string{"401 Unauthorized: ", "fill in your user ID", "under this provider's Account balance", "未提供 New-Api-User"}},
+		{200, `{"success":false,"message":"Unauthorized, New-Api-User header not provided"}`, []string{"fill in your user ID", "header not provided"}},
+		{401, `{"success":false,"message":"无权进行此操作，New-Api-User 与登录用户不匹配"}`, []string{"fill in your user ID", "不匹配"}},
 		{200, `{"success":false,"message":"无权进行此操作，access token 无效"}`, []string{"access token 无效"}},
 	} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -437,8 +509,8 @@ func TestNewAPIUserRefusal(t *testing.T) {
 		if strings.Contains(err.Error(), "nothing at") {
 			t.Errorf("%s: read as a missing field: %v", c.body, err)
 		}
-		if !strings.Contains(c.body, "New-Api-User") && strings.Contains(err.Error(), "add the header") {
-			t.Errorf("%s: told to add the header: %v", c.body, err)
+		if !strings.Contains(c.body, "New-Api-User") && strings.Contains(err.Error(), "fill in your user ID") {
+			t.Errorf("%s: told to fill in the user ID: %v", c.body, err)
 		}
 	}
 }
@@ -545,6 +617,53 @@ func TestKnownBalanceFieldLeftEmpty(t *testing.T) {
 	p = Provider{ID: "relay", Chat: srv.URL + "/v1", Key: "sk-one", BalanceURL: srv.URL + "/other"}
 	if _, _, err := Balance(context.Background(), p); err == nil || !strings.Contains(err.Error(), "no balance path") {
 		t.Errorf("unknown query: %v", err)
+	}
+}
+
+// ModelScope's 魔粒 (jiabubu on Discord): the API-Inference token is
+// asked of the OpenAPI's /magicubes/balance as a Bearer, the card tells
+// what can be spent (not what running tasks hold), and a token refused
+// says what ModelScope said.
+func TestModelScopeBalance(t *testing.T) {
+	var auth, host string
+	var status int
+	var body string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/v1/magicubes/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		auth, host = r.Header.Get("Authorization"), r.Host
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().String()
+	old := http.DefaultClient.Transport
+	http.DefaultClient.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	t.Cleanup(func() { http.DefaultClient.Transport = old })
+
+	p := Provider{ID: "modelscope", Chat: "https://api-inference.modelscope.cn/v1", Responses: "https://api-inference.modelscope.cn/v1", Key: "ms-test"}
+	status, body = http.StatusOK, `{"success":true,"data":{"total_balance":450,"available_balance":250,"frozen_amount":200},"request_id":"r1"}`
+	got, ok, err := Balance(context.Background(), p)
+	if !ok || err != nil || got != "250 魔粒" {
+		t.Fatalf("balance: %q %v %v, want 250 魔粒", got, ok, err)
+	}
+	if auth != "Bearer ms-test" || host != "modelscope.cn" {
+		t.Errorf("asked %s with %q, want modelscope.cn with the token as a Bearer", host, auth)
+	}
+	if n, ok := BalanceNumber(got); !ok || n != 250 {
+		t.Errorf("BalanceNumber(%q) = %v %v, want 250 for its trend", got, n, ok)
+	}
+	status, body = http.StatusUnauthorized, `{"success":false,"code":"InvalidAuthentication","message":"Invalid authentication: authentication required"}`
+	if _, ok, err := Balance(context.Background(), p); !ok || err == nil || !strings.Contains(err.Error(), "Invalid authentication") {
+		t.Errorf("refused: %v %v, want ModelScope's message", ok, err)
 	}
 }
 

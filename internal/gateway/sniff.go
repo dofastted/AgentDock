@@ -26,8 +26,26 @@ type usageSniffer struct {
 	// failed: what an explicit error event said; a terminal event can end
 	// the stream successfully or with a failure despite its HTTP 200.
 	failed string
+	// failedNamed: the status the error frame named for itself, when it
+	// named one (#4855); 0 when it didn't
+	failedNamed int
 	// tail: what a Chat stream's chunks say of its end (chatTail)
 	tail chatTail
+	// found: the searches the reply ran by itself (searchTally)
+	found searchTally
+	// resp: the Responses stream's own response, as far as it went: what
+	// a response.failed magpie ends it with carries (streamFailure)
+	resp respTail
+}
+
+// respTail is what a Responses stream said of its response before it
+// ended: the id and created_at its events named, and the sequence_number
+// the next event takes; model is the caller's, the one that answered.
+type respTail struct {
+	id      string
+	created int64
+	next    int64
+	model   string
 }
 
 func newSniffer(proto provider.Protocol, contentType string) *usageSniffer {
@@ -124,8 +142,12 @@ func (s *usageSniffer) parse(b []byte) {
 			}
 			s.failed = provider.APIError(body, "upstream stream failed")
 			s.u.ErrType = provider.ErrorType(body)
+			if body != nil {
+				s.failedNamed = namedStatus(body)
+			}
 		}
 	}
+	s.found.see(s.proto, b)
 	if up := upstreamOf(b); up != "" {
 		s.u.Upstream = up
 	}
@@ -181,14 +203,18 @@ func (s *usageSniffer) parse(b []byte) {
 		}
 	case provider.Responses:
 		var v struct {
-			ID       string  `json:"id"`
-			Type     string  `json:"type"`
-			Model    string  `json:"model"`
-			Usage    *rUsage `json:"usage"`
+			ID    string  `json:"id"`
+			Type  string  `json:"type"`
+			Model string  `json:"model"`
+			Usage *rUsage `json:"usage"`
+			// numbers read as float64: a vendor's odd one (a fractional
+			// created_at) must not cost the usage in the same event
+			Seq      *float64 `json:"sequence_number"`
 			Response struct {
-				ID    string  `json:"id"`
-				Model string  `json:"model"`
-				Usage *rUsage `json:"usage"`
+				ID      string  `json:"id"`
+				Model   string  `json:"model"`
+				Created float64 `json:"created_at"`
+				Usage   *rUsage `json:"usage"`
 			} `json:"response"`
 		}
 		if json.Unmarshal(b, &v) == nil {
@@ -196,6 +222,15 @@ func (s *usageSniffer) parse(b []byte) {
 				s.u.add(Usage{ResponseID: v.ID})
 			} else if strings.HasPrefix(v.Type, "response.") {
 				s.u.add(Usage{ResponseID: v.Response.ID})
+				if v.Response.ID != "" {
+					s.resp.id = v.Response.ID
+				}
+				if v.Response.Created > 0 {
+					s.resp.created = int64(v.Response.Created)
+				}
+				if v.Seq != nil && int64(*v.Seq) >= s.resp.next {
+					s.resp.next = int64(*v.Seq) + 1
+				}
 			}
 			s.saw(v.Response.Model)
 			s.saw(v.Model)
@@ -268,6 +303,19 @@ func (s *usageSniffer) drain() {
 	}
 }
 
+// settleWhole reads a reply that came whole, once it has ended, for an
+// error it carried under its success status (errorReply): told as failed,
+// with what it said, not counted as an answer.
+func (s *usageSniffer) settleWhole() {
+	if s.sse || s.over || s.failed != "" {
+		return
+	}
+	if _, msg, ok := errorReply(s.buf); ok {
+		s.failed = msg
+		s.u.ErrType = provider.ErrorType(bytes.TrimSpace(s.buf))
+	}
+}
+
 // usage is what the reply reported, the model it named in Served; call it
 // once the body has ended.
 func (s *usageSniffer) usage() Usage {
@@ -278,5 +326,6 @@ func (s *usageSniffer) usage() Usage {
 	}
 	u := s.u
 	u.Served = s.served
+	u.searches = s.found.count()
 	return u
 }

@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -87,17 +88,25 @@ func TraceAgent(agent string) bool {
 
 // Claude child transcripts are discovered alongside their parent stores.
 func traceLineFiles() []file {
-	files := append(codexFiles(), piFiles()...)
+	// a slice of its own: traceRecentFiles sorts it, and Codex's listing
+	// is shared (heldFiles)
+	files := slices.Concat(codexFiles(), piFiles())
 	claude := func(agent, dir string) { files = append(files, ccFiles(agent, dir)...) }
-	claude("claude", ClaudeDir())
-	for _, dir := range callDesktopDirs() {
+	for _, d := range ClaudeDirs() {
+		claude("claude", d)
+	}
+	for _, dir := range desktopReadDirs() {
 		homes, _ := SessionGlob(filepath.Join(dir, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
 		for _, home := range homes {
 			claude("claude-desktop", home)
 		}
 	}
 	seen := map[string]bool{}
-	for _, root := range ompSessionRoots() {
+	var ompRoots []string
+	if Reads("omp") {
+		ompRoots = ompSessionRoots()
+	}
+	for _, root := range ompRoots {
 		paths, _ := SessionGlob(filepath.Join(root, "*", "*.jsonl"))
 		for _, path := range paths {
 			if seen[path] {
@@ -110,7 +119,7 @@ func traceLineFiles() []file {
 			}
 		}
 	}
-	return append(files, geminiTraceFiles()...)
+	return allowed(append(files, geminiTraceFiles()...))
 }
 
 func TraceID(parts ...string) string {
@@ -177,7 +186,7 @@ func (r *TraceReader) Poll(bodies bool) []TraceSpan {
 		// Filesystem timestamps can be coarse or lag the write (Linux VFS).
 		// Use mtime only to prune clearly old stores; event timestamps below
 		// still enforce the exact activation boundary and prevent history replay.
-		if budget <= 0 || strings.HasSuffix(f.path, zstSuffix) || f.mod.Before(r.Since.Add(-2*time.Second)) {
+		if budget <= 0 || strings.HasSuffix(f.path, zstSuffix) || f.mod.Before(modOf(r.Since.Add(-2*time.Second))) {
 			continue
 		}
 		c := r.files[f.path]
@@ -185,13 +194,13 @@ func (r *TraceReader) Poll(bodies bool) []TraceSpan {
 			c = newTraceCursor(f)
 			r.files[f.path] = c
 		}
-		if c.size == f.size && c.mod.Equal(f.mod) {
+		if c.size == f.size && c.mod.Equal(f.mod.Time()) {
 			for _, s := range c.finishPi(time.Now()) {
 				if !s.End.Before(r.Since) {
 					result = append(result, s)
 				}
 			}
-			if f.mod.Before(time.Now().Add(-2 * time.Second)) {
+			if f.mod.Before(modOf(time.Now().Add(-2 * time.Second))) {
 				if f.agent == "gemini" {
 					snap := r.snapshot(f.path)
 					if snap.gemini != nil && !snap.settled {
@@ -258,7 +267,7 @@ func (r *TraceReader) Poll(bodies bool) []TraceSpan {
 					result = append(result, s)
 				}
 			}
-			c.size, c.mod = f.size, f.mod
+			c.size, c.mod = f.size, f.mod.Time()
 		}
 	}
 	for path := range r.files {

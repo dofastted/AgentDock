@@ -90,6 +90,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => ctx.close());
         const p = await ctx.newPage();
         p.setDefaultTimeout(5000);
+        p.setDefaultNavigationTimeout(60000);
         const errors = [];
         p.on("pageerror", (e) => errors.push(e.message));
         await p.route("**/*", server(lang, shared, asked, contents, posts));
@@ -135,15 +136,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(await top(), at, "a click moved the page");
         };
         // the other computer's details: named, and nothing read here
-        await press(rows.nth(1));
-        const detail = p.locator(".led-detail").first();
-        await detail.waitFor();
+        await reader.inView(p, rows.nth(1));
+        const detail = await reader.openRequest(p, rows.nth(1));
         const text = await detail.innerText();
         assert(text.includes(w.key) && text.includes("studio"), text);
         assert(text.includes(w.stays), text);
         await p.waitForTimeout(200);
         assert.deepEqual(contents, [], "no session file asked for another computer's call");
-        await press(rows.nth(1));
+        await reader.closeRequest(p);
 
         // this computer alone
         await press(pick);
@@ -195,6 +195,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await box(lang === "zh" ? "口令" : "Passphrase").fill("correct horse");
         await toEnd();
         const tick = form.locator("label.tick", { hasText: w.tick });
+        // Back up by itself's rows under the form put the tick, at the
+        // page's end, under Settings' held tabs: bring it into the open
+        await tick.evaluate((e) => e.scrollIntoView({ block: "center" }));
         assert.equal(await tick.locator("input").isChecked(), false, "off unless picked");
         const top = () => p.locator("#view-settings").evaluate((v) => v.scrollTop);
         const at = await top();

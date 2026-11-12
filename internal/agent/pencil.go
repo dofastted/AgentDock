@@ -49,6 +49,7 @@ func pencil(home string) *Agent {
 			}
 			return ""
 		},
+		ListOnly: true,
 		Sync: func() error {
 			return syncJSON(path, key, theirsKept(path, key, func() any { return pencilProviderJSON(gateway.URL()) }, "models"))
 		},
@@ -98,7 +99,7 @@ func pencilApp(home string) bool {
 // spend being counted by magpie.
 func pencilProviderJSON(gw string) map[string]any {
 	ms := []map[string]any{}
-	for _, m := range magpieModels("pencil") {
+	for _, m := range sharedModels("pencil") {
 		e := piModelJSON(m, gw, false)
 		if _, ok := e["input"]; !ok {
 			e["input"] = []string{"text"}

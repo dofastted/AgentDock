@@ -71,6 +71,8 @@ func TestEveryVendorsOverflow(t *testing.T) {
 		{400, "Please reduce the length of the messages or completion"},
 		{400, "Input length 2000 exceeds the maximum allowed input length of 1000 tokens."},
 		{400, "The input (2000 tokens) is longer than the model's context length (1000 tokens)."},
+		// the reporter's vendor (#4040): no 's on the model
+		{400, "The message is longer than the model context length"},
 		{400, "the request exceeds the available context size, try increasing it"},
 		{400, "tokens to keep from the initial prompt is greater than the context length"},
 		{400, "prompt token count of 2000 exceeds the limit of 1000"},
@@ -83,6 +85,15 @@ func TestEveryVendorsOverflow(t *testing.T) {
 		{400, "prompt too long; exceeded max context length by 100 tokens"},
 		{400, "Range of input length should be [1, 98304]"},
 		{400, "token limit exceeded"},
+		// Chinese that names the input, not the context (#4420, MYCF711)
+		{400, "内容太长了，请精简输入或开启新对话"},
+		{400, `{"error":{"code":"1261","message":"Prompt 超长"}}`},
+		{400, "token数量超过上限。对话历史+问题的字数太多，需要精简输入"},
+		{400, "输入过长，请缩短后重试"},
+		{400, "输入长度超过限制"},
+		{400, "输入内容超过模型最大token数"},
+		{400, "提示词超出最大长度"},
+		{413, "请求内容过长"},
 	} {
 		if !tooLong(tc.status, tc.msg) {
 			t.Errorf("%q isn't taken for a conversation too long", tc.msg)
@@ -100,9 +111,47 @@ func TestEveryVendorsOverflow(t *testing.T) {
 	}
 }
 
+// A Chinese pace limit beside words of size, or a length that isn't the
+// conversation's, isn't taken for a conversation too long (#4420): told
+// so, the agent compacts for nothing, and a pace limit worded so would
+// never be asked of the next account.
+func TestChineseNotTooLong(t *testing.T) {
+	for _, msg := range []string{
+		"内容太长，已达到速率限制",
+		"请求过于频繁，输入内容过长的请求请稍后再试",
+		"输入token数超过每分钟限制",
+		"输入过长：已超过并发上限",
+		"每日token数量超过上限",
+		"token数量超过上限",
+		"名称超出最大长度",
+		"输出过长，请调小 max_tokens",
+		"文件名过长",
+		"参数错误",
+		"服务出现问题，请联系管理员",
+		"模型不存在",
+	} {
+		if tooLong(400, msg) {
+			t.Errorf("%q taken for a conversation too long", msg)
+		}
+	}
+	// the pace limit said with size still goes to the next account
+	if !retryable(400, []byte("内容太长，已达到速率限制")) {
+		t.Error("a pace limit worded with size isn't asked of the next account")
+	}
+	for _, msg := range []string{"请求过于频繁", "已达到速率限制"} {
+		if f := failure(429, []byte(msg)); f != failRate {
+			t.Errorf("429 %q is a %s failure", msg, f)
+		}
+	}
+}
+
 // A spent budget, like a used-up plan (pi's retry.ts lists both as not to
 // be retried), goes to the next account at once rather than being asked
 // again in place: "out of budget" was a rate limit, asked three times.
+// LiteLLM's spent key answers 429 "Budget has been exceeded! Key=… (sk-…),
+// Current cost: …, Max budget: …" (#5111, wuxiaoqiang12): its "has been"
+// sat between the two words the list knew, and the key was asked again
+// every half an hour, the user's quota-rest never read.
 func TestOutOfBudgetIsntRetriedInPlace(t *testing.T) {
 	for _, tc := range []struct {
 		status int
@@ -110,6 +159,8 @@ func TestOutOfBudgetIsntRetriedInPlace(t *testing.T) {
 	}{
 		{429, "out of budget"},
 		{400, "Budget exceeded for this key"},
+		{429, `{"error":{"message":"Budget has been exceeded! Key=sk-1234 (my-relay), Current cost: 0.0023, Max budget: 0.002"}}`},
+		{429, "Budget has been exceeded! Current cost: 0.0023, Max budget: 0.002"},
 		{429, `{"error":{"type":"GoUsageLimitError","message":"Monthly usage limit reached"}}`},
 		{429, `{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}`},
 	} {
@@ -125,5 +176,9 @@ func TestOutOfBudgetIsntRetriedInPlace(t *testing.T) {
 	}
 	if _, again := passing(429, nil, []byte("Rate limit reached for requests"), 0); !again {
 		t.Error("a rate limit isn't asked again")
+	}
+	// the relay's own per-minute limit names no budget, and stays a rate
+	if f := failure(429, []byte("LiteLLM: Rate limit exceeded")); f != failRate {
+		t.Errorf(`"LiteLLM: Rate limit exceeded" is a %s failure`, f)
 	}
 }

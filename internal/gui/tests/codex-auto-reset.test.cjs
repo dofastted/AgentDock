@@ -80,7 +80,7 @@ function serve(lang, posts) {
 const words = {
   en: {
     say: "Auto-use resets:", week: "when its week runs out", expiry: "before one expires",
-    keptOn: "· auto-used before it expires", keptOff: "· not auto-used",
+    keptOn: "· auto-used before it expires", keptOff: "· not auto-used", keptWeek: "· auto-used when the week runs out",
     brief: "Auto-use", label: "Auto-use resets", on: "On", off: "Off",
     both: (who) => `${who} uses a reset by itself when its week runs out, or before one expires`,
     weekOnly: (who) => `${who} uses a reset by itself only when its week runs out`,
@@ -90,7 +90,7 @@ const words = {
   },
   zh: {
     say: "自动使用重置卡：", week: "周额度用完时", expiry: "重置卡到期前",
-    keptOn: "· 到期前自动使用", keptOff: "· 不会自动使用",
+    keptOn: "· 到期前自动使用", keptOff: "· 不会自动使用", keptWeek: "· 周额度用完时自动使用",
     brief: "自动用卡", label: "自动使用重置卡", on: "开启", off: "关闭",
     both: (who) => `${who} 会在周额度用完时、或重置卡到期前自动使用重置卡`,
     weekOnly: (who) => `${who} 仅在周额度用完时自动使用重置卡`,
@@ -101,7 +101,7 @@ const words = {
 };
 const keys = {
   say: "Auto-use resets:", week: "when its week runs out", expiry: "before one expires",
-  keptOn: "auto-used before it expires", keptOff: "not auto-used", brief: "Auto-use", label: "Auto-use resets", on: "On", off: "Off",
+  keptOn: "auto-used before it expires", keptOff: "not auto-used", keptWeek: "auto-used when the week runs out", brief: "Auto-use", label: "Auto-use resets", on: "On", off: "Off",
   both: "{who} uses a reset by itself when its week runs out, or before one expires",
   weekOnly: "{who} uses a reset by itself only when its week runs out",
   expiryOnly: "{who} uses a reset by itself only before one expires",
@@ -112,19 +112,20 @@ const strings = [
   ...Object.values(keys),
   "On: a reset is used by itself when this account's week is used up and no other account can answer, one a week at most. The five hours running out never uses one. Click to turn it off.",
   "Off: a used-up week is waited out, and the vendor may start it again sooner; requests go to your other accounts, or are refused with why. Click to turn it on.",
-  "On: the reset that runs out first is used about half an hour before it does, if this account's windows have been used, or at once when the account is held up until after then. Click to turn it off.",
+  "On: the reset that runs out first is used {lead} before it does, if this account's windows have been used, or at once when the account is held up until after then. Click to turn it off.",
   "Off: a reset that runs out unused is lost. Click to turn it on.",
-  "Auto-use is on: the reset that runs out first is used about half an hour before it does, if this account's windows have been used, so what they have left can be used until then and it isn't lost; at once if the account is held up until after then.",
+  "Auto-use is on: the reset that runs out first is used {lead} before it does, if this account's windows have been used, so what they have left can be used until then and it isn't lost; at once if the account is held up until after then.",
   "Auto-use is off: the reset that runs out first is lost unless it's used by hand before then.",
-  "On: a reset is used by itself when this account's week is used up and no other account can answer, one a week at most, and the one about to run out is used about half an hour before it does, if the account has been used, or at once when the account is held up until after then. Otherwise the five hours running out never uses one. Click to turn it off.",
-  "Off: this account's resets are used only by hand. Turned on, one is used by itself when its week is used up and no other account can answer, one a week at most, and the one about to run out about half an hour before it does, if the account has been used, or at once when the account is held up until after then. Otherwise the five hours running out never uses one.",
+  "Auto-use is on for a used-up week: a reset is used by itself when this account's week is used up, before its credits are spent. One about to run out is otherwise lost unless it's used by hand or the week runs out before then.",
+  "On: a reset is used by itself when this account's week is used up and no other account can answer, one a week at most, and the one about to run out is used {lead} before it does, if the account has been used, or at once when the account is held up until after then. Otherwise the five hours running out never uses one. Click to turn it off.",
+  "Off: this account's resets are used only by hand. Turned on, one is used by itself when its week is used up and no other account can answer, one a week at most, and the one about to run out {lead} before it does, if the account has been used, or at once when the account is held up until after then. Otherwise the five hours running out never uses one.",
 ];
 // wordsOf: a language's words, from its dictionary when not spelled out here
 async function wordsOf(page, lang) {
   if (words[lang]) return words[lang];
   const d = await page.evaluate(([lang, keys]) => Object.fromEntries(Object.entries(keys).map(([k, v]) => [k, I18N[lang][v]])), [lang, keys]);
   const fill = (s) => (who) => s.replace("{who}", who);
-  return { ...d, keptOn: "· " + d.keptOn, keptOff: "· " + d.keptOff, both: fill(d.both), weekOnly: fill(d.weekOnly), expiryOnly: fill(d.expiryOnly), none: fill(d.none) };
+  return { ...d, keptOn: "· " + d.keptOn, keptOff: "· " + d.keptOff, keptWeek: "· " + d.keptWeek, both: fill(d.both), weekOnly: fill(d.weekOnly), expiryOnly: fill(d.expiryOnly), none: fill(d.none) };
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -146,6 +147,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await (await browser.newContext({ viewport, reducedMotion: "reduce" })).newPage();
         pages.push(page);
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
         await page.goto(url);
@@ -266,7 +268,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal((await panel.locator(".pq-resets button").textContent()).trim(), w.useOne);
       assert.equal((await panel.locator(".pq-resets .resets-kept").textContent()).trim(), w.keptOff);
       await flip(panel, week(psel), panelPosts, { user: "Me@example.com", on: true, when: "week" }, true, w.weekOnly("Me@example.com"));
-      assert.equal((await panel.locator(".pq-resets .resets-kept").textContent()).trim(), w.keptOff, "the week alone doesn't keep the one about to expire");
+      // the week alone (tongzhenbao on X): the card says it is used when
+      // the week runs out, not "not auto-used" beside that switch on
+      assert.equal((await panel.locator(".pq-resets .resets-kept").textContent()).trim(), w.keptWeek, "the week alone says the reset is used when the week runs out");
+      assert.equal(await panel.locator(".pq-resets .resets-kept").evaluate((e) => e.classList.contains("on")), true);
       await flip(panel, expiry(psel), panelPosts, { user: "Me@example.com", on: true, when: "expiring" }, true, w.both("Me@example.com"));
       assert.equal((await panel.locator(".pq-resets .resets-kept").textContent()).trim(), w.keptOn);
       // the switches and their words fit the card: none of it cut off or wider

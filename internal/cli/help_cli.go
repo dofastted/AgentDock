@@ -47,6 +47,9 @@ func helpFor(args []string) string {
 		}
 		return groupUsage
 	case "library", "lib":
+		if len(args) > 1 && (args[1] == "project" || args[1] == "projects") {
+			return "  " + libraryProjectUsage
+		}
 		return "  " + libraryUsage
 	case "plugin", "plugins":
 		return pluginUsage
@@ -54,12 +57,20 @@ func helpFor(args []string) string {
 		return quotaUsage
 	case "statusline":
 		return statuslineUsage
+	case "status":
+		return statusUsage
+	case "mtls":
+		return mtlsUsage
+	case "https":
+		return httpsUsage
 	case "heap":
 		return heapUsage
 	case "cpu":
 		return cpuUsage
 	case "goroutines":
 		return goroutinesUsage
+	case "log", "logs":
+		return logUsage
 	case "sessions":
 		return sessionsUsage
 	case "search":
@@ -76,6 +87,8 @@ func helpFor(args []string) string {
 		return githubUsage
 	case "claude-code":
 		return claudeCodeUsage
+	case "settings":
+		return settingsUsage
 	case "list":
 		cmd = "ls"
 	case "account":
@@ -127,6 +140,18 @@ func agentHelp(a *agent.Agent) string {
 	fmt.Fprintf(&b, "  magpie %s <field> <value>  set another field\n", id)
 	fmt.Fprintf(&b, "  magpie %s default          take magpie out: back on what it had before\n", id)
 	fmt.Fprintf(&b, "  magpie %s <field> default  that field back to its own default\n", id)
+	if a.Start != nil {
+		bin := a.Start().Bin
+		fmt.Fprintf(&b, "  magpie %s run [args…]      start %s, on magpie while its model is magpie's (what your shell's %s runs)\n", id, bin, bin)
+		fmt.Fprintf(&b, "  magpie %s env              the variables and model it is started with\n", id)
+	}
+	if a.ID == "claude" {
+		fmt.Fprintf(&b, "  magpie %s run [args…]      start Claude Code through magpie, a plain claude left as it is (what claude-magpie runs)\n", id)
+		fmt.Fprintf(&b, "  magpie %s launcher [add|remove]   the claude-magpie command\n", id)
+	}
+	if a.ID == "claude-desktop" {
+		fmt.Fprintf(&b, "  magpie %s launcher [add|remove]   Claude Magpie.app (macOS): Desktop on magpie in a folder of its own, your own Claude Desktop left signed in\n", id)
+	}
 	var keys []string
 	for _, f := range a.Fields {
 		keys = append(keys, f.Key)

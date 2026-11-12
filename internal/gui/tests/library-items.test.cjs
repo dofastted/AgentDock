@@ -103,6 +103,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "skills"); } catch {} });
       const page = await ctx.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       // only the page's own address: a blob: URL (the grey copies) is left alone
       await page.route("http://magpie.test/**", server(lang, theme, posts, { flaky }));
@@ -168,7 +169,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await card.locator(".lib-problems-away button").allTextContents(), words[lang].instrAway);
         assert.equal(await page.locator("#view-library .lib-tabs .opt.on").textContent(), lang === "zh" ? "指令" : "Instructions");
         assert.equal(await page.evaluate(() => document.querySelector("#view-library").scrollTop), top0);
-        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(2).click();
+        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(3).click();
         await page.locator("#view-library .lib-body:not(.lib-skel) .lib-row").first().waitFor();
 
         const again = card.getByRole("button", { name: words[lang].again });

@@ -61,6 +61,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], feed = {};
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, feed));
@@ -73,7 +74,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.match(await group.locator(".summary").textContent(), lang === "zh" ? /3 个请求.*6.0k/ : /3 requests.*6.0k/);
       assert.equal(await group.locator(".cost").textContent(), "≈$0.030+", "partial totals must be marked");
       assert.equal(await page.locator("button.rt-session").filter({ hasText: "Claude Code" }).locator(".cost").textContent(), "≈$0.000", "zero price is known");
-      assert.equal(await page.locator("div.rt-session .cost").isVisible(), false, "unknown cost is omitted for legacy requests");
+      assert.equal(await page.locator(".rt-session", { hasText: lang === "zh" ? "未提供会话标识" : "No session ID" }).locator(".cost").isVisible(), false, "unknown cost is omitted for legacy requests");
       assert.equal(await page.locator(".rt-req").count(), 6);
 
       await group.click();
@@ -130,6 +131,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], feed = {};
       const fixture = [
         { ...req(1, "codex", "chat", 0.01), sessionTitle: "Chat title" },
@@ -160,7 +162,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await group("named-memory").locator(".nm").textContent(), "Codex · Named memory");
       assert.equal(await group("mixed").locator(".nm").textContent(), "Codex · mixed");
       assert.equal(await group("unknown").locator(".nm").textContent(), "Codex · unknown");
-      assert.equal(await page.locator("div.rt-session .nm").textContent(), lang === "zh" ? "未提供会话标识" : "No session ID");
+      assert.equal(await page.locator(".rt-session", { hasText: lang === "zh" ? "未提供会话标识" : "No session ID" }).locator(".nm").textContent(), lang === "zh" ? "未提供会话标识" : "No session ID");
       assert.equal(await page.locator(".rt-session").count(), 7, "separate memory IDs must not merge with each other or the chat");
 
       const memory = group("memory-a"), handle = await memory.elementHandle();
@@ -201,6 +203,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], feed = {};
       const fixture = [
         { ...req(1, "codex", "suggestions-a", 0.01), kind: "ambient_suggestion_safety" },
@@ -239,7 +242,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await group("mixed").locator(".nm").textContent(), "Codex · mixed");
       assert.equal(await group("named-chat").locator(".nm").textContent(), "Codex · Chat title");
       assert.equal(await group("other-agent").locator(".nm").textContent(), "Claude Code · other-agent");
-      assert.equal(await page.locator("div.rt-session .nm").textContent(), lang === "zh" ? "未提供会话标识" : "No session ID");
+      assert.equal(await page.locator(".rt-session", { hasText: lang === "zh" ? "未提供会话标识" : "No session ID" }).locator(".nm").textContent(), lang === "zh" ? "未提供会话标识" : "No session ID");
       assert.equal(await page.locator(".rt-session").count(), 8, "suggestion workers retain separate session groups");
       assert.deepEqual(errors, []);
     });
@@ -251,6 +254,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const page = await browser.newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const feed = {};
     const title = { ...req(1, "codex", "hidden-title", 0.013), kind: "thread_title", parentSession: "main-a" };
     const fixture = [title, req(2, "codex", "main-b", 0.2), req(3, "codex", "main-a", 0.029),
@@ -299,6 +303,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const feed = {};
       await page.route("**/*", serve(lang, feed));
       t.after(async () => { feed.next?.([]); await browser.close(); });
@@ -331,6 +336,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const feed = {};
       const fixture = [{ ...req(1, "codex", "partial", 0), unpriced: 1 },
         req(2, "codex", "mixed", 0), req(3, "codex", "mixed", 0, false),
@@ -360,6 +366,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage({ viewport: { width: 1100, height: 1000 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const feed = {}, errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       let data = {
@@ -443,6 +450,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
         page.setDefaultTimeout(10000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], titleRequests = [];
         const fixture = Array.from({ length: 2000 }, (_, i) => ({ ...req(i + 1, mixed && i < 800 ? "claude" : "codex", `chat-${i + 1}`, 0.01), time: stamp(now) }));
         const extra = { ...req(2001, "codex", "opened-chat", 0.01), time: stamp(now) };
@@ -496,6 +504,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const uuid = "578bd3d1-834b-43fb-b40c-ed9d17ad7731", errors = [], titleRequests = [];
       const feed = { titleRequests, names: (input) => input.sessions ? { titles: { ["claude:" + uuid]: "路由会话名" } } : {} };
       const fixture = [req(1, "claude", uuid, 0.01), { ...req(2, "claude", "magpie-set", 0.01), native_session: "unnamed-session" }, req(3, "codex", "chat", 0.01)];

@@ -14,13 +14,15 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/proc"
 )
 
 // envRef is a reference as the library writes one: ${NAME}.
-var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var envRef = lazyre.New(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // refSyntax is how an agent spells a reference in a value.
 type refSyntax int
@@ -171,6 +173,18 @@ func (f *mcpFile) refsOf() envSyntax {
 		// (#1435): the server got the token, and with the variable unset
 		// dsh left the server out, saying its config is invalid.
 		return envSyntax{refDsh, refDsh}
+	case fmtKiro:
+		// Kiro expands ${VARIABLE_NAME} in mcp.json as it reads it
+		// (kiro.dev/docs/mcp/configuration), the ones its Mcp Approved Env
+		// Vars setting approves
+		return envSyntax{refDollar, refDollar}
+	case fmtLiveAgent:
+		// K-brain, LiveAgent's engine, reads ${NAME} (and $NAME,
+		// ${NAME:-default}) in a server's env and headers as it starts it,
+		// and leaves out one whose variable is unset (internal/config/
+		// secret.go ResolveEnvMapContext, ResolveHeaderContext; internal/
+		// mcp/manager.go defaultTransport, K-brain 507f560)
+		return envSyntax{refDollar, refDollar}
 	}
 	// None: Claude Desktop gives a command its env as written and only
 	// HOME, LOGNAME, PATH, SHELL, TERM and USER of its own (2.7032's app.asar
@@ -333,12 +347,12 @@ func toAgent(syntax refSyntax, v string) string {
 }
 
 var (
-	openCodeRef = regexp.MustCompile(`\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
-	cursorRef   = regexp.MustCompile(`\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
+	openCodeRef = lazyre.New(`\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
+	cursorRef   = lazyre.New(`\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}`)
 )
 
 // dshEnvRef is the expression dsh reads a variable whole with.
-var dshEnvRef = regexp.MustCompile(`^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$`)
+var dshEnvRef = lazyre.New(`^process\.env\.([A-Za-z_][A-Za-z0-9_]*)$`)
 
 // dshRef is a value with references as the !!js expression dsh evaluates
 // to it, or false for one with none. A variable whole is process.env.NAME,
@@ -374,7 +388,7 @@ func dshRef(v string) (dshJS, bool) {
 
 // dshPart is one operand of a longer value dshRef writes: a JSON string,
 // or a variable with "" in its place while unset.
-var dshPart = regexp.MustCompile(`^(?:"(?:[^"\\]|\\.)*"|\(process\.env\.([A-Za-z_][A-Za-z0-9_]*) \?\? ""\))`)
+var dshPart = lazyre.New(`^(?:"(?:[^"\\]|\\.)*"|\(process\.env\.([A-Za-z_][A-Za-z0-9_]*) \?\? ""\))`)
 
 // dshUnref is the value an expression dshRef writes stands for, its
 // references as the library writes them; false for any other expression,
@@ -560,35 +574,46 @@ func codexEnvVars(v any) []string {
 	return out
 }
 
-// expandRef is a value with each reference replaced by the variable's value
-// in magpie's own environment, for magpie to reach the server itself; the
-// names it found unset are given too.
-func expandRef(v string) (string, []string) {
-	var unset []string
-	out := envRef.ReplaceAllStringFunc(v, func(m string) string {
-		name := m[2 : len(m)-1]
-		x, ok := os.LookupEnv(name)
-		if !ok && !slices.Contains(unset, name) {
-			unset = append(unset, name)
-		}
-		return x
-	})
-	return out, unset
-}
+// loginVars is the reader of what a terminal has for variables magpie's
+// own environment lacks (proc.LoginVars); a var for tests.
+var loginVars = proc.LoginVars
 
-// expandAll is m with every value expanded (expandRef), and the variables
-// found unset, sorted.
+// expandAll is m with every reference replaced by the variable's value,
+// for magpie to reach the server itself, and the variables set nowhere,
+// sorted. A variable is magpie's own, else the login shell's (the
+// registry's on Windows): a magpie opened from the Finder has none of the
+// profile's, and a server whose token was exported in .zshrc showed no
+// tools (Cyrus on Discord). The value is only in what is returned: never
+// in library.json, an agent's file, magpie's environment or a log.
 func expandAll(m map[string]string) (map[string]string, []string) {
+	vals := map[string]string{}
+	var missing []string
+	for _, v := range m {
+		for _, n := range refNames(v) {
+			if _, have := vals[n]; have || slices.Contains(missing, n) {
+				continue
+			}
+			if x, ok := os.LookupEnv(n); ok {
+				vals[n] = x
+			} else {
+				missing = append(missing, n)
+			}
+		}
+	}
 	var unset []string
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		x, miss := expandRef(v)
-		out[k] = x
-		for _, n := range miss {
-			if !slices.Contains(unset, n) {
+	if len(missing) > 0 {
+		got := loginVars(missing)
+		for _, n := range missing {
+			if x, ok := got[n]; ok {
+				vals[n] = x
+			} else {
 				unset = append(unset, n)
 			}
 		}
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = envRef.ReplaceAllStringFunc(v, func(r string) string { return vals[r[2:len(r)-1]] })
 	}
 	slices.Sort(unset)
 	return out, unset

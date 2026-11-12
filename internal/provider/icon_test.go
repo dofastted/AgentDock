@@ -12,7 +12,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestStoreIcon(t *testing.T) {
@@ -145,6 +147,13 @@ func TestIconIPsLoon(t *testing.T) {
 		{"loopback pair", []string{"fd27:712::7f00:1", "127.0.0.1"}, nil},
 		{"other ula", []string{"fd27:712:1::c600:1061", "198.0.16.97"}, nil},
 		{"mixed private", []string{"fd27:712::c600:1061", "198.0.16.97", "192.168.1.1"}, nil},
+		// mihomo's fake-ip-range6 beside its fake A: Clash Verge Rev's
+		// default (jiezhengj); the fake A is dialled in its place
+		{"clash verge fake aaaa", []string{"fdfe:dcba:9876::5", "198.18.0.5"}, []string{"198.18.0.5"}},
+		{"clash verge filled-in range6", []string{"198.18.0.5", "2001:2::5"}, []string{"198.18.0.5"}},
+		{"fake aaaa, no fake a", []string{"fdfe:dcba:9876::5", "8.8.8.8"}, nil},
+		{"fake aaaa alone", []string{"fdfe:dcba:9876::5"}, nil},
+		{"fake pair beside private", []string{"fdfe:dcba:9876::5", "198.18.0.5", "10.0.0.1"}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var ips []net.IPAddr
@@ -287,5 +296,40 @@ func TestGuardClientThroughLocalProxy(t *testing.T) {
 	}
 	if len(asked) != 1 {
 		t.Fatalf("the proxy was asked for a private site: %v", asked)
+	}
+}
+
+// A fetch's client is that fetch's alone: the connection it made, left in
+// the transport's pool, is dropped by nobody else (#4824). The fetch
+// ends, the connection goes.
+func TestFetchIconLeavesNoIdleConnection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	var closed atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(png)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateClosed {
+			closed.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	t.Setenv("MAGPIE_ICON_PROXY", srv.URL+"/api/icon")
+	old := iconClient
+	iconClient = srv.Client
+	t.Cleanup(func() { iconClient = old })
+	if _, err := FetchIcon(context.Background(), "https://author.invalid/logo.png"); err != nil {
+		t.Fatal(err)
+	}
+	for now := time.Now(); closed.Load() == 0 && time.Since(now) < 20*time.Second; time.Sleep(5 * time.Millisecond) {
+	}
+	if closed.Load() == 0 {
+		t.Fatal("the fetch's connection is still idle: its pool was not closed")
 	}
 }

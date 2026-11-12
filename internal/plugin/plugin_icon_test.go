@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +42,13 @@ func TestPluginOwnIconAndKeyHint(t *testing.T) {
 	if lemon.MaxConcurrency != 3 || lime.MaxConcurrency != 5 {
 		t.Errorf("maxConcurrency = %d, %d, want 3, 5", lemon.MaxConcurrency, lime.MaxConcurrency)
 	}
-	if len(lemon.Methods) != 2 || lemon.Methods[0] != (Method{Type: "api", Label: "Lemon API key (from lemon.example/keys)", Placeholder: "sk-lemon-…"}) || lemon.Methods[1].Placeholder != "" {
+	// how many of its accounts take requests at once (01huadalang on
+	// Discord: ZCode bans an address three accounts are used from at once):
+	// read the same way
+	if lemon.MaxAccounts != 4 || lime.MaxAccounts != 2 {
+		t.Errorf("maxAccounts = %d, %d, want 4, 2", lemon.MaxAccounts, lime.MaxAccounts)
+	}
+	if len(lemon.Methods) != 2 || !reflect.DeepEqual(lemon.Methods[0], Method{Type: "api", Label: "Lemon API key (from lemon.example/keys)", Placeholder: "sk-lemon-…"}) || lemon.Methods[1].Placeholder != "" {
 		t.Fatalf("lemon's methods = %+v", lemon.Methods)
 	}
 	if len(lime.Methods) != 1 || lime.Methods[0].Placeholder != "" {

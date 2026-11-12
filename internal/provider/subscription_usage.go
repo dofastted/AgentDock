@@ -38,8 +38,14 @@ type QuotaWindow struct {
 	// (AutoClaw's 积分余额 and 每日签到, Cursor's on-demand spend, ZCode's
 	// gift to claim), which plugins send set aside with used 0 and no
 	// count. Its Used is no reading, so it is told as its text, never as
-	// "100% left".
+	// "100% left". Claude's "Extra usage" row (claudeOveragesWindow) is
+	// the one Text window with Used 100: the account counts as spent.
 	Text bool `json:"text,omitempty"`
+	// Lane names a window of an allowance apart from the account's own
+	// ("images", ImageLane): its row is Text, and says only when it comes
+	// back, if known. Added as cards are handed out (WithImageLane), never
+	// cached.
+	Lane string `json:"lane,omitempty"`
 	// Amount of Limit is the window's own count in Unit, when the vendor
 	// counts it so (WorkBuddy's credits): Used is Amount as a share of
 	// Limit. The GUI says it as used or left, as it says the share (#659).
@@ -52,6 +58,21 @@ type QuotaWindow struct {
 	// day. Smart routing takes it for the window's renewal (cdredfox on X).
 	RunsOutAt *time.Time `json:"runsOutAt,omitempty"`
 	RunsOut   float64    `json:"runsOut,omitempty"`
+	// Balance is how much is left of the window in Unit, when the vendor
+	// tells only that: a prepaid wallet, with no total to take a share of
+	// (SuperMagic's points, #3950). Used is then no reading (0); the GUI
+	// says the figure left, and routing knows the account by it and puts
+	// the one with the most left first among a provider's accounts in the
+	// same unit (Allowance.Left). nil when not told. On an account with a
+	// usage cap, Amount of Limit and Used are what the wallet spent in the
+	// cap's period instead (wallet_spend.go, #5770), for the cap to hold.
+	Balance *float64 `json:"balance,omitempty"`
+	// Spent is, on a wallet's window (Balance), how much of it magpie saw
+	// go since SpentSince, the first reading of the period a cap counts it
+	// over: the window's own until its reset, else the local day
+	// (wallet_spend.go). nil when not counted.
+	Spent      *float64   `json:"spent,omitempty"`
+	SpentSince *time.Time `json:"spentSince,omitempty"`
 	// Family is the model family a per-model window belongs to (Antigravity's
 	// "Gemini 3.1 Pro (High)" is Gemini's), for the GUI to show one figure a
 	// family, the tightest; each window is still here, and routing reads
@@ -75,7 +96,9 @@ type QuotaWindow struct {
 	// Credits is set on each window of a ChatGPT account that holds
 	// credits (has_credits with a balance left, or unlimited): using the
 	// window up doesn't stop it, the vendor spends the credits instead
-	// (codexGoesOnCredits). Routing reads it (Allowance.OnCredits); kept
+	// (codexGoesOnCredits); and on each of a Kimi Code key's while its
+	// booster holds money (kimiBooster). Routing reads it
+	// (Allowance.OnCredits); kept
 	// with the reading, so one shown from before still says it.
 	Credits bool `json:"credits,omitempty"`
 	// Capped is set, for the GUI only (WithCapped), on a window an
@@ -89,6 +112,10 @@ type QuotaWindow struct {
 	// CapID is, beside Capped, how the window is known to a cap of its
 	// own (WindowCapID), for the GUI to set and show one.
 	CapID string `json:"capId,omitempty"`
+	// OwnCap is set beside Capped on a window set aside: only a cap the
+	// user set on it itself holds the account there (WindowCaps.own),
+	// never the account's, and the GUI offers none new.
+	OwnCap bool `json:"ownCap,omitempty"`
 	// Holds is what the whole window holds, reckoned from magpie's own
 	// calls through the account (usage.WithWindowHolds), for the GUI and,
 	// through ReckonHolds, magpie quota --json and /v1/magpie/quotas
@@ -104,6 +131,21 @@ type QuotaWindow struct {
 	// (WithWindowStarts): with ResetsAt it places an even pace through the
 	// window, which the card's Pace number is measured from (fflake33).
 	StartsAt *time.Time `json:"startsAt,omitempty"`
+	// TrayKind is, for the GUI only, how Settings names the window among
+	// those the menu bar can show (gui.withTrayKinds): "5h", "7d",
+	// "month", "7d:grok bot"; empty on one the menu bar can't say as a
+	// percent.
+	TrayKind string `json:"trayKind,omitempty"`
+	// TrayExtra is, for the GUI only, set on a window with a TrayKind that
+	// the menu bar shows only when picked (gui.trayChoices): money aside,
+	// one model's window, Cursor's Grok Bot.
+	TrayExtra bool `json:"trayExtra,omitempty"`
+	// HeldBy is, for the GUI only (WithHeldWindows), the name of another
+	// window of the account that is used up and stops it for every model
+	// ("7 days"): what is left of this one can't be used until that one
+	// starts again, so a sum over accounts counts it as nothing left
+	// (#4791).
+	HeldBy string `json:"heldBy,omitempty"`
 	// matches further scopes pools whose membership isn't one model word.
 	matches func(string) bool
 	// partial is set on the windows of a reading that may leave some out:
@@ -111,6 +153,11 @@ type QuotaWindow struct {
 	// rate_limit_event names one window at a time), never read whole by
 	// /usage — five hours alone there needn't mean no week.
 	partial bool
+	// noShare is set on a window set aside whose used the plugin left
+	// out: its Used is 0 for want of a share said, not a reading at 0, so
+	// quota history keeps no line for it (#4825). The card still tells
+	// the row's text and routing still sets it aside.
+	noShare bool
 }
 
 // SubscriptionQuota is provider-reported allowance usage. This is separate
@@ -134,6 +181,14 @@ type SubscriptionQuota struct {
 	// BalanceTrend is the Balance over time, as magpie read it, and when
 	// it runs out at that pace (balance_history.go)
 	BalanceTrend *BalanceTrend `json:"balanceTrend,omitempty"`
+	// Estimate is set when the Balance is one the user typed less what
+	// magpie priced the key's calls at since (key_balance_own.go), not a
+	// vendor's reading
+	Estimate *BalanceEstimate `json:"estimate,omitempty"`
+	// SharedBalance is set on each key of a provider found to read one
+	// account's balance with others (balance_shared.go): the name of the
+	// first of them, whose card shows it once for all
+	SharedBalance string `json:"sharedBalance,omitempty"`
 	// Until is when the plan's paid time ends: it renews then when Renew
 	// is "auto", is over when "off", and either when "" (the vendor
 	// doesn't say which).
@@ -174,9 +229,11 @@ type SubscriptionQuota struct {
 	// now (codexHeld): not on a window at 100% alone, which credits get
 	// past.
 	Held bool `json:"held,omitempty"`
-	// Daily is a WorkBuddy account's credits used day by day, as magpie
-	// counted them from its readings (credits_daily.go).
-	Daily *DailyCredits `json:"daily,omitempty"`
+	// Daily is the account's credits used day by day, as magpie counted
+	// them from its readings (credits_daily.go): its first credits
+	// window's, and MoreDaily its other pools', each apart.
+	Daily     *DailyCredits   `json:"daily,omitempty"`
+	MoreDaily []*DailyCredits `json:"moreDaily,omitempty"`
 	// Checkins is set on a WorkBuddy (China) or Trae CN account whose
 	// daily check-in is pressed for, CheckinBy whose ("" WorkBuddy's,
 	// "trae" Trae CN's), and Checkin is how its last one went, nil before
@@ -187,12 +244,20 @@ type SubscriptionQuota struct {
 	// CheckinOff is set on such an account the user left out of its
 	// vendor's check-in (settings.CheckinOff, #1902): it isn't checked in.
 	CheckinOff bool `json:"checkinOff,omitempty"`
+	// CheckinKey is such an account's entry in its vendor's check-in, the
+	// key Check in now presses it by (CheckInAccount).
+	CheckinKey string `json:"checkinKey,omitempty"`
 	// Kind is the card's kind as another magpie is told it (CachedCards):
 	// subscription, plan or balance; "" here.
 	Kind string `json:"kind,omitempty"`
 	// From is the remote magpie a card is that one's (remote_quotas.go),
 	// by its name here; "" for this computer's own.
 	From string `json:"from,omitempty"`
+	// Via is the magpies (catalog.Self) a card told another magpie
+	// passed through, the one that read it first, this one last
+	// (CachedCards): the receiver leaves out a card that comes back to
+	// it (catalog.Loops). Only between magpies; nil here.
+	Via []string `json:"via,omitempty"`
 	// LastServedAt is when the account, plan or key last answered a
 	// request through this computer's gateway, nil when it hasn't in the
 	// last 30 days (served.go); set by Quotas, never cached.
@@ -204,6 +269,11 @@ type SubscriptionQuota struct {
 	// handed out, never cached.
 	Alias string `json:"alias,omitempty"`
 	Seat  string `json:"seat,omitempty"`
+	// Named is set when Alias is the user's own name (AccountNames), not
+	// the plugin's name for the account (PluginUserOf, a masked phone) or
+	// Seat: the GUI's Hide accounts keeps the user's own name in sight
+	// and hides the others as accounts (#3656).
+	Named bool `json:"named,omitempty"`
 	// GatewayKey is set on the card of a gateway key a remote magpie gave
 	// this computer (#1547, remote_key_limits.go): the limit that magpie
 	// holds the key to, beside the windows that show it.
@@ -211,6 +281,9 @@ type SubscriptionQuota struct {
 	// In-process read order, separate from the vendor's ReadAt and never
 	// persisted: restarting starts a new sequence.
 	readSeq uint64
+	// wideBalance marks a balance that is the account's, not the key's
+	// own (balanceAccountWide)
+	wideBalance bool
 	// glmPlan marks a key's quota read from the GLM Coding Plan endpoint,
 	// including custom providers. Only these can share ZCode's allowance.
 	glmPlan bool
@@ -283,10 +356,10 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		}
 		readCtx, seq := quotaReading(bg)
 		asked := claudeAskGeneration.Load()
-		go func() {
+		goRead(func() {
 			out := fetchSubscriptionUsage(readCtx)
 			noteDailyCredits(out, time.Now())
-			noteQuotaHistory(out, time.Now())
+			noteCardHistory(out, time.Now())
 			c.Lock()
 			c.data = cacheCards(c.data, out, seq, false)
 			c.at, c.pending = time.Now(), nil
@@ -298,7 +371,7 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 			// has it finished, hook and all
 			toldUsage()
 			close(done)
-		}()
+		})
 	}
 	pending := c.pending
 	c.Unlock()
@@ -340,7 +413,7 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 		}
 		if q.Provider == "gemini" || q.Provider == "antigravity" {
 			if chosen == nil {
-				chosen = exposedIDs()
+				chosen = exposedIDs("gemini", "antigravity")
 			}
 			var base func(string) string
 			if q.Provider == "antigravity" {
@@ -360,15 +433,21 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 	return out
 }
 
-// exposedIDs is, for each provider, the models magpie offers from it.
-func exposedIDs() map[string]map[string]bool {
+// exposedIDs is, for each provider of ids, the models magpie offers from
+// it. Only those are built: every provider's whole list, each account's
+// and plugin's, was built for the two whose quotas are narrowed, on each
+// usage read (20 MB of a live magpie's idle two minutes).
+func exposedIDs(ids ...string) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
 	for _, p := range All() {
-		ids := map[string]bool{}
-		for _, m := range p.Exposed() {
-			ids[m.ID] = true
+		if !slices.Contains(ids, p.ID) {
+			continue
 		}
-		out[p.ID] = ids
+		offered := map[string]bool{}
+		for _, m := range p.Exposed() {
+			offered[m.ID] = true
+		}
+		out[p.ID] = offered
 	}
 	return out
 }
@@ -561,7 +640,7 @@ func accountJSON(ctx context.Context, url, token string, headers map[string]stri
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return err
 	}
@@ -712,14 +791,35 @@ var claudeAsked atomic.Int64
 // in one wall-clock tick. tried and wait still schedule the next /usage.
 var claudeAskGeneration atomic.Uint64
 
-func markClaudeUsageAsked() {
+// claudeEveryAsked is the ask generation of the user's last refresh of
+// every allowance at once (AskEveryClaudeUsage): a saved account read
+// before it (claudeUsageEntry.asked) is read again, as its card's refresh
+// would read it (#5380), by a read that starts within claudeEveryFor of
+// the ask (claudeEveryAt): one the 30-second floor put off isn't run by a
+// timed read long after.
+var (
+	claudeEveryAsked atomic.Uint64
+	claudeEveryAt    atomic.Int64
+)
+
+const claudeEveryFor = 2 * time.Minute
+
+func markClaudeUsageAsked() { markClaudeAsk(false) }
+
+// markClaudeAsk is an ask of Claude's usage; every, the user's refresh of
+// every allowance, whose saved accounts are read too.
+func markClaudeAsk(every bool) {
 	// Serialize the ask with both caches' snapshots and publications:
 	// neither may observe the old generation, then publish after this ask.
 	// When both locks are needed, the subscription cache comes first.
 	subscriptionUsageCache.Lock()
 	loginUsageCache.Lock()
-	claudeAsked.Store(time.Now().UnixNano())
-	claudeAskGeneration.Add(1)
+	at := time.Now().UnixNano()
+	claudeAsked.Store(at)
+	if g := claudeAskGeneration.Add(1); every {
+		claudeEveryAt.Store(at)
+		claudeEveryAsked.Store(g)
+	}
 	loginUsageCache.Unlock()
 	subscriptionUsageCache.Unlock()
 }
@@ -728,8 +828,21 @@ func markClaudeUsageAsked() {
 // Usage page, refreshing it, `magpie quota` — so Claude Code's /usage is
 // run at once rather than when the next unasked reading is due
 // (claudeUsageWait); the next SubscriptionUsage waits for it.
-func AskClaudeUsage() {
-	markClaudeUsageAsked()
+func AskClaudeUsage() { askClaudeUsage(false) }
+
+// AskEveryClaudeUsage is the user refreshing every allowance by hand: the
+// tray panel's or the Usage page's Refresh, routing's read of the
+// allowances, the TUI's r (#5380: the panel said "Allowances refreshed"
+// while each saved Claude account kept its old reading, which only its
+// own card's refresh read again). As AskClaudeUsage, and each saved
+// Claude account's /usage is run too, as its card's refresh runs it, the
+// 30-second floor and all. Opening the page, its timer and `magpie
+// quota` ask with AskClaudeUsage, which starts no saved account's Claude
+// Code (savedRefresh).
+func AskEveryClaudeUsage() { askClaudeUsage(true) }
+
+func askClaudeUsage(every bool) {
+	markClaudeAsk(every)
 	AskUsage()
 	l := &loginUsageCache
 	l.Lock()
@@ -763,12 +876,17 @@ func AskUsage() {
 
 // claudeWindows is the allowance of the Claude account user, read by
 // Claude Code's own /usage. The account Claude Code is signed in to
-// (active) is read when the user asked since it last was, or when the last
-// reading's claudeUsageWait is up and Claude Code was used since. A saved
-// account is read only when its card is refreshed (savedRefresh), by Claude
-// Code run in the account's own config directory (readSavedClaudeUsage),
-// Claude Code's own sign-in left as it is (#1630). Any other time it is
-// what was kept.
+// (active) is read when the user asked since it last was, when the last
+// reading's claudeUsageWait (claudeNearOutWait near out) is up and Claude
+// Code was used since, or when Claude Code was refused for its limit
+// since. A saved account is read only when its card is refreshed
+// (savedRefresh) or every allowance was refreshed by hand since it was
+// read (AskEveryClaudeUsage), or when the switch off a spent account
+// has no reading of it (spareRead), or when the keep-alive runs Claude
+// Code on it (keepingAlive), by Claude Code run in the account's own
+// config directory
+// (readSavedClaudeUsage), Claude Code's own sign-in left as it is (#1630).
+// Any other time it is what was kept.
 // magpie itself never asks Anthropic.
 func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow, error) {
 	key := strings.ToLower(user)
@@ -778,10 +896,32 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 	c.Lock()
 	e, ok := c.m[key]
 	c.Unlock()
+	// the account Claude Code is on is read sooner near out
+	// (claudeWaitOf), and at once once Claude Code was refused for its
+	// limit since (claudeLimitHitAfter, #4443)
 	due := e.tried.IsZero() || claudeAsked.Load() != 0 && asked > e.asked ||
-		active && now.Sub(e.tried) >= e.wait && (e.heard.After(e.tried) || claudeUsedSince(e.tried))
+		active && now.Sub(e.tried) >= claudeWaitOf(e, now) && (e.heard.After(e.tried) || claudeUsedSince(e.tried)) ||
+		active && claudeLimitHitAfter(e.tried) ||
+		// a first reading that failed (Claude Code not on a GUI's PATH, a
+		// network blink) is tried again after the wait, as nothing is kept
+		// to show and nobody need have used Claude Code since: a user who
+		// never routes Claude through magpie would see "not read" for good
+		active && e.ws == nil && e.err != nil && now.Sub(e.tried) >= e.wait
+	// a saved account the switch off a spent one has no reading of
+	// (spareRead): read once, and again only after a wait while its read
+	// keeps failing, never every look
+	spare := !active && spareRead(ctx) && e.ws == nil && (e.tried.IsZero() || now.Sub(e.tried) >= e.wait)
 	// nor, with allowances read only when asked, one nobody asked for
-	read := (active || savedRefresh(ctx, user)) && due && now.Sub(e.tried) >= claudeAskFloor && !holding(ctx)
+	// and the keep-alive's run on a saved account (renewClaude), an hour
+	// apart at the most, whose run is the renewal: not put off by the floor
+	alive := keepAliveOf(ctx, user)
+	if active {
+		alive = nil
+	}
+	// every allowance refreshed by hand since this saved account's last
+	// read (AskEveryClaudeUsage), as its own card's refresh would
+	every := !active && claudeEveryAsked.Load() > e.asked && now.Sub(time.Unix(0, claudeEveryAt.Load())) < claudeEveryFor
+	read := ((active || savedRefresh(ctx, user) || every) && due || spare || alive != nil) && (now.Sub(e.tried) >= claudeAskFloor || alive != nil) && !holding(ctx)
 	c.Lock()
 	// one reading an ask or a wait, its first caller's; the others keep
 	// to it
@@ -800,12 +940,15 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 	heard := e.ws != nil && now.Sub(e.heard) < claudeHeard
 	if !read {
 		switch {
-		case ok && e.err != nil && !(heard && !claudeUsageDenied.MatchString(e.err.Error())):
+		case ok && e.err != nil && !(heard && !claudeDenied(e.err.Error())):
 			return []QuotaWindow{}, e.err
 		case ok && e.ws != nil:
 			return e.windows(now), nil
 		case active:
 			return []QuotaWindow{}, errClaudeNotAsked
+		case claudeTokenAccount(user):
+			// a refresh wouldn't read it either (readSavedClaudeUsage)
+			return []QuotaWindow{}, errClaudeSetupToken
 		default:
 			return []QuotaWindow{}, errClaudeSaved
 		}
@@ -829,6 +972,9 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 		ws, err = readClaudeUsage(ctx, "")
 	} else {
 		ws, err = readSavedClaudeUsage(ctx, user)
+		if alive != nil {
+			alive.done(err)
+		}
 	}
 	if active && ClaudeCodeMovedOff(user) {
 		return kept()
@@ -838,7 +984,7 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 		if f, ok := c.m[key]; ok {
 			// A failed read cannot establish that an account refusal cleared.
 			// A successful reading or a new header clears it instead.
-			if f.err != nil && claudeUsageDenied.MatchString(f.err.Error()) && !claudeUsageDenied.MatchString(err.Error()) {
+			if f.err != nil && claudeDenied(f.err.Error()) && !claudeDenied(err.Error()) {
 				err = f.err
 			}
 			if f.tried.Equal(now) {
@@ -848,11 +994,13 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 			e = f // headers received while /usage ran are newer than e
 		}
 		c.Unlock()
-		if e.ws != nil && time.Since(e.heard) < claudeHeard && !claudeUsageDenied.MatchString(err.Error()) {
+		if e.ws != nil && time.Since(e.heard) < claudeHeard && !claudeDenied(err.Error()) {
 			return e.windows(time.Now()), nil // a fresh header stands unless the account was refused
 		}
 		return ws, err
 	}
+	// a whole reading: a window it leaves out hasn't started
+	ws = claudeWithUnstarted(ws)
 	c.Lock()
 	if c.m == nil {
 		c.m = map[string]claudeUsageEntry{}
@@ -871,13 +1019,32 @@ var (
 )
 
 // savedRefresh says ctx is the refresh of the card of the saved Claude
-// account user, the one ask that runs Claude Code for a saved account. The
+// account user, one ask that runs Claude Code for a saved account; the
+// other is the user's refresh of every allowance (AskEveryClaudeUsage). The
 // Usage page opened, its timer, `magpie quota` and routing keep to what
 // was read: a run in every saved account's directory for each of them
 // would start Claude Code once per account.
 func savedRefresh(ctx context.Context, user string) bool {
 	r, ok := refreshing(ctx)
 	return ok && wasAsked(ctx) && r.wants("claude", user)
+}
+
+type spareReadKey struct{}
+
+// readingSpare is ctx for the switch off a spent account (NextLogin)
+// reading a saved Claude account it has nothing on: with Claude Code kept
+// to its own sign-in (switch-only), no request of a saved account passes
+// magpie to tell its allowance, and one never signed in to in Claude Code
+// since had no reading at all, so the switch found no account with room
+// and never moved (cn_Vincentzyx on X).
+func readingSpare(ctx context.Context) context.Context {
+	return context.WithValue(ctx, spareReadKey{}, true)
+}
+
+// spareRead says ctx is readingSpare's.
+func spareRead(ctx context.Context) bool {
+	b, _ := ctx.Value(spareReadKey{}).(bool)
+	return b
 }
 
 // elapsed is ws as of now: a window that has reset since it was read
@@ -932,12 +1099,25 @@ func codexUntil(auth []byte, now time.Time) *time.Time {
 	if json.Unmarshal(auth, &a) != nil {
 		return nil
 	}
-	s := claimString(jwtClaims(a.Tokens.IDToken), "https://api.openai.com/auth", "chatgpt_subscription_active_until")
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil || !t.After(now) {
-		return nil
+	return chatgptUntil(now, a.Tokens.IDToken)
+}
+
+// chatgptUntil is when the ChatGPT plan the first of tokens to name one
+// is paid until (chatgpt_subscription_active_until), nil when none does
+// or the time it names is gone by.
+func chatgptUntil(now time.Time, tokens ...string) *time.Time {
+	for _, tok := range tokens {
+		s := claimString(jwtClaims(tok), "https://api.openai.com/auth", "chatgpt_subscription_active_until")
+		if s == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil || !t.After(now) {
+			return nil
+		}
+		return &t
 	}
-	return &t
+	return nil
 }
 
 // codexWindows is the plan, allowance, rate-limit resets and credits of
@@ -949,8 +1129,8 @@ func codexWindows(ctx context.Context, token, accountID string) (plan string, ou
 	var data codexUsage
 	base := strings.TrimSuffix(CodexBase, "/codex")
 	out = []QuotaWindow{}
-	if err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data); err != nil {
-		return "", out, nil, "", false, err
+	if err = accountJSON(ctx, base+"/wham/usage", token, codexAccountHeaders(accountID), &data); err != nil {
+		return "", out, nil, "", false, codexUsageWords(err)
 	}
 	if c := data.Credits; c != nil && c.Has && !c.Unlimited {
 		if n, perr := strconv.ParseFloat(strings.TrimSpace(c.Balance), 64); perr == nil && n > 0 {
@@ -1008,9 +1188,11 @@ type codexUsage struct {
 	RateLimit struct {
 		// false once its allowance is used up; held only with no credits
 		// to go on with (codexHeld)
-		Allowed   *bool        `json:"allowed"`
-		Primary   *codexWindow `json:"primary_window"`
-		Secondary *codexWindow `json:"secondary_window"`
+		Allowed *bool `json:"allowed"`
+		// the backend's own word that a limit is hit
+		LimitReached *bool        `json:"limit_reached"`
+		Primary      *codexWindow `json:"primary_window"`
+		Secondary    *codexWindow `json:"secondary_window"`
 	} `json:"rate_limit"`
 	SpendControl *struct {
 		Reached bool `json:"reached"`
@@ -1066,7 +1248,7 @@ var codexReservePlans = []string{"team", "self_serve_business_prolite"}
 // says held: wrongly held costs the app its ChatGPT extras while magpie
 // serves the turn, wrongly not held leaves it sending nothing at all.
 func codexHeld(u codexUsage) bool {
-	if u.RateLimit.Allowed == nil || *u.RateLimit.Allowed {
+	if !codexAtLimit(u) {
 		return false
 	}
 	c := u.Credits
@@ -1081,6 +1263,28 @@ func codexHeld(u codexUsage) bool {
 		return false
 	}
 	return true
+}
+
+// codexAtLimit is whether the reading says the allowance is used up as
+// the Codex app's composer reads it: rate_limit.allowed false, and that
+// alone. Not said is not at the limit, and neither is allowed true with a
+// window at 100%: the app's gate returns open on anything but allowed
+// false (ChatGPT.app 26.1029.61003, the macOS build of the version
+// xiaoq6285 runs on Windows, async chunk "a6kU": search
+// "n.rate_limit?.allowed!==!1||"; the same in OpenAI.Codex 26.1027 on the
+// Windows box and in 26.1021), and its remaining-percent reading keeps a
+// window of an allowed account at 1% or more (search
+// "Math.max(100-e,+(!0===t))"), so to the app such an account still has
+// room. Holding it would take the app out of ChatGPT (durable threads,
+// remote control, its usage meter, #996) for no Send it would grey.
+//
+// A used-up 5h window with the week open is held through allowed: the
+// backend says allowed false and limit_reached true there (the real Team
+// reply in testdata, 5h at 100% and the week at 63%), which is what
+// greys the app's Send.
+func codexAtLimit(u codexUsage) bool {
+	a := u.RateLimit.Allowed
+	return a != nil && !*a
 }
 
 type codexWindow struct {
@@ -1126,7 +1330,7 @@ func copilotSubscriptionUsage(ctx context.Context, githubToken, host string) Sub
 			req.Header.Set(k, v)
 		}
 		var res *http.Response
-		res, err = http.DefaultClient.Do(req)
+		res, err = Keyed(http.DefaultClient).Do(req)
 		if err == nil {
 			defer res.Body.Close()
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))

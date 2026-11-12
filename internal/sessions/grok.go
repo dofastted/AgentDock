@@ -9,8 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/tidwall/gjson"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Grok Build keeps a session in a folder of its own under its sessions
@@ -28,6 +32,17 @@ import (
 // session it ran in, once. A fork starts with a copy of its source's
 // updates, counted where they were first written: only those from the time
 // it was made on count in it. `grok --resume <id>` picks one up again.
+//
+// A "tool_call" update is a call of a tool, written once a call (the
+// "tool_call_update"s after it are its progress), its name in
+// _meta["x.ai/tool"].name. Grok Build has no tool for skills: its prompt
+// lists each skill's SKILL.md by its path, and the model calls one up by
+// reading that file (read_file, or a command run_terminal_command runs),
+// as Codex's does. The user calls one up by typing /<name>: the prompt goes
+// in the updates as typed, and the skill's text is put in it only in
+// chat_history.jsonl, so a /<name> prompt counts as that skill when a
+// skill or command of that name is in one of the folders Grok Build finds
+// them in. Its own commands (/compact) are marked hostTurn.
 
 // GrokDir is Grok Build's folder: $GROK_HOME, else ~/.grok.
 func GrokDir() string {
@@ -74,6 +89,9 @@ type grokKind struct{ Kind, Parent string }
 var grokKinds listMemo[grokKind]
 
 func grokFiles() []file {
+	if !Reads("grok") {
+		return nil
+	}
 	kinds := grokKinds.round()
 	defer kinds.done()
 	root := filepath.Join(GrokDir(), "sessions")
@@ -96,12 +114,12 @@ func grokFiles() []file {
 		// its title, its cwd and whose subagent it is are in its summary
 		m := file{path: filepath.Join(dir, "summary.json")}
 		if stat(&m) {
-			f.manifest = m.path
+			f.w().manifest = m.path
 			f.size += m.size
 			if m.mod.After(f.mod) {
 				f.mod = m.mod
 			}
-			s, ok := kinds.get(m.path, m.size, m.mod, func() (grokKind, bool) {
+			s, ok := kinds.get(m.path, m.size, m.mod.Time(), func() (grokKind, bool) {
 				s, ok := readGrokSummary(m.path)
 				return grokKind{s.Kind, s.Parent}, ok
 			})
@@ -140,6 +158,9 @@ type grokLine struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
+			Meta struct {
+				HostTurn bool `json:"hostTurn"`
+			} `json:"_meta"`
 			Usage *struct {
 				grokUsage
 				ModelUsage map[string]grokUsage `json:"modelUsage"`
@@ -151,6 +172,7 @@ type grokLine struct {
 var (
 	grokTurn = []byte(`"turn_completed"`)
 	grokUser = []byte(`"user_message_chunk"`)
+	grokCall = []byte(`"sessionUpdate":"tool_call"`)
 	grokHook = []byte(`"sessionUpdate":"hook_execution"`)
 )
 
@@ -178,8 +200,8 @@ func parseGrok(f file, old *state) *state {
 	var c grokCarry
 	var m grokSummary
 	hasM := false
-	if f.manifest != "" {
-		if m, hasM = readGrokSummary(f.manifest); hasM {
+	if f.m().manifest != "" {
+		if m, hasM = readGrokSummary(f.m().manifest); hasM {
 			c.Model = m.CurrentModel
 			c.Created, _ = time.Parse(time.RFC3339Nano, m.CreatedAt)
 			if m.Parent != "" {
@@ -192,8 +214,8 @@ func parseGrok(f file, old *state) *state {
 	}
 	var s *state
 	var off int64
-	if o := old; o != nil && o.Grok != nil && o.Grok.Model == c.Model && o.Grok.Created.Equal(c.Created) && o.Grok.Since.Equal(c.Since) && o.Grok.Tail.holds(f.path) {
-		s, c, off = o.clone(), *o.Grok, o.Grok.Tail.Off
+	if o := old; o != nil && o.more().Grok != nil && o.more().Grok.Model == c.Model && o.more().Grok.Created.Equal(c.Created) && o.more().Grok.Since.Equal(c.Since) && o.more().Grok.Tail.holds(f.path) {
+		s, c, off = o.clone(), *o.more().Grok, o.more().Grok.Tail.Off
 	} else {
 		s = &state{}
 		if hasM {
@@ -201,9 +223,9 @@ func parseGrok(f file, old *state) *state {
 		}
 	}
 	s.Size, s.Mod = f.size, f.mod.UnixNano()
-	s.ID, s.Cwd, s.Named = m.Info.ID, m.Info.Cwd, title(m.GeneratedTitle)
-	if s.Named == "" {
-		s.Named = title(m.SessionSummary)
+	s.ID, s.Cwd, s.own().Named = m.Info.ID, m.Info.Cwd, title(m.GeneratedTitle)
+	if s.more().Named == "" {
+		s.own().Named = title(m.SessionSummary)
 	}
 	end, err := scanAt(f.path, off, nil, func(b []byte, _, _ int64) bool {
 		grokUpdate(s, &c, b, f.main)
@@ -217,11 +239,11 @@ func parseGrok(f file, old *state) *state {
 	if c.InPrompt {
 		t = title(c.Prompt)
 	}
-	s.Title, s.First = t, ""
+	s.Title, s.own().First = t, ""
 	if strings.HasPrefix(t, "<") {
-		s.Title, s.First = "", untagged(t)
+		s.Title, s.own().First = "", untagged(t)
 	}
-	s.Grok = &c
+	s.own().Grok = &c
 	return s
 }
 
@@ -237,12 +259,17 @@ func grokUpdate(s *state, c *grokCarry, b []byte, main bool) {
 		return
 	}
 	s.saw(at, main)
-	user := main && c.Title == "" && bytes.Contains(b, grokUser)
+	prompt := main && bytes.Contains(b, grokUser)
+	user := prompt && c.Title == ""
 	if !user && c.InPrompt {
 		// the first prompt's chunks are over
 		c.Title, c.Prompt, c.InPrompt = title(c.Prompt), "", false
 	}
-	if !user && !bytes.Contains(b, grokTurn) {
+	if bytes.Contains(b, grokCall) {
+		grokTool(s, at, b)
+		return
+	}
+	if !prompt && !bytes.Contains(b, grokTurn) {
 		return
 	}
 	var l grokLine
@@ -252,9 +279,15 @@ func grokUpdate(s *state, c *grokCarry, b []byte, main bool) {
 	u := l.Params.Update
 	switch u.SessionUpdate {
 	case "user_message_chunk":
-		if user && u.Content.Type == "text" {
+		if u.Content.Type != "text" {
+			return
+		}
+		if user {
 			c.Prompt += u.Content.Text
 			c.InPrompt = true
+		}
+		if !u.Meta.HostTurn {
+			s.tool(at, "", grokSlashSkill(s.Cwd, u.Content.Text))
 		}
 	case "turn_completed":
 		if u.Usage == nil {
@@ -269,6 +302,78 @@ func grokUpdate(s *state, c *grokCarry, b []byte, main bool) {
 			s.use(date, name, mu.tokens())
 		}
 	}
+}
+
+// grokTool counts a "tool_call" update: the tool, and each skill it calls
+// up by reading its SKILL.md.
+func grokTool(s *state, at time.Time, b []byte) {
+	u := gjson.GetBytes(b, "params.update")
+	if u.Get("sessionUpdate").String() != "tool_call" {
+		return
+	}
+	name := cmp.Or(u.Get(`_meta.x\.ai/tool.name`).String(), u.Get("title").String())
+	if name == "" {
+		return
+	}
+	var text string
+	switch name {
+	case "read_file":
+		text = cmp.Or(u.Get("rawInput.target_file").String(), u.Get("rawInput.path").String())
+	case "run_terminal_command":
+		text = u.Get("rawInput.command").String()
+	}
+	s.tool(at, name, "")
+	if strings.Contains(text, "SKILL.md") {
+		for _, k := range skillReadsIn(text) {
+			s.tool(at, "", k)
+		}
+	}
+}
+
+// grokSkillName is a name a /<name> prompt can call a skill up by.
+var grokSkillName = lazyre.New(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// grokSlashSkill is the skill a prompt typed as /<name> calls up, "" when
+// it calls up none: no skill or command of that name is in a folder Grok
+// Build finds them in, from the session's folder up and in the user's.
+func grokSlashSkill(cwd, text string) string {
+	rest, ok := strings.CutPrefix(text, "/")
+	if !ok {
+		return ""
+	}
+	name := rest
+	if i := strings.IndexFunc(rest, unicode.IsSpace); i >= 0 {
+		name = rest[:i]
+	}
+	if !grokSkillName.MatchString(name) || strings.Contains(name, "..") {
+		return ""
+	}
+	var bases []string
+	home, _ := os.UserHomeDir()
+	roots := []string{home}
+	for d := filepath.Clean(cwd); cwd != "" && filepath.IsAbs(d); {
+		roots = append(roots, d)
+		up := filepath.Dir(d)
+		if up == d {
+			break
+		}
+		d = up
+	}
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		for _, v := range []string{".grok", ".agents", ".claude", ".cursor"} {
+			bases = append(bases, filepath.Join(r, v))
+		}
+	}
+	bases = append(bases, GrokDir(), filepath.Join(GrokDir(), "bundled"))
+	for _, b := range bases {
+		if fileExists(filepath.Join(b, "skills", name, "SKILL.md")) || fileExists(filepath.Join(b, "commands", name+".md")) {
+			return name
+		}
+	}
+	return ""
 }
 
 var tsKey = []byte(`"timestamp":`)

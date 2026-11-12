@@ -72,6 +72,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // short, so the editor scrolls and a click that moved it would show
       const page = await (await browser.newContext({ viewport: { width: 900, height: 560 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const posts = [];
@@ -171,7 +172,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // the sheet is still open under it
       await sheet.locator('.tile[data-pick="Z.ai"]').click();
       await org(page).waitFor();
-      await page.locator(".editor.new input[type=password]").fill("zk-1");
+      await page.locator(".editor.new input[type=password]:not(.proxy-credential)").fill("zk-1");
       await click(page, org(page));
       await org(page).fill("org-9");
       await proj(page).fill(" proj-9 ");

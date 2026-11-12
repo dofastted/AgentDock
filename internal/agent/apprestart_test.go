@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -33,16 +34,19 @@ func restartSandbox(t *testing.T) string {
 	os.MkdirAll(filepath.Join(home, ".workbuddy"), 0o755)
 	os.WriteFile(filepath.Join(home, ".workbuddy", "models.json"), []byte(`[]`), 0o600)
 	notOnMac(t)
-	wasWin, wasMac, wasFolders, wasRunning := restartOnWindows, restartOnMac, appFolders, running
+	wasWin, wasMac, wasLinux, wasFolders, wasRunning := restartOnWindows, restartOnMac, restartOnLinux, appFolders, running
 	wasQuit, wasOpen, wasQuitWait := appQuit, appOpen, appQuitWait
 	wasProcs, wasClose, wasEnd, wasLaunch, wasCloseWait, wasBackWait, wasPoll := winProcs, winClose, winEnd, winLaunch, appCloseWait, appBackWait, appPoll
+	wasShown, wasGrace := winShown, appTrayGrace
 	t.Cleanup(func() {
-		restartOnWindows, restartOnMac, appFolders, running = wasWin, wasMac, wasFolders, wasRunning
+		restartOnWindows, restartOnMac, restartOnLinux, appFolders, running = wasWin, wasMac, wasLinux, wasFolders, wasRunning
 		appQuit, appOpen, appQuitWait = wasQuit, wasOpen, wasQuitWait
 		winProcs, winClose, winEnd, winLaunch, appCloseWait, appBackWait, appPoll = wasProcs, wasClose, wasEnd, wasLaunch, wasCloseWait, wasBackWait, wasPoll
+		winShown, appTrayGrace = wasShown, wasGrace
 	})
-	restartOnWindows, restartOnMac = false, false
+	restartOnWindows, restartOnMac, restartOnLinux = false, false, false
 	appPoll = 5 * time.Millisecond
+	winShown = func([]int) bool { return true }
 	return home
 }
 
@@ -209,6 +213,86 @@ func TestWorkBuddyRestartOnWindows(t *testing.T) {
 	}
 }
 
+// An app that closes its window to the tray (Claude Desktop on Windows
+// hides it in ~0.6s and keeps every process; CyberCaius on Discord, 10-29:
+// slower than quitting by hand) is ended once its windows are gone, not
+// after the whole wait for one still showing a window. One that shows a
+// window still is given that wait, and one that ends by itself in the
+// grace is never ended.
+func TestRestartEndsAppInTrayAtOnce(t *testing.T) {
+	const exe = `C:\Program Files\WorkBuddy\WorkBuddy.exe`
+	cases := []struct {
+		name    string
+		shown   func(since time.Duration) bool
+		endsBy  time.Duration // the app ends by itself this long after the close; 0 never
+		want    []string
+		atLeast time.Duration
+		under   time.Duration
+	}{
+		{"tray", func(d time.Duration) bool { return d < 30*time.Millisecond }, 0,
+			[]string{"close 10 11", "end 10", "open " + exe}, 100 * time.Millisecond, 2 * time.Second},
+		{"asking", func(time.Duration) bool { return true }, 0,
+			[]string{"close 10 11", "end 10", "open " + exe}, 3 * time.Second, 10 * time.Second},
+		{"quits itself", func(d time.Duration) bool { return d < 30*time.Millisecond }, 60 * time.Millisecond,
+			[]string{"close 10 11", "open " + exe}, 0, 2 * time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			home := restartSandbox(t)
+			restartOnWindows = true
+			appCloseWait, appBackWait, appTrayGrace = 3*time.Second, time.Second, 100*time.Millisecond
+			start := time.Now().Add(-time.Hour)
+			alive := true
+			var closed time.Time
+			winProcs = func(name string) []winProc {
+				if !closed.IsZero() && c.endsBy > 0 && time.Since(closed) >= c.endsBy {
+					alive = false
+				}
+				if !alive || !strings.EqualFold(name, "WorkBuddy.exe") {
+					return nil
+				}
+				return []winProc{
+					{pid: 10, parent: 4, image: exe, start: start},
+					{pid: 11, parent: 10, image: exe, start: start.Add(time.Second)},
+				}
+			}
+			winShown = func([]int) bool { return closed.IsZero() || c.shown(time.Since(closed)) }
+			var did []string
+			winClose = func(pids []int) error {
+				slices.Sort(pids)
+				did = append(did, "close "+strings.Trim(fmt.Sprint(pids), "[]"))
+				closed = time.Now()
+				return nil
+			}
+			winEnd = func(pid int) error {
+				did = append(did, fmt.Sprint("end ", pid))
+				alive = false
+				return nil
+			}
+			winLaunch = func(p winProc) error {
+				did = append(did, "open "+p.image)
+				alive, start, closed = true, time.Now(), time.Time{}
+				return nil
+			}
+			a := workbuddy(home)
+			if err := a.Field("provider").Set("magpie"); err != nil {
+				t.Fatal(err)
+			}
+			began := time.Now()
+			if err := a.RestartApp(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			took := time.Since(began)
+			if !slices.Equal(did, c.want) {
+				t.Fatalf("did %q, want %q", did, c.want)
+			}
+			if took < c.atLeast || took >= c.under {
+				t.Fatalf("took %v, want at least %v and under %v", took, c.atLeast, c.under)
+			}
+		})
+	}
+}
+
 // Which Windows processes are each app's: Claude Desktop's claude.exe, not
 // Claude Code's; WorkBuddy's WorkBuddy.exe, not WorkBuddy AI's.
 func TestRestartAppsOnWindows(t *testing.T) {
@@ -226,6 +310,8 @@ func TestRestartAppsOnWindows(t *testing.T) {
 		{"workbuddy", `C:\Program Files\WorkBuddy\WorkBuddy.exe`, true},
 		{"workbuddy", `C:\Program Files\WorkBuddy AI\WorkBuddy.exe`, false},
 		{"workbuddy", `C:\Program Files\WorkBuddy\resources\cli\codebuddy.exe`, false},
+		{"openmausbot", `C:\Users\u\AppData\Local\Programs\openmausbot\OpenMausBot.exe`, true},
+		{"openmausbot", `C:\Users\u\AppData\Local\Programs\openmausbot\resources\app.asar.unpacked\node_modules\@anthropic-ai\claude-code\bin\claude.exe`, false},
 	}
 	for _, c := range cases {
 		if got := restartApps[c.id].win(c.image); got != c.want {
@@ -371,5 +457,211 @@ func workbuddySaves(t *testing.T, path string, encrypt bool, at time.Time) {
 	}
 	if err := os.Chtimes(path, at, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// WorkBuddy runs its sidecar as a script on its own executable
+// (ELECTRON_RUN_AS_NODE), spawned detached: it outlives a quit and the
+// next start takes it up again. That process is no copy of WorkBuddy, so
+// a quit and reopen by hand ends the row's Restart, and the Restart quits
+// WorkBuddy, waits for WorkBuddy alone and opens it again (Northes on
+// Discord, 11-04: the row kept saying "重启 WorkBuddy 后生效" after a
+// restart by hand, and 重启 quit WorkBuddy and never opened it). Both
+// builds; WorkBuddy AI's bundle name has a space in it.
+func TestWorkBuddySidecarOutlivesQuitOnMac(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the bundle paths are built with filepath, so a Windows run spells them with \\ (#4115)")
+	}
+	for _, b := range []struct{ id, name, bundleID string }{
+		{"workbuddy", "WorkBuddy.app", "com.tencent.workbuddy.mac"},
+		{"workbuddy-ai", "WorkBuddy AI.app", "com.workbuddy.workbuddy-ai"},
+	} {
+		t.Run(b.id, func(t *testing.T) {
+			home := restartSandbox(t)
+			apps := filepath.Join(home, "Applications")
+			bundle := macApp(t, apps, b.name, b.bundleID, "Electron")
+			restartOnMac = true
+			appFolders = func() []string { return []string{apps} }
+			exe := bundle + "/Contents/MacOS/Electron"
+			alive, up := true, time.Hour
+			running = func(pat string) []runningProc {
+				// the sidecar, started two hours ago by an earlier
+				// WorkBuddy, and the daemon the app runs beside itself
+				// and a CLI it keeps warm, a script with no extension
+				ps := []runningProc{
+					{2 * time.Hour, exe + " " + bundle + "/Contents/Resources/app.asar/main/sidecar-entry.js --token 4f1c --control-pipe-uuid 9a7e"},
+					{2 * time.Hour, exe + " " + bundle + "/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy --prewarm --prewarm-id wb-pool-1762300000000-a1b2c3"},
+				}
+				if alive {
+					ps = append(ps,
+						runningProc{up, exe},
+						runningProc{up, exe + " --disable-warning=ExperimentalWarning " + bundle + "/Contents/Resources/app.asar/main/daemon-app-server-entry.js --stdio"},
+						runningProc{up, bundle + "/Contents/Frameworks/WorkBuddy Helper (Renderer).app/Contents/MacOS/WorkBuddy Helper (Renderer) --type=renderer"})
+				}
+				var out []runningProc
+				for _, p := range ps {
+					if regexp.MustCompile(pat).MatchString(p.cmd) {
+						out = append(out, p)
+					}
+				}
+				return out
+			}
+			var a *Agent
+			if b.id == "workbuddy" {
+				a = workbuddy(home)
+			} else {
+				os.MkdirAll(filepath.Join(home, ".workbuddy-ai"), 0o755)
+				a = workbuddyAI(home)
+			}
+			if err := a.Field("provider").Set("magpie"); err != nil {
+				t.Fatal(err)
+			}
+			got := a.AppBehind()
+			if got == nil {
+				t.Fatal("no Restart for WorkBuddy started an hour before magpie wrote its models")
+			}
+			if d := time.Since(got.Since); d > 61*time.Minute {
+				t.Fatalf("since %v ago: the sidecar's start, not WorkBuddy's", d)
+			}
+
+			// quit and opened again by hand; the sidecar runs on
+			up = 0
+			if got := a.AppBehind(); got != nil {
+				t.Fatalf("still offered after WorkBuddy was reopened by hand: since %v ago", time.Since(got.Since))
+			}
+			// quit, the sidecar left: WorkBuddy isn't running
+			alive = false
+			if a.AppBehind() != nil {
+				t.Fatal("offered a Restart for a quit WorkBuddy whose sidecar runs on")
+			}
+
+			alive, up = true, time.Hour
+			appQuitWait = time.Second
+			var did []string
+			appQuit = func(_ context.Context, b string) error { did = append(did, "quit "+b); alive = false; return nil }
+			appOpen = func(_ context.Context, b string) error { did = append(did, "open "+b); alive, up = true, 0; return nil }
+			if err := a.RestartApp(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if want := []string{"quit " + bundle, "open " + bundle}; !slices.Equal(did, want) {
+				t.Fatalf("did %q, want %q", did, want)
+			}
+			if a.AppBehind() != nil {
+				t.Fatal("still offered after the restart")
+			}
+		})
+	}
+}
+
+// The same on Windows: the sidecar is a WorkBuddy.exe whose parent, the
+// WorkBuddy that spawned it, has quit. It is neither WorkBuddy's start nor
+// its main process, and the Restart neither closes nor ends it.
+func TestWorkBuddySidecarOutlivesQuitOnWindows(t *testing.T) {
+	home := restartSandbox(t)
+	restartOnWindows = true
+	appCloseWait, appBackWait = 50*time.Millisecond, time.Second
+	const exe = `C:\Program Files\WorkBuddy\WorkBuddy.exe`
+	start := time.Now().Add(-time.Hour)
+	alive := true
+	winProcs = func(name string) []winProc {
+		if !strings.EqualFold(name, "WorkBuddy.exe") {
+			return nil
+		}
+		ps := []winProc{
+			{pid: 30, parent: 9, image: exe, start: time.Now().Add(-2 * time.Hour),
+				cmd: `"` + exe + `" "C:\Program Files\WorkBuddy\resources\app.asar\main\sidecar-entry.js" --token 4f1c --control-pipe-uuid 9a7e`},
+			{pid: 31, parent: 30, image: exe, start: time.Now().Add(-2 * time.Hour),
+				cmd: `"` + exe + `" "C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\bin\codebuddy" --prewarm --prewarm-id wb-pool-1762300000000-a1b2c3`},
+		}
+		if alive {
+			ps = append(ps,
+				winProc{pid: 10, parent: 4, image: exe, start: start, cmd: `"` + exe + `"`},
+				winProc{pid: 11, parent: 10, image: exe, start: start.Add(time.Second), cmd: `"` + exe + `" --type=gpu-process --no-sandbox --user-data-dir="C:\Users\u\.workbuddy\app"`},
+				winProc{pid: 12, parent: 10, image: exe, start: start.Add(2 * time.Second), cmd: `"` + exe + `" --disable-warning=ExperimentalWarning "C:\Program Files\WorkBuddy\resources\app.asar\main\daemon-app-server-entry.js" --stdio`})
+		}
+		return ps
+	}
+	var did []string
+	winClose = func(pids []int) error {
+		slices.Sort(pids)
+		did = append(did, "close "+strings.Trim(fmt.Sprint(pids), "[]"))
+		return nil
+	}
+	winEnd = func(pid int) error {
+		did = append(did, fmt.Sprint("end ", pid))
+		if pid == 10 {
+			alive = false
+		}
+		return nil
+	}
+	winLaunch = func(p winProc) error {
+		did = append(did, fmt.Sprint("open ", p.pid, " ", p.image))
+		alive, start = true, time.Now()
+		return nil
+	}
+	a := workbuddy(home)
+	if err := a.Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
+	}
+	got := a.AppBehind()
+	if got == nil || !got.Since.Equal(start) {
+		t.Fatalf("behind: %+v, want since %v", got, start)
+	}
+	// quit and opened again by hand; the sidecar runs on
+	was := start
+	start = time.Now()
+	if got := a.AppBehind(); got != nil {
+		t.Fatalf("still offered after WorkBuddy was reopened by hand: since %v", got.Since)
+	}
+	// quit, the sidecar left: WorkBuddy isn't running
+	alive = false
+	if a.AppBehind() != nil {
+		t.Fatal("offered a Restart for a quit WorkBuddy whose sidecar runs on")
+	}
+	alive, start = true, was
+	if err := a.RestartApp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"close 10 11", "end 10", "open 10 " + exe}; !slices.Equal(did, want) {
+		t.Fatalf("did %q, want %q", did, want)
+	}
+	if a.AppBehind() != nil {
+		t.Fatal("still offered after the restart")
+	}
+}
+
+// Which command lines are a script run on an app's executable: the real
+// ones of WorkBuddy 5.6 on Windows, its sidecar and prewarmed CLI as
+// 5.5.6's app.asar spawns them, and Electron's own processes.
+func TestRunsScript(t *testing.T) {
+	const win = `C:\Program Files\WorkBuddy\WorkBuddy.exe`
+	const mac = `/Applications/WorkBuddy AI.app/Contents/MacOS/Electron`
+	cases := []struct {
+		cmd, exe string
+		want     bool
+	}{
+		{`"` + win + `"`, win, false},
+		{`"` + win + `" --type=gpu-process --no-sandbox --user-data-dir="C:\Users\yeton\.workbuddy\app" --mojo-platform-channel-handle=1272 /prefetch:2`, win, false},
+		{`"` + win + `" --type=renderer --user-data-dir="C:\Users\John Smith\.workbuddy\app" --cors-schemes=vscode-file,wb-extension,buddy-app`, win, false},
+		{`"` + win + `" --type=crashpad-handler --user-data-dir=C:\Users\yeton\.workbuddy\app /prefetch:4 --no-rate-limit`, win, false},
+		{`"` + win + `" "workbuddy://open?task=1"`, win, false},
+		{`"` + win + `" --disable-warning=ExperimentalWarning "C:\Program Files\WorkBuddy\resources\app.asar\main\daemon-app-server-entry.js" --stdio`, win, true},
+		{`"` + win + `" "C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\bin\codebuddy" --prewarm --prewarm-id wb-pool-1`, win, true},
+		{`"` + win + `" "C:\Program Files\WorkBuddy\resources\app.asar.unpacked\cli\bin\codebuddy" --prewarm`, "", true},
+		{mac, mac, false},
+		{mac + ` -psn_0_123456`, mac, false},
+		{mac + ` /Applications/WorkBuddy AI.app/Contents/Resources/app.asar/main/sidecar-entry.js --token t`, mac, true},
+		{mac + ` /Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy --prewarm --prewarm-id wb-pool-1`, mac, true},
+		// #3700's (Raters0's) ps: the sidecar's codebuddy --serve child.
+		{mac + ` /Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy --serve --no-session-persistence`, mac, true},
+		{`/Applications/WorkBuddy AI.app/Contents/Frameworks/WorkBuddy Helper (Renderer).app/Contents/MacOS/WorkBuddy Helper (Renderer) --type=renderer --user-data-dir=/Users/u/Library/Application Support/WorkBuddy`, mac, false},
+		{`/Applications/Claude.app/Contents/MacOS/Claude`, "/Applications/Claude.app/Contents/MacOS/Claude", false},
+		{`/Applications/X.app/Contents/MacOS/X /tmp/server.MJS`, "", true},
+		{``, "", false},
+	}
+	for _, c := range cases {
+		if got := runsScript(c.cmd, c.exe); got != c.want {
+			t.Errorf("%s: %v, want %v", c.cmd, got, c.want)
+		}
 	}
 }

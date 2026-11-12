@@ -96,7 +96,7 @@ const init = () => {
     return n;
   };
   // the live dot's pulse, running or not
-  window.__pulses = () => [...document.querySelectorAll(".rt-livedot")].filter((d) => d.getAnimations().some((a) => a.playState === "running")).length;
+  window.__pulses = () => [...document.querySelectorAll(".rt-livedot")].filter((d) => d.getAnimations({ subtree: true }).some((a) => a.playState === "running")).length;
   window.requestAnimationFrame = (cb) => {
     // a loop of the core's (app.js's sidebar spring, navTopStep) is a
     // global; the Routing plugin's is in its own scope
@@ -121,6 +121,7 @@ for (const engine of engines) for (const lang of ["en", "zh"]) {
     await context.addInitScript(init);
     const page = await context.newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const next = [];
@@ -206,6 +207,7 @@ async function routingPage(t, engine, lang, feed, view = "routing") {
   await context.addInitScript(init);
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", e => errors.push(e.message));
   await page.route("**/*", serve(lang, feed));

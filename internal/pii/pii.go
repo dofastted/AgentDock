@@ -15,15 +15,21 @@
 // the sha256 pinned here, and the setting (settings.RedactModel) is saved
 // only once both are. pf-serve is started on the first request that needs
 // it, on the GPU where there is one (Metal, Vulkan) and else the CPU, and
-// is ended after a while with none, which lets its memory go.
+// is ended after a while with none (idleAfter), which lets its memory go.
+// On the CPU it maps the model's file rather than reading it in
+// (native/privacy-filter/patches/weights-paged.patch): the weights are
+// the file's pages, which the system can drop under pressure, and what
+// pf-serve holds of its own is ~200-300 MB, not 1.8 GB (#853 in
+// magpie-community/plugins).
 //
 // A process of its own, not linked in: 1.7 GB the gateway would otherwise
 // hold for good, and a GPU driver's crash that would end the gateway with
-// it. One that dies is started again; one that dies on the GPU, doesn't
-// load there in gpuLoadTimeout, or hangs there twice in a row, is started
-// on the CPU until the GPU is tried again (gpuRetryAfter), with no restart
-// of magpie. One that keeps failing holds requests back at once, not
-// after a load each, until it is tried again (retryAfter).
+// it. One that dies is started again, on the GPU too: a driver that reset
+// the GPU (device lost) is got past by a load there. One that dies or hangs
+// on the GPU twice in a row, or doesn't load there in gpuLoadTimeout, is
+// started on the CPU until the GPU is tried again (gpuRetryAfter), with
+// no restart of magpie. One that keeps failing holds requests back at
+// once, not after a load each, until it is tried again (retryAfter).
 package pii
 
 import (
@@ -35,6 +41,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/pii/guard"
 	"github.com/yetone/magpie/internal/redact"
 )
 
@@ -51,20 +58,17 @@ var (
 // oldTags are the tags pinned before, newest first: one of theirs on disk
 // is run until serveTag's is downloaded (upgrade).
 var (
-	serveTag  = "pf-v2"
-	oldTags   = []string{"pf-v1"}
+	serveTag  = "pf-v4"
+	oldTags   = []string{"pf-v3", "pf-v2", "pf-v1"}
 	serveBase = "https://github.com/yetone/magpie/releases/download/"
 	serveSHA  = map[string]string{
-		"darwin-amd64":  "4b68c9f06b14b909ec35e491ba58fcb06df500a5a0985465dd1115f9e7a5d753",
-		"darwin-arm64":  "13ea258cc139dd0fc024f8eab70ee3566aa12ce6b5ab71f890b68bc8507159d3",
-		"linux-amd64":   "ff0af5cd1a3d350e7c93ca45c0b5285088c9666340826e87fbb14e5dcb23f772",
-		"linux-arm64":   "05970f7c5ba202e0e577cb22e0d12f009789c321583574a1ae1196d9522f7181",
-		"windows-amd64": "f4993000cc09500c907d3dd7042d783fa0b9310f272bc0bdf323ba9d012556f0",
+		"darwin-amd64":  "dc287579abeafe0be0add35305bde05f9cb06405f6b98dda5d71c9bf2c53c2a0",
+		"darwin-arm64":  "da4c89248937221a880996964e76a3dec18a9f8f80f2ee39e1cf26ef0933ac69",
+		"linux-amd64":   "8a7e61e6deebde68b13fc17009c84aef9da2230ea9e696c9e62b32e79c30db00",
+		"linux-arm64":   "0c29b9fdd1452f75414ee5fc623cfec70f4180af5046a9e669a289db7bf3da08",
+		"windows-amd64": "4457116e76d5861b28f26fa15613a943a434d35174f30aa3b8488e76bccc6545",
 	}
 )
-
-// target is this system's name in serveSHA.
-func target() string { return runtime.GOOS + "-" + runtime.GOARCH }
 
 // Supported says pf-serve is built for this system.
 func Supported() bool { return serveSHA[target()] != "" }
@@ -77,11 +81,26 @@ func Size() int64 { return modelSize }
 // sync carries to the user's other computers.
 var dir = func() string { return filepath.Join(appdir.Cache(), "privacy-filter") }
 
-func modelPath() string { return filepath.Join(dir(), "privacy-filter-q8-"+modelSHA[:12]+".gguf") }
+func modelPath() string { return filepath.Join(dir(), modelName()) }
+
+// modelName is the model's file name in dir, ASCII alone: pf-serve is
+// given this, not modelPath (startOne).
+func modelName() string { return "privacy-filter-q8-" + modelSHA[:12] + ".gguf" }
 
 func serveDir() string { return tagDir(serveTag) }
 
 func tagDir(tag string) string { return filepath.Join(dir(), tag+"-"+target()) }
+
+// tagDirs are where tag's pf-serve may be on disk: tagDir, and under
+// Rosetta also the Intel one's, which magpie fetched there before it
+// fetched Apple silicon's (target).
+func tagDirs(tag string) []string {
+	ds := []string{tagDir(tag)}
+	if osArch != target() {
+		ds = append(ds, filepath.Join(dir(), tag+"-"+osArch))
+	}
+	return ds
+}
 
 // exe is a program of pf-serve's: serveTag's, or, until that is
 // downloaded, the newest of oldTags' on disk.
@@ -96,8 +115,10 @@ func exeIn(d, name string) string {
 
 func binDir() string {
 	for _, tag := range append([]string{serveTag}, oldTags...) {
-		if _, err := os.Stat(exeIn(tagDir(tag), "pf-serve")); err == nil {
-			return tagDir(tag)
+		for _, d := range tagDirs(tag) {
+			if _, err := os.Stat(exeIn(d, "pf-serve")); err == nil {
+				return d
+			}
 		}
 	}
 	return serveDir()
@@ -131,17 +152,30 @@ type Status struct {
 	Error       string `json:"error,omitempty"`
 	// pf-serve, while it runs: where the model is, and how long it took
 	// to start
-	Running  bool   `json:"running,omitempty"`
-	Device   string `json:"device,omitempty"`
+	Running bool   `json:"running,omitempty"`
+	Device  string `json:"device,omitempty"`
+	// Via is the runtime AstrLink Guard runs on, "CoreML" on a Mac where
+	// it does (Device then the one its plan puts most of the model on, or
+	// ""); "" for magpie's own Go code on the CPU
+	Via      string `json:"via,omitempty"`
 	GPU      bool   `json:"gpu,omitempty"`
 	LoadMS   int    `json:"loadMs,omitempty"`
 	GPUError string `json:"gpuError,omitempty"`
+	// GPUReset says the GPU was lost to its driver resetting it
+	// (Vulkan's device lost), not to a fault of the model's; GPUAgain
+	// is when the GPU is tried again (Unix ms), while that is ahead
+	GPUReset bool  `json:"gpuReset,omitempty"`
+	GPUAgain int64 `json:"gpuAgain,omitempty"`
 	// why the last request got no answer
 	Failed string `json:"failed,omitempty"`
 	// pf-serve is loading the model, and how many requests wait for it
 	// (or for the one it is on)
 	Loading bool `json:"loading,omitempty"`
 	Waiting int  `json:"waiting,omitempty"`
+	// Rosetta: AstrLink Guard runs in an Intel magpie under Rosetta,
+	// in Go and translated, several times slower than in Apple silicon's
+	// build, which has CoreML too
+	Rosetta bool `json:"rosetta,omitempty"`
 }
 
 // Now is the model's status.
@@ -156,7 +190,11 @@ func Now() Status {
 	if s.GPUError == "" {
 		s.GPUError = srv.gpuLost
 	}
+	if srv.cpu && time.Now().Before(srv.gpuAgain) {
+		s.GPUAgain = srv.gpuAgain.UnixMilli()
+	}
 	srv.mu.Unlock()
+	s.GPUReset = deviceLost.MatchString(s.GPUError)
 	s.Waiting = int(waiting.Load())
 	return s
 }
@@ -185,6 +223,9 @@ type Model interface {
 	Installed() bool
 	// Size is how much turning it on downloads.
 	Size() int64
+	// MinScore is its default threshold: masking drops what it is less
+	// sure of, unless the user set another.
+	MinScore() float64
 	Find(ctx context.Context, texts []string) ([][]redact.Found, error)
 	Now() Status
 	// Download fetches it in the background and calls done once it is on
@@ -201,6 +242,21 @@ type Model interface {
 // Models are the local models, Privacy Filter first.
 func Models() []Model { return []Model{pfModel{}, guardModel{}} }
 
+// Floor is the lowest threshold a user can set (settings.RedactModelScore):
+// what either model sends is at least this sure. pf-serve's default
+// threshold is 0.5, and AstrLink Guard's Find keeps what is (guard.Floor).
+const Floor = guard.Floor
+
+// Threshold is model m's threshold of those the user set (by model id,
+// settings.RedactModelScore), or its own where none is, or one is out of
+// [Floor, 1).
+func Threshold(set map[string]float64, m Model) float64 {
+	if v, ok := set[m.ID()]; ok && v >= Floor && v < 1 {
+		return v
+	}
+	return m.MinScore()
+}
+
 // Of is the model id names; AstrLink Guard's for an id there's none of.
 func Of(id string) Model {
 	if id == PrivacyFilter {
@@ -210,17 +266,18 @@ func Of(id string) Model {
 }
 
 // Choose is the model masking uses: the one the user picked (name);
-// with none picked, Privacy Filter where it was turned on (on) or
-// downloaded before there was a choice, so its user keeps the model they
-// had and downloads nothing; else AstrLink Guard, a 38 MB download that
-// runs on every CPU and, measured on code (docs/subsystems), masks far
-// fewer ordinary values.
+// with none picked, AstrLink Guard, a 38 MB download that runs on every
+// CPU and, measured on code (docs/subsystems), masks far fewer ordinary
+// values. Only while the model is on (on) and Privacy Filter is on disk
+// but AstrLink Guard isn't is it Privacy Filter, so a user who had it on
+// before there was a choice isn't held back while AstrLink Guard
+// downloads (masking.picked starts that download).
 func Choose(name string, on bool) string {
 	switch name {
 	case PrivacyFilter, AstrLinkGuard:
 		return name
 	}
-	if on || Installed() {
+	if on && !guardInstalled() && Installed() {
 		return PrivacyFilter
 	}
 	return AstrLinkGuard
@@ -233,6 +290,7 @@ func (pfModel) ID() string                 { return PrivacyFilter }
 func (pfModel) Supported() bool            { return Supported() }
 func (pfModel) Installed() bool            { return Installed() }
 func (pfModel) Size() int64                { return Size() }
+func (pfModel) MinScore() float64          { return 0.5 }
 func (pfModel) Now() Status                { return Now() }
 func (pfModel) Download(done func()) error { return Download(done) }
 func (pfModel) Cancel()                    { Cancel() }

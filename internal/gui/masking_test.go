@@ -42,7 +42,7 @@ func TestMaskingRecordsAPI(t *testing.T) {
 		Snips:  map[string]string{p: sent}})
 	other := maskrec.Add(maskrec.Record{What: "search", N: 1, Values: []maskrec.Value{{Placeholder: "{{EMAIL_00000000}}", Kind: "EMAIL", By: redact.ByRule}}})
 
-	srv := Handler(webHost{func() {}}, nil)
+	srv := webPageHandler(t, webHost{func() {}}, nil)
 	get := func(path string, into any) int {
 		rw := httptest.NewRecorder()
 		srv.ServeHTTP(rw, httptest.NewRequest("GET", path, nil))
@@ -159,7 +159,7 @@ func TestMaskingPreviewKeepsKeyForm(t *testing.T) {
 	t.Setenv("USERPROFILE", h)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
-	srv := Handler(webHost{func() {}}, nil)
+	srv := webPageHandler(t, webHost{func() {}}, nil)
 	preview := func() string {
 		rw := httptest.NewRecorder()
 		srv.ServeHTTP(rw, httptest.NewRequest("POST", "/api/masking/preview", strings.NewReader(`{"text":"用密钥 `+key+` 部署可以吗，或用密钥 OPENAI_API_KEY=`+key+`"}`)))
@@ -177,5 +177,65 @@ func TestMaskingPreviewKeepsKeyForm(t *testing.T) {
 		if strings.Contains(got, key) || strings.Contains(got, "{{") == shape || shape && (!strings.Contains(got, "=sk_") || !strings.Contains(got, "用密钥 sk_")) {
 			t.Errorf("keep form %v: %q", shape, got)
 		}
+	}
+}
+
+// A value masked by mistake is let go from its request's record
+// (yew_fence on Discord): what the placeholder stood for joins Never
+// mask, beside the values already there, once whatever its case, and the
+// next request sends it as written. A placeholder the masker doesn't know
+// adds nothing, and a GET changes nothing.
+func TestMaskingAllowFromRecord(t *testing.T) {
+	const key = "sk-proj-abcdEFGH1234ijklMNOP5678qrst"
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	t.Setenv("USERPROFILE", h)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
+	if err := settings.Save(settings.Settings{Redact: true, RedactAllow: []string{"build-01"}}); err != nil {
+		t.Fatal(err)
+	}
+	defer gwmw.Mask(masking.Masker{})()
+	m, _ := gwmw.Served()
+	tl := m.(gwmw.Teller)
+	sent, hits := tl.TextHits("my key is " + key)
+	if len(hits) != 1 || strings.Contains(sent, key) {
+		t.Fatalf("masked %q %+v", sent, hits)
+	}
+	p := hits[0].Placeholder
+	srv := webPageHandler(t, webHost{func() {}}, nil)
+	call := func(method, body string) *httptest.ResponseRecorder {
+		rw := httptest.NewRecorder()
+		srv.ServeHTTP(rw, httptest.NewRequest(method, "/api/masking/allow", strings.NewReader(body)))
+		return rw
+	}
+	if rw := call("GET", ""); rw.Code == http.StatusOK {
+		t.Fatalf("GET allow: %d", rw.Code)
+	}
+	if rw := call("POST", `{"p":"{{EMAIL_00000000}}"}`); rw.Code != http.StatusNotFound {
+		t.Fatalf("a placeholder it never made: %d %s", rw.Code, rw.Body)
+	}
+	if got := settings.Load().RedactAllow; len(got) != 1 {
+		t.Fatalf("allow after the unknown one %q", got)
+	}
+	rw := call("POST", `{"p":"`+p+`"}`)
+	var st struct {
+		RedactAllow []string `json:"redactAllow"`
+	}
+	if err := json.Unmarshal(rw.Body.Bytes(), &st); rw.Code != http.StatusOK || err != nil {
+		t.Fatalf("allow: %d %v %s", rw.Code, err, rw.Body)
+	}
+	want := []string{"build-01", key}
+	if strings.Join(st.RedactAllow, "\n") != strings.Join(want, "\n") || strings.Join(settings.Load().RedactAllow, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("allow %q, saved %q", st.RedactAllow, settings.Load().RedactAllow)
+	}
+	// once: again, it is in the list already
+	call("POST", `{"p":"`+p+`"}`)
+	if got := settings.Load().RedactAllow; strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("allow twice %q", got)
+	}
+	// the next request sends it as written
+	if again, hits := tl.TextHits("my key is " + key); len(hits) != 0 || !strings.Contains(again, key) {
+		t.Fatalf("after allow: %q %+v", again, hits)
 	}
 }

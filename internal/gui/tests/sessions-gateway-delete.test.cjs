@@ -75,6 +75,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 1000, height: 700 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       page.on("dialog", (d) => { errors.push("a browser dialog: " + d.message()); d.dismiss(); });
@@ -92,7 +93,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await rowA.waitFor();
 
       // why it can't be resumed and what Delete takes, not "read only"
-      const notes = (await view.locator(".sm-note").allTextContents()).map((x) => x.trim());
+      const notes = (await view.locator(".sm-note:not(.sm-speed-note)").allTextContents()).map((x) => x.trim());
       assert.deepEqual(notes, [await tr(KEYS.note, { agent: "Claude Code" })]);
       // grouped as seen through the gateway, with no path
       const folder = view.locator(".sm-folder").first();

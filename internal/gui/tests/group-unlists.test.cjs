@@ -10,6 +10,24 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+// the rows a group's editor folds under Advanced, opened
+const openAdvanced = async (page) => {
+  const d = page.locator(".rt-gedit .rt-gadv");
+  await d.waitFor({ state: "attached" });
+  if (await d.evaluate((e) => e.open)) return;
+  // WebKit doesn't scroll the page's own scroller to a click: wheel the
+  // summary above the view's foot bar, which sits over the page
+  const s = d.locator(":scope > summary");
+  const vw = page.viewportSize();
+  await page.mouse.move(vw.width / 2, vw.height / 2);
+  for (let i = 0; i < 20; i++) {
+    const b = await s.boundingBox(), foot = await page.evaluate(() => document.querySelector(".view-foot")?.getBoundingClientRect().top ?? innerHeight);
+    if (b && b.y >= 0 && b.y + b.height <= foot) break;
+    await page.mouse.wheel(0, b && b.y < 0 ? -300 : 300);
+    await page.waitForTimeout(100);
+  }
+  await s.click();
+};
 
 const assets = path.resolve(__dirname, "../assets");
 const members = ["a/m1", "a/m2"];
@@ -52,7 +70,7 @@ function serve(lang, posts) {
 }
 
 const H0 = "Agents' model lists and the gateway's /v1/models show the group and each of its models.";
-const H1 = "Agents' model lists and the gateway's /v1/models show the group, not the models it names or its patterns match: they are used through it. A request naming one is still answered.";
+const H1 = "Agents' model lists and the gateway's /v1/models show the group, not the models it names or its patterns match: they are used through it. Codex keeps its ChatGPT sign-in's own models. A request naming one is still answered.";
 const KEYS = ["Model lists", "Its models too", "The group alone", "Its models unlisted", H0, H1, "Edit", "Save"];
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -66,10 +84,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const height = 1000;
         const page = await (await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
-        await page.goto("http://magpie.test/?view=routing");
+        await page.goto("http://magpie.test/?view=groups");
         const card = page.locator(".rt-group", { hasText: "Glim" });
         await card.waitFor();
         const w = await page.evaluate(([keys, lang]) => Object.fromEntries(keys.map((k) => [k, lang === "en" ? k : I18N[lang][k]])), [KEYS, lang]);
@@ -100,6 +119,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         };
 
         await card.locator("button", { hasText: w.Edit }).click();
+        await openAdvanced(page);
         await label.waitFor();
         assert.match(await opt("Its models too").getAttribute("class"), /\bon\b/, "its models too by default");
         assert.equal(await field.locator(".hint").last().textContent(), w[H0]);

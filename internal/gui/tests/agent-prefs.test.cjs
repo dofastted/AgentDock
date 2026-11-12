@@ -1,8 +1,9 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // An agent's own settings are where the agent is (the owner, 10-20: Codex's
 // and Claude Code's rows sat in Settings › General, apart from the agents
-// they set). In the window, Codex's opened row holds its eight and Claude
-// Code's its one, Long conversations; Settings has none of them, but its
+// they set). In the window, Codex's opened row holds its nine and Claude
+// Code's and Grok Build's their one, Long conversations (Grok Build's since
+// uk.jent on Discord: its context_window is where it compacts); Settings has none of them, but its
 // search still finds them, as a row saying where they are whose Open shows
 // the agent's sheet. In the panel a "Settings" line opens the sheet, and so
 // does the agent's menu; shut, the rows are back where they were. Gateway
@@ -19,7 +20,7 @@ const { chromium, webkit } = require("playwright");
 const { watchSettingsReads, agentRow, openAgentSettings } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
-const CODEX = ["codexAgentsV1Row", "fullContextRow", "codexAsyncRow", "codexTitlesRow", "codexDescriptionsRow", "codexPredictionsRow", "codexAutoReviewRow", "codexMemoriesRow"];
+const CODEX = ["codexAgentsV1Row", "codexServiceTierRow", "fullContextRow", "codexAsyncRow", "codexTitlesRow", "codexDescriptionsRow", "codexPredictionsRow", "codexAutoReviewRow", "codexMemoriesRow"];
 
 function settingsPayload(over) {
   return {
@@ -45,7 +46,7 @@ function server(lang, { gateway = false, none = false, posts = [] } = {}) {
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:${gateway}${gateway ? ",gateway:true" : ""}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ agents: none ? [agentRow("pi", "Pi")] : [codex, agentRow("claude", "Claude Code"), agentRow("pi", "Pi")], profiles: [], settings: { lang, theme: "light" }, fx: settings.fx });
+    if (url.pathname === "/api/state") return json({ agents: none ? [agentRow("pi", "Pi")] : [codex, agentRow("claude", "Claude Code"), { ...agentRow("grok", "Grok Build"), icon: "xai" }, agentRow("pi", "Pi")], profiles: [], settings: { lang, theme: "light" }, fx: settings.fx });
     if (url.pathname === "/api/settings/full-context") {
       const body = route.request().postDataJSON();
       posts.push(body);
@@ -85,6 +86,7 @@ async function newPage(engine, t, width, lang, opts) {
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
   page.setDefaultTimeout(8000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", server(lang, opts));
@@ -101,31 +103,69 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.goto("http://magpie.test/?view=agents");
         await openAgentSettings(page, "codex");
         const codexBox = '.row.agent[data-id="codex"] .ag-prefs';
-        assert.deepEqual(await shownIn(page, codexBox), CODEX, `${lang} ${width}: Codex's eight`);
+        assert.deepEqual(await shownIn(page, codexBox), CODEX, `${lang} ${width}: Codex's nine`);
         assert(await page.locator(codexBox).evaluate((b) => b.scrollWidth <= b.clientWidth + 1), `${lang} ${width}: the rows fit the opened row`);
         await noSideScroll(page, `${lang} ${width} Codex`);
         await openAgentSettings(page, "claude");
         assert.deepEqual(await shownIn(page, '.row.agent[data-id="claude"] .ag-prefs'), ["fullContextRow"], `${lang} ${width}: Claude Code's one`);
+        // Grok Build's one, Long conversations, whose line names it
+        await openAgentSettings(page, "grok");
+        const grokBox = '.row.agent[data-id="grok"] .ag-prefs';
+        assert.deepEqual(await shownIn(page, grokBox), ["fullContextRow"], `${lang} ${width}: Grok Build's one`);
+        assert.match(await page.locator(`${grokBox} #fullContextRow .sub`).textContent(), /Grok Build/, `${lang}: the line names Grok Build`);
+        assert(await page.locator(grokBox).evaluate((b) => b.scrollWidth <= b.clientWidth + 1), `${lang} ${width}: Grok Build's row fits`);
+        await noSideScroll(page, `${lang} ${width} Grok Build`);
 
         // none in Settings; its search says where they are
         await page.goto("http://magpie.test/?view=settings");
         await page.locator("#setQ").waitFor();
+        // #setQ is in the page before Settings is drawn, and Long
+        // conversations with it: wait for the drawing to take it out
+        await page.waitForFunction(() => !document.querySelector("#view-settings #fullContextRow")).catch(() => {});
         for (const id of CODEX) assert.equal(await page.locator(`#view-settings #${id}`).count(), 0, `${lang}: ${id} not in Settings`);
-        assert.equal(await page.locator(".agent-pref-link").first().isVisible(), false, "no link rows till searching");
+        assert.equal(await page.locator("#agentPrefLinks .agent-pref-link").first().isVisible(), false, "no link rows till searching");
         await page.locator("#setQ").fill(w.titles);
-        const link = page.locator(".agent-pref-link").filter({ hasText: w.titles });
+        const link = page.locator("#agentPrefLinks .agent-pref-link").filter({ hasText: w.titles });
         await link.waitFor();
         await noSideScroll(page, `${lang} ${width} search`);
         await link.getByRole("button", { name: w.open, exact: true }).click();
         await sheet(page).waitFor();
         assert.equal(await sheet(page).locator(".ehead").textContent(), w.sheet);
-        assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), CODEX, `${lang} ${width}: the sheet has Codex's eight`);
+        assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), CODEX, `${lang} ${width}: the sheet has Codex's nine`);
         assert(await page.locator("#view-agents").isVisible(), "Open goes to the Agents page");
         await page.keyboard.press("Escape");
         await page.locator("#modal").waitFor({ state: "hidden" });
         // shut, every row is back in the page, none lost with the sheet
         for (const id of CODEX) assert.equal(await page.locator(`#${id}`).count(), 1, `${lang}: ${id} back`);
         assert.deepEqual(errors, []);
+      });
+    }
+
+    // ysm119 on Discord (v0.1.2519, WebKit): Codex's row opened and shut
+    // again, then Settings, threw "null is not an object (evaluating
+    // '$(row + ".who").title = t(en)')". Shut, the row was drawn again
+    // without its opened part, and Codex's settings rows went with that
+    // part, out of the page, where Settings and a language change look
+    // for them. Shut, they are back in it; Settings opens on its own
+    // button, with no reload, and says what each row does.
+    for (const width of [1100, 440]) {
+      test(`${engine} ${lang} ${width}: Settings opens after Codex's row was opened and shut`, async (t) => {
+        const { page, errors } = await newPage(engine, t, width, lang);
+        await page.goto("http://magpie.test/?view=agents");
+        await openAgentSettings(page, "codex");
+        await page.locator('.row.agent[data-id="codex"] .ag-link').click();
+        await page.locator('.row.agent[data-id="codex"] .ag-prefs').waitFor({ state: "detached" });
+        await page.locator('.row.agent[data-id="codex"] .ag-link[aria-expanded="false"]').waitFor();
+        for (const id of CODEX) assert(await page.evaluate((id) => document.getElementById(id)?.isConnected === true, id), `${lang} ${width}: ${id} in the page once shut`);
+        await page.locator("#prefs").click();
+        await page.locator("#view-settings").waitFor();
+        await page.waitForFunction(() => __settingsReads.asked > 0 && __settingsReads.asked === __settingsReads.drawn);
+        assert.deepEqual(errors, [], `${lang} ${width}: no error opening Settings`);
+        assert.equal(await page.locator("#status.err").textContent().catch(() => ""), "", `${lang} ${width}: no red error line`);
+        const tip = await page.evaluate(() => document.querySelector("#codexTitlesRow .who")?.title);
+        assert.equal(tip, await page.evaluate(() => t("Names each thread in a hidden request of its own; same as the session, it goes on the session’s model, as Codex sends it when that is one of Codex’s own")), `${lang}: the titles row says what it does`);
+        if (lang !== "en") assert(!/^Names each/.test(tip), `${lang}: in the language`);
+        await noSideScroll(page, `${lang} ${width} Settings`);
       });
     }
 
@@ -153,6 +193,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), ["fullContextRow"]);
       await page.keyboard.press("Escape");
       await page.locator("#modal").waitFor({ state: "hidden" });
+
+      await page.locator('.row.agent[data-id="grok"] .ag-handle').click();
+      await page.getByRole("menuitem", { name: w.sheet.replace("Codex", "Grok Build") }).click();
+      await sheet(page).waitFor();
+      assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), ["fullContextRow"], `${lang}: Grok Build's sheet`);
+      assert(await page.locator("#modal .dialog").evaluate((d) => d.scrollWidth <= d.clientWidth + 1), `${lang}: Grok Build's sheet fits 360`);
+      await page.keyboard.press("Escape");
+      await page.locator("#modal").waitFor({ state: "hidden" });
       for (const id of CODEX) assert.equal(await page.locator(`#${id}`).count(), 1, `${lang}: ${id} back`);
       assert.deepEqual(errors, []);
     });
@@ -167,7 +215,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.equal(await page.locator(".ag-prefs, .agent-prefs-open").count(), 0, "no rows, no line");
     await page.goto("http://magpie.test/?view=settings");
     await page.locator("#setQ").fill("Codex");
-    assert.equal(await page.locator(".agent-pref-link").count(), 0, "no link rows");
+    assert.equal(await page.locator("#agentPrefLinks .agent-pref-link").count(), 0, "no link rows");
     assert.deepEqual(errors, []);
   });
 

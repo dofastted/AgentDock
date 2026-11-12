@@ -1,12 +1,15 @@
 package sessions
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/yetone/magpie/internal/testenv"
 )
@@ -140,8 +143,8 @@ func TestStatsMidnight(t *testing.T) {
 	check("read on", after20, after21, 180, 240)
 
 	// the same from the start, and from the parse kept on disk
-	full := parse(file{agent: "claude", path: path, main: true, size: int64(len(first + rest)), mod: time.Now()}, nil)
-	if got := full.Days["2026-09-21"].Models["claude-opus-5-5"]; got != after21 {
+	full := parse(file{agent: "claude", path: path, main: true, size: int64(len(first + rest)), mod: modOf(time.Now())}, nil)
+	if got := full.Days.of("2026-09-21").Models.of("claude-opus-5-5"); got != after21 {
 		t.Fatalf("read whole: %+v", got)
 	}
 	Reset()
@@ -199,11 +202,15 @@ func TestStatsHoursAndSessions(t *testing.T) {
 		ccMsg("m2", "2026-09-20T15:59:00.000Z", 200, 20)+ // 23:59
 		ccMsg("m3", "2026-09-20T16:03:00.000Z", 400, 40)), 0o644) // 00:03
 
+	// as the page reads them: 24 numbers of seconds
 	hours := func(s Stats, date string) []int64 {
 		for _, d := range s.Days {
 			for _, a := range d.Active {
 				if d.Date == date && a.Cwd == "/work/night" {
-					return a.Hours
+					var all struct{ Hours []int64 }
+					b, _ := json.Marshal(a)
+					json.Unmarshal(b, &all)
+					return all.Hours
 				}
 			}
 		}
@@ -234,6 +241,10 @@ func TestStatsHoursAndSessions(t *testing.T) {
 	}
 	if !sortedByLast(s.Sessions) || len(s.Sessions) < 3 {
 		t.Fatalf("sessions %+v", s.Sessions)
+	}
+	// each range keeps its list, so it holds its rows and no more (#2278)
+	if cap(s.Sessions) != len(s.Sessions) || cap(s.Keys) != len(s.Keys) {
+		t.Fatalf("%d sessions held in %d, %d keys in %d", len(s.Sessions), cap(s.Sessions), len(s.Keys), cap(s.Keys))
 	}
 	// a range counts only its own days
 	day := statsAt(1, time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC))
@@ -290,6 +301,16 @@ func TestStatsHoursAndSessions(t *testing.T) {
 	}
 	if clip("abcdef", 4) != "abc…" || clip("abc", 4) != "abc" {
 		t.Fatal("clip")
+	}
+}
+
+// The overview's title of a long first prompt is the session's own string:
+// cut again to 160, it was a new copy of every title in each range kept.
+func TestStatsTitleIsTheSessionsOwn(t *testing.T) {
+	long := title(strings.Repeat("写一个很长的提示词", 40))
+	got := clip(long, titleKept)
+	if got != long || unsafe.StringData(got) != unsafe.StringData(long) {
+		t.Fatalf("clipped again: %q", got)
 	}
 }
 

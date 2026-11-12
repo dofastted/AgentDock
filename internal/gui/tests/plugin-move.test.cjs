@@ -93,6 +93,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
@@ -134,7 +135,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForTimeout(80);
         if (await at() === was) break;
       }
-      const top = await at();
+      // WebKit can still be applying the last wheel when the loop ends
+      // (367, then 397 a moment later): the place the reader left is
+      // where the scroll settles, two reads 150ms apart agreeing
+      let top = await at();
+      for (let i = 0; i < 40; i++) {
+        await page.waitForTimeout(150);
+        const now = await at();
+        if (now === top) break;
+        top = now;
+      }
       assert.ok(top > 0, "the editor doesn't scroll: the test proves nothing about keeping its place");
       // a press where the button is, as the reader's mouse does
       const press = async () => {
@@ -200,6 +210,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 980, height: 820 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));

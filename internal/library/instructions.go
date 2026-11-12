@@ -1,6 +1,7 @@
 package library
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/memory"
 )
 
 // The part of an agent's instructions file magpie writes sits between
@@ -142,19 +145,98 @@ func writeText(path, text string) error {
 	return edit.WriteAtomic(path, []byte(text+"\n"))
 }
 
-// wanted is what magpie writes into the agent's file: the shared text and
-// the agent's own additions after it; "" for nothing.
+// wanted is what magpie writes into the agent's file: the shared text,
+// the agent's own additions after it, and memory's published digest for
+// it last; "" for nothing.
 func (l *Library) wanted(agent string) string {
 	if !slices.Contains(l.Instructions.Agents, agent) {
 		return ""
 	}
 	parts := []string{}
-	for _, s := range []string{setText(l.sharedPath()), readText(extraPath(agent))} {
+	for _, s := range []string{setText(l.sharedPath()), readText(extraPath(agent)), l.memoryDigest(agent)} {
 		if s != "" {
 			parts = append(parts, s)
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// memoryDigest is memory's published digest for the agent, "" when
+// NoMemory, or memory.json can't be read (syncInstructions writes nothing
+// then: unknown, not empty).
+func (l *Library) memoryDigest(id string) string {
+	if l.Instructions.NoMemory {
+		return ""
+	}
+	d, _ := memory.Digest(memoryAgent(id))
+	return d
+}
+
+// memoryAgent is the agent an agent's memories are kept under: its id
+// without where it runs (claude@wsl:Ubuntu is claude), as the gateway
+// names the agents that save them.
+func memoryAgent(id string) string {
+	a, _, _ := strings.Cut(id, "@")
+	return a
+}
+
+// PublishMemory makes what memory holds now the digest the agents are
+// given (memory.Publish) and, when it changed, writes the instructions
+// into them again: a change the user made to memory. due publishes only
+// when the last was a day ago (memory.PublishDue), for what agents saved
+// meanwhile. nil, nil when nothing changed.
+func PublishMemory(due bool) (*Result, error) {
+	publish := memory.Publish
+	if due {
+		publish = memory.PublishDue
+	}
+	changed, err := publish()
+	if err != nil || !changed {
+		return nil, err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	l, err := load()
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Changed: []string{}, Problems: []Problem{}}
+	if len(l.Instructions.Agents) == 0 || l.Instructions.NoMemory {
+		return res, nil
+	}
+	b := l.kept
+	if b == nil {
+		b = newBackups()
+	}
+	for _, t := range Targets() {
+		l.syncInstructions(t, b, res, true)
+	}
+	res.Backup = b.dir
+	if b.dir != "" {
+		pruneBackups()
+	}
+	return res, l.save()
+}
+
+// MemoryInInstructions is whether the agents ticked for instructions are
+// given memory's digest, and those agents.
+func MemoryInInstructions() (bool, []string, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	l, err := load()
+	if err != nil {
+		return false, nil, err
+	}
+	return !l.Instructions.NoMemory, append([]string{}, l.Instructions.Agents...), nil
+}
+
+// SetMemoryInInstructions gives the agents ticked for instructions
+// memory's digest, or takes it out of them, at once.
+func SetMemoryInInstructions(on bool) (*Result, error) {
+	return changeInstructions(func(l *Library) error {
+		l.Instructions.NoMemory = !on
+		return nil
+	})
 }
 
 // split takes a file apart: what is before magpie's part, magpie's part,
@@ -224,17 +306,60 @@ func hash(s string) string {
 	return hex.EncodeToString(h[:8])
 }
 
+// unreadable is the error reading a text of the library's gives, nil
+// when it reads or isn't there at all.
+func unreadable(p string) error {
+	if _, err := os.ReadFile(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// instructionsLost says whether the library has no instructions to give
+// anyone: no agent ticked, or no shared text. To an automatic write that
+// is a library that lost them, as an upgrade's reset leaves one, not a
+// take-back the user asked for, which the page writes itself (#5709).
+func (l *Library) instructionsLost() bool {
+	return len(l.Instructions.Agents) == 0 || setText(l.sharedPath()) == ""
+}
+
 // syncInstructions writes the agent's part as the library has it. A part
 // the user edited in the file is left alone until the library's text for
-// that agent changes; then it is replaced, the file kept aside first.
-func (l *Library) syncInstructions(t *Target, b *backups, res *Result) {
+// that agent changes; then it is replaced, the file kept aside first. An
+// automatic write (auto: a sync, at a start or beside a change) that
+// finds the library with nothing to give leaves a part where it is, and
+// says so: a library reading empty has lost its instructions, not revoked
+// them, and the parts out there are then the only copy left (#5709, where
+// a start-up apply with an empty Library wiped nine agents' files). It is
+// a write of the page — a take-back, made with the library as the user
+// left it — that takes a part out.
+func (l *Library) syncInstructions(t *Target, b *backups, res *Result, auto bool) {
+	if res.unreached(t) {
+		return
+	}
 	if t.Instructions == "" {
 		return
 	}
 	id := t.Agent.ID
 	a := l.applied(id)
+	if slices.Contains(l.Instructions.Agents, id) {
+		// a text that can't be read is unknown, not empty: writing what
+		// is left would take the agent's part out or cut it down (#5709)
+		for _, p := range []string{l.sharedPath(), extraPath(id)} {
+			if err := unreadable(p); err != nil {
+				res.fail(id, "instructions", err)
+				return
+			}
+		}
+		if !l.Instructions.NoMemory {
+			if _, err := memory.Digest(memoryAgent(id)); err != nil {
+				res.fail(id, "instructions", fmt.Errorf("memory: %w", err))
+				return
+			}
+		}
+	}
 	want := l.wanted(id)
-	raw, err := edit.Read(t.Instructions)
+	raw, err := instrRead(t)
 	if err != nil {
 		res.fail(id, "instructions", err)
 		return
@@ -272,6 +397,24 @@ func (l *Library) syncInstructions(t *Target, b *backups, res *Result) {
 		a.Instructions, a.InstrHash = want != "", hash(want)
 		return
 	}
+	if auto && want == "" && ok && l.instructionsLost() {
+		// An apply with nothing to give takes no part out (#5709): the
+		// library's text itself gone, or no agent ticked, reads empty to
+		// every agent at once, as an upgrade that lost them does (the
+		// reporter's library.json had both), and the parts out there are
+		// then the only copy of the instructions there is. A text the
+		// library still holds with one agent unticked is another thing:
+		// that take-back goes out as usual, and a write of the page — a
+		// take-back, made with the library as the user left it — empties
+		// a part as it goes. Left alone, and said so; the part comes back
+		// with the library's next text.
+		red := ""
+		if a.InstrHash == hash("") {
+			red = "; the last write on record hashes empty, a library reset under the agents"
+		}
+		log.Printf("library: %s: nothing to write, %s still holds magpie's part%s: left alone", id, t.Instructions, red)
+		return
+	}
 	if ok && want != "" && a.InstrHash != "" && hash(have) != a.InstrHash && hash(want) == a.InstrHash {
 		return // edited in the file since, and the library hasn't changed for it
 	}
@@ -281,9 +424,16 @@ func (l *Library) syncInstructions(t *Target, b *backups, res *Result) {
 		return
 	}
 	if strings.TrimSpace(next) == "" && len(raw) > 0 && own(file) == "" {
-		err = edit.Remove(t.Instructions)
+		if auto {
+			// an apply never takes a whole file away (#5709): what it
+			// empties it empties in place, the file staying for the
+			// agent that reads it
+			err = instrEmpty(t)
+		} else {
+			err = instrSave(t, "")
+		}
 	} else if next != "" {
-		err = edit.WriteAtomic(t.Instructions, []byte(next))
+		err = instrSave(t, next)
 	}
 	if err != nil {
 		res.fail(id, "instructions", err)
@@ -305,6 +455,12 @@ type AgentInstructions struct {
 	Edited   bool   `json:"edited,omitempty"`   // magpie's part was changed in the file
 	Override string `json:"override,omitempty"` // a file the agent reads instead
 	Profile  bool   `json:"profile,omitempty"`  // the file is the user's profile to the agent (Target.Profile)
+	// Asleep is the WSL distro, not running now, the agent is in: its row
+	// is what magpie last knew of it (asleepInstructions), its file isn't
+	// read, and a change is written there when the distro next runs.
+	// Unseen: magpie never saw where it keeps its instructions
+	Asleep string `json:"asleep,omitempty"`
+	Unseen bool   `json:"unseen,omitempty"`
 }
 
 // InstructionsView is the Instructions page.
@@ -331,13 +487,14 @@ func ReadInstructions() (*InstructionsView, error) {
 	if err != nil {
 		return nil, err
 	}
-	return l.instructionsView(Targets()), nil
+	return l.instructionsView(targetsAsleep(false)), nil
 }
 
-// instructionsView is the Instructions page for these agents. They are
-// passed in: finding them looks through every agent's folders, in WSL too,
-// which one read of the Library did three times over (#1624).
-func (l *Library) instructionsView(targets []*Target) *InstructionsView {
+// instructionsView is the Instructions page for these agents, and those in
+// stopped WSL distros (asleep). They are passed in: finding them looks
+// through every agent's folders, in WSL too, which one read of the Library
+// did three times over (#1624).
+func (l *Library) instructionsView(targets []*Target, asleep []*agent.Agent) *InstructionsView {
 	v := &InstructionsView{Shared: setText(l.sharedPath()), Agents: []AgentInstructions{}}
 	for _, s := range l.sets() {
 		v.Sets = append(v.Sets, SetView{ID: s.ID, Name: s.Name, Text: setText(l.textPath(s.ID)), Active: s.ID == l.active(), File: s.File})
@@ -349,7 +506,7 @@ func (l *Library) instructionsView(targets []*Target) *InstructionsView {
 		id := t.Agent.ID
 		ai := AgentInstructions{Agent: id, Name: t.Agent.Name, Icon: t.Agent.Icon, Path: t.Instructions,
 			On: slices.Contains(l.Instructions.Agents, id), Extra: readText(extraPath(id)), Profile: t.Profile}
-		file := readText(t.Instructions)
+		file := instrText(t)
 		if o := own(file); o != "" {
 			ai.Own = strings.Count(o, "\n") + 1
 		}
@@ -360,6 +517,13 @@ func (l *Library) instructionsView(targets []*Target) *InstructionsView {
 			ai.Override = t.Override
 		}
 		v.Agents = append(v.Agents, ai)
+	}
+	// a stopped WSL distro's agents, by what magpie last knew of them:
+	// nothing of theirs is opened, which would start the distro (#3896)
+	for _, a := range asleep {
+		if ai, ok := l.asleepInstructions(a); ok {
+			v.Agents = append(v.Agents, ai)
+		}
 	}
 	return v
 }
@@ -407,7 +571,7 @@ func changeInstructions(f func(l *Library) error) (*Result, error) {
 		b = newBackups()
 	}
 	for _, t := range Targets() {
-		l.syncInstructions(t, b, res)
+		l.syncInstructions(t, b, res, false)
 	}
 	res.Backup = b.dir
 	if b.dir != "" {
@@ -466,7 +630,7 @@ func ImportInstructions(id string) (*Result, error) {
 		if l.isSetFile(t.Instructions) {
 			return fmt.Errorf("%s is the file the instructions set is kept in already", t.Instructions)
 		}
-		raw, err := edit.Read(t.Instructions)
+		raw, err := instrRead(t)
 		if err != nil {
 			return err
 		}
@@ -491,11 +655,7 @@ func ImportInstructions(id string) (*Result, error) {
 		if ok {
 			next = withBlock("", block)
 		}
-		if next == "" {
-			err = edit.Remove(t.Instructions)
-		} else {
-			err = edit.WriteAtomic(t.Instructions, []byte(next))
-		}
+		err = instrSave(t, next)
 		if err != nil {
 			return err
 		}
@@ -675,9 +835,16 @@ func SyncLinked() (*Result, error) {
 	return changeInstructions(func(*Library) error { return nil })
 }
 
-// KeepLinked runs SyncLinked every interval, for as long as the app runs.
-func KeepLinked(interval time.Duration) {
-	for {
+// KeepLinked runs SyncLinked, Woken and a due PublishMemory every
+// interval, until ctx ends:
+// the app's backend, which ends once it has handed the gateway to the
+// new version (gui/handover.go). Before, it ran for as long as the
+// process did, and the copy an update left finishing its requests went
+// on writing the agents' files beside the new one (#4938).
+func KeepLinked(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for ctx.Err() == nil {
 		if res, err := SyncLinked(); err != nil {
 			log.Println("library: linked instructions:", err)
 		} else if res != nil {
@@ -685,6 +852,29 @@ func KeepLinked(interval time.Duration) {
 				log.Println("library: linked instructions:", p.Agent, p.What, p.Error)
 			}
 		}
-		time.Sleep(interval)
+		// what was ticked for a stopped WSL distro's agents, once it runs
+		keepWoken()
+		// a git worktree made or removed beside a project follows it
+		keepProjectTrees()
+		// Claude Code's auto-compaction beside a bili plugin magpie
+		// installed before it kept it on
+		keepBiliCompact()
+		// bili start, while an agent goes through its /bili/ prefix
+		keepBiliServe(ctx)
+		// the skills and prompts of a Remote magpie's Library, when
+		// switched on (borrow.go)
+		keepBorrowed(ctx)
+		// once a day, what agents saved to memory meanwhile
+		if res, err := PublishMemory(true); err != nil {
+			log.Println("library: memory:", err)
+		} else if res != nil {
+			for _, p := range res.Problems {
+				log.Println("library: memory:", p.Agent, p.What, p.Error)
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case <-t.C:
+		}
 	}
 }

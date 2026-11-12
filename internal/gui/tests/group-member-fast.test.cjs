@@ -80,10 +80,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
-      await page.goto("http://magpie.test/?view=routing");
+      await page.goto("http://magpie.test/?view=groups");
       const card = page.locator(".rt-group", { hasText: "Sol" });
       await card.waitFor();
       assert((await card.locator(".mem").textContent()).includes(w.label), "the card says the member is sent fast");

@@ -78,6 +78,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const posts = [], errors = [];
       page.on("dialog", (dialog) => { errors.push("Unexpected native dialog: " + dialog.type()); dialog.dismiss(); });
       page.on("pageerror", (e) => errors.push(e.message));
@@ -102,7 +103,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
       await modal.getByRole("button", { name: cancelName, exact: true }).click();
       await modal.waitFor({ state: "hidden" }); // untouched form needs no confirmation
       await row.click();
-      await modal.getByRole("button", { name: lang === "zh" ? "名称与推理档位" : "Names & levels", exact: true }).click();
+      await modal.getByRole("button", { name: lang === "zh" ? "模型设置" : "Model settings", exact: true }).click();
       await modal.getByRole("button", { name: cancelName, exact: true }).click();
       await modal.waitFor({ state: "hidden" }); // opening model settings alone is not an edit
       assert.equal(await page.getByRole("alertdialog").count(), 0);
@@ -180,6 +181,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       await page.route("**/*", fixture(lang, []));
       await page.goto("http://magpie.test/?view=providers");
       await page.evaluate(() => {

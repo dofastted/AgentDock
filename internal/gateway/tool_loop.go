@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -65,7 +65,7 @@ func (s *Server) stoppedToolLoop(w http.ResponseWriter, r *http.Request, from pr
 	}
 	why := loop.why()
 	s.answeredHere(r, from, body, toolLoopWho, why, func() {
-		writeLocalText(w, from, req, loop.notice())
+		writeLocalText(w, from, req, loop.notice(conversationLang(from, body)))
 	})
 	return true
 }
@@ -98,7 +98,7 @@ const tailItems = 8 * toolLoopRepeats
 // took ~30ms and 20MB a turn of 1.5MB; gjson finds the items without
 // decoding them. A body whose conversation isn't such a list is as it came.
 func tailOf(from provider.Protocol, body []byte) []byte {
-	list := gjson.GetBytes(body, conversationKey[from])
+	list := getIn(body, conversationKey[from])
 	if !list.IsArray() || list.Index <= 0 {
 		return body
 	}
@@ -110,19 +110,19 @@ func tailOf(from provider.Protocol, body []byte) []byte {
 	if len(items) <= tailItems {
 		return body
 	}
-	var b bytes.Buffer
-	b.Grow(len(body) - list.Index - len(list.Raw) + items[len(items)-1].Index + len(items[len(items)-1].Raw) - items[len(items)-tailItems].Index + list.Index + 2)
-	b.Write(body[:list.Index])
-	b.WriteByte('[')
+	// a slice made to its size, not a bytes.Buffer: under -race the
+	// Buffer's Grow allocates its slice twice
+	b := make([]byte, 0, len(body)-list.Index-len(list.Raw)+items[len(items)-1].Index+len(items[len(items)-1].Raw)-items[len(items)-tailItems].Index+list.Index+2)
+	b = append(b, body[:list.Index]...)
+	b = append(b, '[')
 	for i, v := range items[len(items)-tailItems:] {
 		if i > 0 {
-			b.WriteByte(',')
+			b = append(b, ',')
 		}
-		b.WriteString(v.Raw)
+		b = append(b, v.Raw...)
 	}
-	b.WriteByte(']')
-	b.Write(body[list.Index+len(list.Raw):])
-	return b.Bytes()
+	b = append(b, ']')
+	return append(b, body[list.Index+len(list.Raw):]...)
 }
 
 // toolLoop is a conversation's newest exchange and how many turns in a row
@@ -140,6 +140,9 @@ func toolLoopOf(msgs []Message) (toolLoop, bool) {
 		return toolLoop{}, false
 	}
 	last := turns[len(turns)-1]
+	if allWaits(last.calls) {
+		return toolLoop{}, false
+	}
 	n := 0
 	for i := len(turns) - 1; i >= 0 && turns[i].sum == last.sum; i-- {
 		n++
@@ -148,6 +151,76 @@ func toolLoopOf(msgs []Message) (toolLoop, bool) {
 		return toolLoop{}, false
 	}
 	return toolLoop{calls: last.calls, turns: n}, true
+}
+
+// A call made to wait (clock__sleep {"duration_ms":60000} while CI runs)
+// is asked again with the same arguments and answered the same by design;
+// the time it takes is the progress, which a request doesn't carry. A turn
+// whose calls are all waits is never a loop. A turn that waits and also
+// runs another call is judged as before.
+
+// waitWords are the words in a tool's name that make it a wait.
+var waitWords = map[string]bool{"sleep": true, "wait": true, "delay": true, "pause": true, "poll": true}
+
+// durationKeys are the argument names of a bare wait.
+var durationKeys = map[string]bool{"duration": true, "duration_ms": true, "duration_s": true, "duration_seconds": true, "ms": true, "milliseconds": true, "seconds": true, "secs": true, "sec": true, "timeout": true, "timeout_ms": true, "delay": true, "delay_ms": true, "minutes": true}
+
+func allWaits(calls []Part) bool {
+	for _, c := range calls {
+		if !isWait(c) {
+			return false
+		}
+	}
+	return len(calls) > 0
+}
+
+// isWait: the tool's own name (after any server__ or namespace prefix, so
+// a server called "wait" doesn't make its tools waits) has a wait word, or
+// its arguments are only a duration.
+func isWait(c Part) bool {
+	name := c.Name
+	for _, sep := range []string{"__", ".", "/", ":"} {
+		if i := strings.LastIndex(name, sep); i >= 0 {
+			name = name[i+len(sep):]
+		}
+	}
+	// split on anything but a letter, and before a capital (waitForCi)
+	var words []string
+	cur := []rune{}
+	flush := func() {
+		if len(cur) > 0 {
+			words = append(words, strings.ToLower(string(cur)))
+			cur = cur[:0]
+		}
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			flush()
+			cur = append(cur, r)
+		case r >= 'a' && r <= 'z':
+			cur = append(cur, r)
+		default:
+			flush()
+		}
+	}
+	flush()
+	for _, w := range words {
+		if waitWords[w] {
+			return true
+		}
+	}
+	var args map[string]json.RawMessage
+	if json.Unmarshal(c.Args, &args) != nil || len(args) == 0 {
+		return false
+	}
+	for k, v := range args {
+		var n float64
+		if !durationKeys[strings.ToLower(k)] || json.Unmarshal(v, &n) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // exchange is one turn of tool use: the assistant's calls and the results
@@ -274,12 +347,12 @@ func resultSum(p Part) string {
 // id, and its shell's duration_seconds.
 var runNoise = []struct {
 	mark string // in a result the expression may change
-	re   *regexp.Regexp
+	re   *lazyre.RE
 	with string
 }{
-	{"Wall time", regexp.MustCompile(`(?m)^(Wall time:? )[0-9.]+( seconds?)`), "${1}#${2}"},
-	{"Chunk ID: ", regexp.MustCompile(`(?m)^(Chunk ID: )\S+`), "${1}#"},
-	{`"duration_seconds"`, regexp.MustCompile(`("duration_seconds"\s*:\s*)[0-9.eE+-]+`), "${1}#"},
+	{"Wall time", lazyre.New(`(?m)^(Wall time:? )[0-9.]+( seconds?)`), "${1}#${2}"},
+	{"Chunk ID: ", lazyre.New(`(?m)^(Chunk ID: )\S+`), "${1}#"},
+	{`"duration_seconds"`, lazyre.New(`("duration_seconds"\s*:\s*)[0-9.eE+-]+`), "${1}#"},
 }
 
 func steadyResult(s string) string {
@@ -309,10 +382,28 @@ func (l toolLoop) why() string {
 	return fmt.Sprintf("tool loop: the same tool call got the same result %d turns in a row (%s); answered by magpie, sent nowhere", l.turns, l.called())
 }
 
-// notice is what the agent shows the user, as the turn's answer.
-func (l toolLoop) notice() string {
-	return fmt.Sprintf("magpie stopped this turn before it reached the model: the agent ran the same tool call %d times in a row and got the same result every time (%s). The model is stuck repeating it, and each further turn would spend your quota with no progress, so this turn was sent nowhere. Tell the agent how to go on and the conversation continues; Settings › Models › Replies › Stop looping replies turns this check off.",
-		l.turns, l.called())
+// notice is what the agent shows the user, as the turn's answer, in lang
+// (conversationLang). It goes to the vendor with the conversation's next
+// turn, so it names neither magpie nor a vendor's limits; the setting is
+// named as the GUI in that language names it (Korean, which the GUI
+// hasn't, as English does).
+func (l toolLoop) notice(lang string) string {
+	f, ok := toolLoopNotices[lang]
+	if !ok {
+		f = toolLoopNotices[langEN]
+	}
+	return fmt.Sprintf(f, l.turns, l.called())
+}
+
+// toolLoopNotices are the notice in each language, given the turns and
+// the calls.
+var toolLoopNotices = map[string]string{
+	langEN:   "This turn was stopped before it reached the model: the agent ran the same tool call %d times in a row and got the same result every time (%s). The model is stuck repeating it, and each further turn would be one more request with no progress, so this turn was sent nowhere. Tell the agent how to go on and the conversation continues; Settings › Models › Replies › Stop looping replies turns this check off.",
+	langZH:   "这一轮在发给模型之前已被停止：Agent 连续 %d 次调用了同一个工具，每次得到的结果都一样（%s）。模型陷入了重复，再继续每一轮都只是多一次请求而没有进展，所以这一轮没有发出。告诉 Agent 接下来怎么做，对话就会继续；在 设置 › 模型 › 回复 › 停止循环的回复 中可以关闭这项检查。",
+	langZHTW: "這一輪在送給模型之前已被停止：Agent 連續 %d 次呼叫了同一個工具，每次得到的結果都一樣（%s）。模型陷入了重複，再繼續每一輪都只是多一次請求而沒有進展，所以這一輪沒有送出。告訴 Agent 接下來怎麼做，對話就會繼續；在 設定 › 模型 › 回覆 › 停止循環的回覆 中可以關閉這項檢查。",
+	langJA:   "このターンはモデルに送る前に止めました：エージェントが同じツール呼び出しを %d 回続けて実行し、毎回同じ結果を受け取りました（%s）。モデルが同じことを繰り返しており、続けても進展のないリクエストが増えるだけなので、このターンはどこにも送っていません。次にどうするかをエージェントに伝えれば会話は続きます。設定 › モデル › 応答 › ループする応答を止める でこのチェックをオフにできます。",
+	langKO:   "이 턴은 모델에 보내기 전에 중단되었습니다: 에이전트가 같은 도구 호출을 %d번 연속으로 실행했고 매번 같은 결과를 받았습니다(%s). 모델이 같은 일을 반복하고 있어 계속해도 진전 없이 요청만 늘어나므로, 이 턴은 어디에도 보내지 않았습니다. 에이전트에게 어떻게 진행할지 알려 주면 대화가 이어집니다. Settings › Models › Replies › Stop looping replies 에서 이 검사를 끌 수 있습니다.",
+	langDE:   "Dieser Zug wurde angehalten, bevor er das Modell erreichte: Der Agent hat denselben Tool-Aufruf %d-mal hintereinander ausgeführt und jedes Mal dasselbe Ergebnis erhalten (%s). Das Modell wiederholt sich, und jeder weitere Zug wäre eine weitere Anfrage ohne Fortschritt, daher wurde dieser Zug nirgendwohin gesendet. Sag dem Agenten, wie es weitergeht, und das Gespräch läuft weiter; Einstellungen › Modelle › Antworten › Schleifende Antworten beenden schaltet diese Prüfung aus.",
 }
 
 // writeLocalText answers req with text in from's API, as a whole reply or

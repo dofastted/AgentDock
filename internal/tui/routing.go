@@ -32,9 +32,43 @@ func (m *model) reloadGroups() {
 	m.shown = len(m.groups)
 	m.groups = append(m.groups, removed...)
 	m.grow = clamp(m.grow, len(m.groups))
+	m.provOff = map[string]bool{}
+	for _, p := range provider.All() {
+		if !p.On() {
+			m.provOff[p.ID] = true
+		}
+	}
 }
 
-var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed, provider.Pace, provider.Weighted, provider.FreeFirst, provider.Fastest, provider.Manual}
+// memberOff is whether a member of a group is a model of a provider
+// switched off: the group keeps it (one magpie found too, #2671) and the
+// gateway skips it until the provider is on again.
+func (m model) memberOff(id string) bool {
+	if provider.IsGroupRef(id) {
+		return false
+	}
+	pid, _, ok := strings.Cut(id, "/")
+	return ok && m.provOff[pid]
+}
+
+// listedMembers are the members a group's line lists: of a group magpie
+// found, those its providers being on lets it send to (XYenon on Discord:
+// a provider switched off was still listed in it), as every model list
+// leaves a provider switched off out, and how many it left out; all of
+// them when that would leave none. A group of the user's lists what they
+// put in.
+func (m model) listedMembers(g provider.Group) ([]string, int) {
+	if !g.Auto {
+		return g.Members, 0
+	}
+	on := slices.DeleteFunc(slices.Clone(g.Members), m.memberOff)
+	if len(on) == 0 {
+		return g.Members, 0
+	}
+	return on, len(g.Members) - len(on)
+}
+
+var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed, provider.Pace, provider.Weighted, provider.FreeFirst, provider.Fastest, provider.Cheapest, provider.Drain, provider.FreeExpiring, provider.Manual}
 
 func routingName(v string) string {
 	switch v {
@@ -52,6 +86,12 @@ func routingName(v string) string {
 		return "free first"
 	case provider.Fastest:
 		return "speed first"
+	case provider.Cheapest:
+		return "cheapest first"
+	case provider.Drain:
+		return "until used up"
+	case provider.FreeExpiring:
+		return "free, soonest to expire"
 	case provider.Manual:
 		return "manual"
 	}
@@ -298,6 +338,7 @@ func (m *model) openClassifier(g provider.Group) {
 const ruleHint = `use=<model>, and any of: tokens=200k · images · effort=on|low|medium|high|xhigh|max · agents=codex,claude
 intent="a quick question" (the group's classifier=<model> tells it) · compact
 time=09:00-18:00 (22:00-08:00 runs past midnight) · days=mon-fri · tz=Asia/Shanghai (this computer's zone if none) · folders=~/work/acme,~/oss · except-folders=~/old · at=<n> for its place
+when="effort is not off" · when="tokens < 20k" · when="agent is not codex" · when=subagent · when="message contains …" · when="system matches ^You are a title"
 use-effort=low|medium|high|xhigh|max: the reasoning the model is asked for, whatever the agent asked
 or pause=<model> time=… days=… agents=… folders=… except-folders=…: the model is left out of the group then, not even a fallback`
 
@@ -435,7 +476,8 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}, id+said)
 		}
 		model, effort := provider.MemberEffort(id)
-		to := provider.WithMemberEffort(model, nextMemberEffort(effort))
+		_, acct := provider.MemberAccount(id) // on its own account still
+		to := provider.WithMemberAccount(provider.WithMemberEffort(model, nextMemberEffort(effort)), acct)
 		return m, saveGroup(g.ID, func(g *provider.Group) error {
 			g.RenameMember(id, to)
 			return nil
@@ -451,6 +493,15 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			hint: "agents can be shown only some families: magpie visible <agent> <family>",
 			onEnter: func(v string) tea.Cmd {
 				return saveGroup(g.ID, func(g *provider.Group) error { g.Family = v; return nil }, g.Name+" family "+dash(v))
+			}})
+		m.back = modeGroup
+	case "N":
+		in := newInput("your own word on it, e.g. office key only")
+		in.SetValue(g.Note)
+		m.openAsk(ask{crumbs: []string{"routing", g.Name, "note"}, input: in, empty: true,
+			hint: "shown under its name; empty clears it",
+			onEnter: func(v string) tea.Cmd {
+				return saveGroup(g.ID, func(g *provider.Group) error { g.Note = v; return nil }, g.Name+" note "+dash(provider.CleanNote(v)))
 			}})
 		m.back = modeGroup
 	case "x":
@@ -493,7 +544,7 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			hint: "agents pick it as group/<id>: those on it, and the groups that have it in them, follow",
 			onEnter: func(to string) tea.Cmd {
 				return func() tea.Msg {
-					if err := provider.RenameGroup(g.ID, to); err != nil {
+					if _, err := agent.RenameGroup(g.ID, to); err != nil {
 						return flashMsg{text: err.Error()}
 					}
 					return renamedMsg{from: g.ID, to: strings.ToLower(to)}
@@ -593,7 +644,11 @@ func (m model) viewGroups() string {
 			b.WriteString(line + "\n")
 			continue
 		}
-		notes := []string{fmt.Sprintf("%d model%s", len(g.Members), plural(len(g.Members))), groupRouting(g)}
+		listed, off := m.listedMembers(g)
+		notes := []string{fmt.Sprintf("%d model%s", len(listed), plural(len(listed))), groupRouting(g)}
+		if off > 0 {
+			notes = append(notes, fmt.Sprintf("%d switched off", off))
+		}
 		if g.Affinity != "" {
 			notes = append(notes, staysName(g.Affinity))
 		}
@@ -606,7 +661,7 @@ func (m model) viewGroups() string {
 		if g.Auto {
 			notes = append(notes, "found")
 		}
-		members := strings.Join(g.Members, " → ")
+		members := strings.Join(listed, " → ")
 		if len(g.Match) > 0 {
 			notes = append(notes, fmt.Sprintf("%d pattern%s", len(g.Match), plural(len(g.Match))))
 		}
@@ -637,7 +692,11 @@ func (m model) viewGroup() string {
 	if g.Auto {
 		head = append(head, "found by magpie: a change makes it yours")
 	}
-	b.WriteString(pad + "  " + sMuted.Render(strings.Join(head, " · ")) + "\n\n")
+	b.WriteString(pad + "  " + sMuted.Render(strings.Join(head, " · ")) + "\n")
+	if g.Note != "" {
+		b.WriteString(pad + "  " + sText.Render(trunc(g.Note, max(m.w-8, 10))) + "\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(pad + "  " + sFaint.Render("models · the first that can take a request gets it") + "\n")
 	hits := provider.PatternHits(g)
 	memFrom, memTo, ruleFrom, ruleTo := groupWindow(len(g.Members), len(g.Rules), m.gsel, m.groupRows(g, len(hits)))
@@ -652,6 +711,9 @@ func (m model) viewGroup() string {
 		}
 		if slices.Contains(g.Matched, id) {
 			name += sMuted.Render(" · by pattern")
+		}
+		if m.memberOff(id) {
+			name += sMuted.Render(" · switched off: skipped until it is on again")
 		}
 		b.WriteString(pad + marker + sFaint.Render(fmt.Sprintf("%d  ", i+1)) + name + "\n")
 	}
@@ -708,6 +770,9 @@ func (m model) groupRows(g provider.Group, hits int) int {
 	}
 	if len(g.Rules) == 0 {
 		fixed++
+	}
+	if g.Note != "" {
+		fixed++ // its line under the head
 	}
 	if slices.ContainsFunc(g.Rules, func(r provider.Rule) bool { return r.Intent != "" }) {
 		fixed += 2

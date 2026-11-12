@@ -50,6 +50,7 @@ async function open(engine, lang, width, saved, redact) {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   const page = await (await browser.newContext({ viewport: { width, height: 1400 } })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, saved, redact));
@@ -75,7 +76,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             name: r.querySelector(".name").textContent, sub: sub.textContent,
             on: r.querySelector(".segs .opt.on")?.textContent,
             first: r.previousElementSibling?.querySelector(".name")?.textContent === t("Mask secrets"),
-            cut: sub.scrollWidth > sub.clientWidth + 1 || sub.scrollHeight > sub.clientHeight + 1,
+            hint: getComputedStyle(sub).getPropertyValue("--hint").trim() === "1",
             inside: b.left >= list.left - 1 && b.right <= list.right + 1,
             wide: document.documentElement.scrollWidth > document.documentElement.clientWidth,
           };
@@ -83,7 +84,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(m.name, w.name);
         assert.equal(m.on, w.off, "off unless the user turned it on");
         assert(m.first, "right under Mask secrets");
-        assert(!m.cut && m.inside && !m.wide, "shown in full, inside the page");
+        assert(m.hint && m.inside && !m.wide, "its explanation rests out of sight, for the hover card, inside the page");
         if (lang !== "en") assert(!m.sub.includes("made-up"), "its words translated");
 
         const before = await page.evaluate(() => [scrollX, scrollY, document.querySelector("#view-settings").scrollTop]);

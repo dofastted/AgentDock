@@ -71,7 +71,7 @@ func qoderSite(home string, b qoderBuild) *Agent { return qoderAt(here(home), b)
 func qoderAt(at place, b qoderBuild) *Agent {
 	dir := at.getenv(b.env)
 	if dir == "" {
-		dir = filepath.Join(at.home, b.dir)
+		dir = at.join(b.dir)
 	}
 	path := filepath.Join(dir, "settings.json")
 	key := b.id + ":" + path + ":"
@@ -189,7 +189,7 @@ func qoderAt(at place, b qoderBuild) *Agent {
 				return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur["model"]), viaMagpie(b.id, magpieID+"/")...)
+				return withVia(ownOptions("", cur["model"]), b.id, magpieID+"/")
 			},
 		}, {
 			// the effort of the model in use, in its model.preferences
@@ -297,7 +297,7 @@ func qoderProvider(agent, model string) map[string]any {
 // at v1.
 func qoderProviderAt(agent, model, v1 string) map[string]any {
 	var ms []map[string]any
-	for _, m := range magpieModels(agent) {
+	for _, m := range sharedModels(agent) {
 		caps := map[string]any{"tools": true, "vision": m.Images}
 		var levels []string
 		for _, e := range m.Efforts {
@@ -340,7 +340,7 @@ var noticeQoder = newNotice("{agent} reads its settings as a session starts — 
 // runs Qoder's CLI as its agent with that folder's settings.
 func qoderApp(dir string) bool {
 	for _, f := range []string{".qoder-app-status.json", ".qoder-app-canary-status.json", ".qoder-app-dev-status.json"} {
-		if fi, err := os.Stat(filepath.Join(dir, f)); err == nil && fi.Mode().IsRegular() {
+		if statFile(filepath.Join(dir, f)) {
 			return true
 		}
 	}

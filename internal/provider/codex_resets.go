@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -22,7 +23,7 @@ import (
 
 // ResetCredits is how many rate-limit resets an account holds and the
 // soonest one of them runs out; Until is nil when none does, or when that
-// couldn't be read.
+// couldn't be read (untilUnread then).
 type ResetCredits struct {
 	Count int        `json:"count"`
 	Until *time.Time `json:"until,omitempty"`
@@ -39,13 +40,20 @@ type ResetCredits struct {
 	// lists them, where it only said the first). Empty when the vendor
 	// didn't say.
 	Each []ResetCard `json:"each,omitempty"`
+	// untilUnread: when they run out couldn't be read, so a nil Until is
+	// not known, not "never" — the reset about to run out is looked at
+	// again soon rather than left for hours (SpendExpiringCodexResets)
+	untilUnread bool
 }
 
 // ResetCard is one reset: when it runs out (nil: it never does) and, of
-// resets counted by window, which one's ("fiveHour", "weekly").
+// resets counted by window, which one's ("fiveHour", "weekly"). ID is a
+// Codex reset's own credit id, which a use by hand names to spend that
+// one rather than the one that runs out first (UseCodexResetCard).
 type ResetCard struct {
 	Until  *time.Time `json:"until,omitempty"`
 	Window string     `json:"window,omitempty"`
+	ID     string     `json:"id,omitempty"`
 }
 
 // sortResetCards puts the resets in the order they run out, one that
@@ -87,18 +95,30 @@ func (r ResetCredits) Words() string {
 }
 
 // codexResetDetailsTimeout bounds the second look, at when the resets run
-// out: without it the count alone is shown.
+// out: without it the count alone is shown. The background look at a
+// reset about to run out waits longer (withResetDetailsWait): nobody
+// waits on it, and without it the reset can't be spent in time.
 var codexResetDetailsTimeout = 4 * time.Second
 
+type resetDetailsWaitKey struct{}
+
+// withResetDetailsWait has the reads made with ctx wait up to d for when
+// the resets run out, in place of codexResetDetailsTimeout.
+func withResetDetailsWait(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, resetDetailsWaitKey{}, d)
+}
+
 type codexResetCreditsWire struct {
-	AvailableCount int `json:"available_count"`
-	Credits        []struct {
-		ID        string  `json:"id"`
-		ResetType string  `json:"reset_type"`
-		Status    string  `json:"status"`
-		GrantedAt string  `json:"granted_at"`
-		ExpiresAt *string `json:"expires_at"`
-	} `json:"credits"`
+	AvailableCount int                           `json:"available_count"`
+	Credits        []codexResetCreditsWireCredit `json:"credits"`
+}
+
+type codexResetCreditsWireCredit struct {
+	ID        string  `json:"id"`
+	ResetType string  `json:"reset_type"`
+	Status    string  `json:"status"`
+	GrantedAt string  `json:"granted_at"`
+	ExpiresAt *string `json:"expires_at"`
 }
 
 // first is the credit still to be used that runs out first, and when:
@@ -122,6 +142,13 @@ func (w codexResetCreditsWire) first() (id string, at *time.Time) {
 	return id, at
 }
 
+// held says whether credit is one of those still to be used.
+func (w codexResetCreditsWire) held(credit string) bool {
+	return slices.ContainsFunc(w.Credits, func(c codexResetCreditsWireCredit) bool {
+		return c.ID == credit && c.Status == "available"
+	})
+}
+
 // soonest is when the first of the credits still to be used runs out, nil
 // when none of them does.
 func (w codexResetCreditsWire) soonest() *time.Time {
@@ -136,7 +163,7 @@ func (w codexResetCreditsWire) each() []ResetCard {
 		if c.Status != "available" || c.ID == "" {
 			continue
 		}
-		var r ResetCard
+		r := ResetCard{ID: c.ID}
 		if c.ExpiresAt != nil {
 			if p, err := time.Parse(time.RFC3339, *c.ExpiresAt); err == nil {
 				r.Until = &p
@@ -156,10 +183,16 @@ func codexResets(ctx context.Context, base, token, accountID string, count int) 
 		return nil
 	}
 	out := &ResetCredits{Count: count}
-	ctx, cancel := context.WithTimeout(ctx, codexResetDetailsTimeout)
+	wait := codexResetDetailsTimeout
+	if d, ok := ctx.Value(resetDetailsWaitKey{}).(time.Duration); ok {
+		wait = d
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	var w codexResetCreditsWire
-	if accountJSON(ctx, base+"/wham/rate-limit-reset-credits", token, map[string]string{"chatgpt-account-id": accountID}, &w) == nil {
+	if err := accountJSON(ctx, base+"/wham/rate-limit-reset-credits", token, codexAccountHeaders(accountID), &w); err != nil {
+		out.untilUnread = true
+	} else {
 		out.Until = w.soonest()
 		// listed only when they are the ones counted: a list that says
 		// otherwise isn't put on the card as if it were
@@ -207,8 +240,44 @@ func UseCodexReset(ctx context.Context, user string) (ResetOutcome, error) {
 	return useCodexReset(ctx, user, ResetUsedByHand)
 }
 
+// UseCodexResetCard is UseCodexReset spending the reset credit the user
+// chose, of those ResetCredits.Each lists (01huadalang on Discord: one
+// that lasts longer, kept for later, may be the one they want gone
+// first). The account's resets are read again first: a credit no longer
+// among those still to be used is never spent, nor any other in its
+// place. credit "" is the one that runs out first.
+func UseCodexResetCard(ctx context.Context, user, credit string) (ResetOutcome, error) {
+	return spendCodexReset(ctx, user, credit, ResetUsedByHand)
+}
+
+// SpendCodexReset is a reset used by hand wherever it is asked: the Usage
+// page's "Use a reset" and the gateway's RemoteCodexResetPath, for another
+// magpie's card or an app holding a gateway key (#3850, prgrmrwy). It is
+// UseCodexResetCard, then, when the windows started again, a wait of up
+// to 10s for routing and the Providers page to know so (#1491).
+func SpendCodexReset(ctx context.Context, user, credit string) (ResetOutcome, error) {
+	out, err := UseCodexResetCard(ctx, user, credit)
+	if err != nil || out.Code != "reset" {
+		return out, err
+	}
+	who := user
+	if who == "" {
+		who, _ = CodexSignedIn()
+	}
+	wait, done := context.WithTimeout(ctx, 10*time.Second)
+	AwaitAllowance(wait, "codex", who)
+	done()
+	return out, nil
+}
+
 // useCodexReset is UseCodexReset, the use kept as made for why.
 func useCodexReset(ctx context.Context, user, why string) (ResetOutcome, error) {
+	return spendCodexReset(ctx, user, "", why)
+}
+
+// spendCodexReset spends user's reset credit, the one that runs out first
+// when credit is "", the use kept as made for why.
+func spendCodexReset(ctx context.Context, user, credit, why string) (ResetOutcome, error) {
 	user, tok, accountID, err := codexUserToken(ViaLogin(ctx, "codex", user), user)
 	if err != nil {
 		return ResetOutcome{}, err
@@ -218,12 +287,16 @@ func useCodexReset(ctx context.Context, user, why string) (ResetOutcome, error) 
 	// which of them to spend is named, as Codex itself does: left to the
 	// vendor, it may be one that lasts longer
 	var w codexResetCreditsWire
-	if err := accountJSON(ctx, base+"/wham/rate-limit-reset-credits", tok, map[string]string{"chatgpt-account-id": accountID}, &w); err != nil {
+	if err := accountJSON(ctx, base+"/wham/rate-limit-reset-credits", tok, codexAccountHeaders(accountID), &w); err != nil {
 		return ResetOutcome{}, fmt.Errorf("couldn't read which reset runs out first, so none was used: %w", err)
 	}
-	credit, _ := w.first()
 	if credit == "" {
-		return ResetOutcome{Code: "no_credit"}, nil
+		credit, _ = w.first()
+		if credit == "" {
+			return ResetOutcome{Code: "no_credit"}, nil
+		}
+	} else if !w.held(credit) {
+		return ResetOutcome{}, errors.New("that reset is no longer on the account, so none was used")
 	}
 	out, err := consumeCodexReset(ctx, base, tok, accountID, credit, newRedeemID())
 	if err != nil {
@@ -232,7 +305,11 @@ func useCodexReset(ctx context.Context, user, why string) (ResetOutcome, error) 
 	StaleAllowance("codex", user)
 	if out.Code == "reset" {
 		renewedNow("codex", user)
-		noteResetUsed(user, why, out)
+		// the reset is spent on the server, so the spend stays a success:
+		// a record that can't be kept is named, never spent again (#5556)
+		if err := noteResetUsed(user, why, out); err != nil {
+			log.Printf("Codex reset of %s spent, but keeping the record of it failed: %v", user, err)
+		}
 	}
 	subscriptionUsageCache.Lock()
 	subscriptionUsageCache.at = time.Time{}
@@ -297,10 +374,12 @@ func consumeCodexReset(ctx context.Context, base, token, accountID, credit, id s
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	if accountID != "" {
-		req.Header.Set("chatgpt-account-id", accountID)
+	for k, v := range codexAccountHeaders(accountID) {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return out, err
 	}

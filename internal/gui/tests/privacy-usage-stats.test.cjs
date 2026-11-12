@@ -35,8 +35,8 @@ function serve(lang, settings, saved) {
 }
 
 const words = {
-  en: { count: "Count me as a user", share: "Share the agents, providers and models I use", personal: "Mask personal data", on: "On", off: "Off" },
-  zh: { count: "计入用户数", share: "分享我用的 agent、provider 和模型", personal: "脱敏个人信息", on: "开启", off: "关闭" },
+  en: { count: "Count me as a user", share: "Share the agents, providers, models and plugins I use", personal: "Mask personal data", on: "On", off: "Off" },
+  zh: { count: "计入用户数", share: "分享我用的 agent、provider、模型和插件", personal: "脱敏个人信息", on: "开启", off: "关闭" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -50,6 +50,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, settings, saved));
       await watchSettingsReads(page);

@@ -85,6 +85,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", e => errors.push(e.message));
       const state = { quotas: fixtures(Date.now()), gets: 0, refreshes: [], nameOnRefresh: !named };
@@ -197,6 +198,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1250, height: 900 }, reducedMotion: "no-preference" });
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", e => errors.push(e.message));
     let release, releaseRead, readStarted;
@@ -221,7 +223,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     releaseRead();
     await page.evaluate(() => quotasLoading);
     assert.equal(await row.evaluate(e => e.querySelector(".quota-refresh") === window.refreshMotion.button), true, "a background reading replaced the spinning control");
-    assert.equal(await row.evaluate(e => e.querySelector("path").getAnimations()[0] === window.refreshMotion.animation), true, "a background reading restarted the turn");
+    assert.equal(await row.evaluate(e => e.querySelector(".quota-refresh path").getAnimations()[0] === window.refreshMotion.animation), true, "a background reading restarted the turn");
     release();
     await page.locator('.subscription-card[data-provider="codex"] .quota-n', { hasText: "61%" }).waitFor();
     const end = await row.evaluate(e => {
@@ -236,8 +238,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     // A response already available still gets one complete turn.
     state.gate = undefined;
     await row.locator(".quota-refresh").click();
-    await page.waitForFunction(() => document.querySelector('.subscription-card[data-provider="codex"] path').getAnimations()[0]?.effect.getTiming().iterations === 1);
-    await row.evaluate(e => e.querySelector("path").getAnimations()[0].finish());
+    await page.waitForFunction(() => document.querySelector('.subscription-card[data-provider="codex"] .quota-refresh path').getAnimations()[0]?.effect.getTiming().iterations === 1);
+    await row.evaluate(e => e.querySelector(".quota-refresh path").getAnimations()[0].finish());
     await row.locator(".quota-refresh:not(.busy)").waitFor();
     assert.deepEqual(errors, []);
   });
@@ -250,6 +252,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", e => errors.push(e.message));
       const now = Date.now();
@@ -288,6 +291,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // short, so the page scrolls and a click that moved it would show
       const page = await (await browser.newContext({ viewport: { width: 900, height: 420 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       let open;
       const state = { quotas: fixtures(Date.now()), gets: 0, refreshes: [], gate: new Promise((r) => { open = r; }) };

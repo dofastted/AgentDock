@@ -1,4 +1,4 @@
-// An app magpie is added to by a link of its own (Cindy, Lody, AionUi) is a row like the
+// An app magpie is added to by a link of its own (Cindy, Lody, AionUi, Cherry Studio) is a row like the
 // others on the Agents page (the owner: its wide button, with no line under
 // the name, sat apart from every other): a line under its name says whether
 // magpie is added, and its button stands where the others' model picker
@@ -21,17 +21,22 @@ const cindy = (added) => ({ id: "cindy", name: "Cindy", path: "", icon: "cindy",
 // other way round from Cindy's so each run has both
 const AIONUI_LINK = "aionui://add-provider?api_key=magpie-aionui&base_url=http%3A%2F%2F127.0.0.1%3A3425%2Fv1&name=magpie&platform=custom";
 const aionui = (added) => ({ id: "aionui", name: "AionUi", path: "", icon: "aionui", import: AIONUI_LINK, added, fields: [] });
+// Cherry Studio's link as magpie makes it (agent.CherryStudioLink)
+const CHERRY_LINK = "cherrystudio://providers/api-keys?v=1&data=eyJpZCI6Im1hZ3BpZSIsImJhc2VVcmwiOiJodHRwOi8vMTI3LjAuMC4xOjM0MjUvdjEiLCJhcGlLZXkiOiJtYWdwaWUtY2hlcnJ5c3R1ZGlvIiwibmFtZSI6Im1hZ3BpZSIsInR5cGUiOiJvcGVuYWkifQ%3D%3D";
+const cherry = (added) => ({ id: "cherrystudio", name: "Cherry Studio", path: "", icon: "cherrystudio-color", import: CHERRY_LINK, added, fields: [] });
 
-async function serve(route, lang, added) {
+async function serve(route, lang, added, ctl = {}) {
   const url = new URL(route.request().url());
   const json = (data) => route.fulfill({ json: data });
   if (url.pathname === "/boot.js") {
     return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:false,textSize:100};` });
   }
   if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-  if (url.pathname === "/api/state") return json({ agents: [crush(added), cindy(added), aionui(!added), { id: "lody", name: "Lody", path: "", icon: "lody", import: "lody://provider/import?v=1&data=fixture", fields: [] }], profiles: [], settings: { lang, theme: "light", textSize: 100 } });
+  if (url.pathname === "/api/state") return json({ agents: [crush(added), cindy(added), aionui(!added), cherry(added), { id: "lody", name: "Lody", path: "", icon: "lody", import: "lody://provider/import?v=1&data=fixture", fields: [] }], profiles: [], settings: { lang, theme: "light", textSize: 100 } });
   if (url.pathname === "/api/providers") return json({ providers: [], gateway: { running: true, window: true } });
   if (url.pathname === "/api/plugins") return json({ plugins: [] });
+  // nothing here opens the app's links (agent.NoLinkHandlerError)
+  if (url.pathname === "/api/open" && ctl.noHandler) return route.fulfill({ status: 400, json: { error: "nothing on this computer opens Cindy's links (cindy://)", code: "no_link_handler", app: "Cindy", exe: ctl.exe || "", said: LINK_SAID + (ctl.exe ? " ({exe})" : "") } });
   if (url.pathname.startsWith("/api/")) return json({});
   const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
   const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
@@ -55,6 +60,25 @@ const UNKNOWN = {
   de: "Öffnet Lody, um magpie als Anbieter hinzuzufügen — dort bestätigen",
 };
 
+// what a click on Add magpie became, in the reader's language (sungt,
+// 10-29: a link nothing opened did nothing, and nothing said so)
+const OPENED = {
+  en: "Sent to Cindy: confirm adding magpie there",
+  zh: "已交给 Cindy：请在其中确认添加 magpie",
+  "zh-TW": "已交給 Cindy：請在其中確認新增 magpie",
+  ja: "Cindy に渡しました。そちらで magpie の追加を確認してください",
+  de: "An Cindy übergeben: dort das Hinzufügen von magpie bestätigen",
+};
+// the i18n.js key api.go's linkSaid sends
+const LINK_SAID = "Nothing on this computer opens {app}'s links, so {app} didn't open: open {app} once or install it again, then click Add magpie again";
+const NO_HANDLER = {
+  en: "Nothing on this computer opens Cindy's links, so Cindy didn't open: open Cindy once or install it again, then click Add magpie again",
+  zh: "这台电脑上没有程序能打开 Cindy 的链接，所以 Cindy 没有打开：先打开一次 Cindy 或重新安装，再点「添加 magpie」",
+  "zh-TW": "這台電腦上沒有程式能開啟 Cindy 的連結，所以 Cindy 沒有開啟：先開啟一次 Cindy 或重新安裝，再點「新增 magpie」",
+  ja: "このコンピュータには Cindy のリンクを開くアプリがないため、Cindy は開きませんでした。Cindy を一度起動するか入れ直してから、もう一度「magpie を追加」を押してください",
+  de: "Auf diesem Computer öffnet nichts die Links von Cindy, daher wurde Cindy nicht geöffnet: Cindy einmal starten oder neu installieren, dann erneut auf „magpie hinzufügen“ klicken",
+};
+
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of Object.keys(SAID)) {
     for (const added of [false, true]) {
@@ -69,7 +93,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(5000);
-        await page.route("**/*", (route) => serve(route, lang, added));
+        page.setDefaultNavigationTimeout(60000);
+        const ctl = {};
+        await page.route("**/*", (route) => serve(route, lang, added, ctl));
         await page.goto("http://magpie.test/");
         await page.waitForLoadState("networkidle");
 
@@ -120,6 +146,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const aionOpened = page.waitForRequest((r) => r.url().includes("/api/open"));
         await aion.locator(".ag-start").click();
         assert.equal(JSON.parse((await aionOpened).postData()).url, AIONUI_LINK);
+        // Cherry Studio: the same, with its own icon and link
+        const cherryRow = page.locator('.row.agent[data-id="cherrystudio"]');
+        await cherryRow.locator(".ag-st").waitFor();
+        assert.match(await cherryRow.locator(".ag-st-t").innerText(), new RegExp(SAID[lang][added ? 1 : 0].source.replace("Cindy", "Cherry Studio")));
+        assert.equal(await cherryRow.locator(".ag-st").evaluate((e) => e.classList.contains("on")), added);
+        assert.equal(await cherryRow.locator('.ic[data-icon="cherrystudio-color"]').count() > 0, true, "Cherry Studio's row has its icon");
+        assert.equal(await page.evaluate(async () => (await fetch("/icons/cherrystudio-color.svg")).status), 200);
+        const cherryOpened = page.waitForRequest((r) => r.url().includes("/api/open"));
+        await cherryRow.locator(".ag-start").click();
+        assert.equal(JSON.parse((await cherryOpened).postData()).url, CHERRY_LINK);
 
         // narrow: no page scroll sideways, and every import row keeps its
         // line and button inside the window
@@ -129,7 +165,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth, null, { timeout: 3000 }).catch(async () => {
           assert.fail(`sideways scroll at 420px: ${await page.evaluate(() => document.documentElement.scrollWidth)}`);
         });
-        for (const id of ["lody", "cindy", "aionui"]) {
+        for (const id of ["lody", "cindy", "aionui", "cherrystudio"]) {
           const r = page.locator(`.row.agent[data-id="${id}"]`);
           for (const sel of [".ag-start", ".ag-st-t"]) {
             const b = await r.locator(sel).evaluate((e) => { const x = e.getBoundingClientRect(); return { left: x.left, right: x.right, width: x.width }; });
@@ -142,6 +178,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await row.locator(".ag-start").click();
         const req = await opened;
         assert.equal(JSON.parse(req.postData() || "{}").url, "cindy://import?x=1");
+        // and says what became of it: opened, or why nothing opened
+        const said = async (text, kind) => {
+          await page.waitForFunction(([want, k]) => { const s = document.querySelector("#status"); return s && s.textContent === want && s.classList.contains(k); }, [text, kind], { timeout: 3000 }).catch(async () => {
+            assert.fail(`status ${JSON.stringify(await page.locator("#status").evaluate((s) => [s.textContent, s.className]))}, want ${kind} ${JSON.stringify(text)}`);
+          });
+        };
+        await said(OPENED[lang], "ok");
+        ctl.noHandler = true;
+        await row.locator(".ag-start").click();
+        await said(NO_HANDLER[lang], "err");
+        ctl.exe = "C:\\gone\\Cindy.exe";
+        await row.locator(".ag-start").click();
+        await said(NO_HANDLER[lang] + " (C:\\gone\\Cindy.exe)", "err");
       });
     }
   }

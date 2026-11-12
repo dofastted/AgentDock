@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docker · magpie 文档</title>
+<title>用 Docker 部署 magpie：在服务器或 NAS 上跑 AI 网关 · magpie 文档</title>
 <meta name="description" content="在服务器或 NAS 上用 Docker 运行 magpie：ghcr.io/yetone/magpie 镜像的端口、数据卷和环境变量，Web 界面，登录订阅，用网关密钥共享网关，以及 Compose 示例。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/docker">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/docker">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/docker">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/docker">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/docker">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="在 Docker 里运行 magpie">
 <meta property="og:description" content="在服务器或 NAS 上运行 magpie 的网关，在浏览器里管理它。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/docker">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "在 Docker 里运行 magpie",
+   "description": "在服务器或 NAS 上用 Docker 运行 magpie：ghcr.io/yetone/magpie 镜像的端口、数据卷和环境变量，Web 界面，登录订阅，用网关密钥共享网关，以及 Compose 示例。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/docker",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "在 Docker 里运行 magpie",
+     "item": "https://usemagpie.ai/docs/zh/docker"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -75,6 +135,7 @@
     <a href="#run">运行</a>
     <a href="#web">Web 界面</a>
     <a href="#signin">登录订阅</a>
+    <a href="#browser">你自己的浏览器</a>
     <a href="#volume">保存了什么</a>
     <a href="#env">环境变量</a>
     <a href="#share">网关密钥与其他机器</a>
@@ -89,7 +150,7 @@
 
     <div class="table-wrap"><table>
       <tr><td><b>镜像</b></td><td><code>ghcr.io/yetone/magpie</code>，支持 <code>linux/amd64</code> 和 <code>linux/arm64</code></td></tr>
-      <tr><td><b>标签</b></td><td><code>latest</code>（最新正式版）、<code>0.1.1150</code>（某个版本）、<code>0.1</code>、<code>edge</code>（<code>main</code> 上的每次改动）</td></tr>
+      <tr><td><b>标签</b></td><td><code>latest</code>（最新正式版）、<code>daily</code>（每天北京时间 04:00 指向当时的最新正式版，一天只变一次）、<code>stable</code>（与桌面版的稳定版通道一致：每周一个已发布满三天的版本，紧急修复版立即跟上）、<code>0.1.1150</code>（某个版本）、<code>0.1</code>、<code>edge</code>（<code>main</code> 上的每次改动）</td></tr>
       <tr><td><b>端口</b></td><td><code>3425</code> 是 Agent 调用的网关；<code>3430</code> 是容器运行 <code>magpie web</code> 时的 Web 界面；它也响应网关的 <code>/v1</code> 路由，所以反向代理只需转发这一个端口</td></tr>
       <tr><td><b>数据卷</b></td><td><code>/config</code>：供应商、密钥、登录、插件和用量</td></tr>
       <tr><td><b>用户</b></td><td>nonroot（uid 65532）</td></tr>
@@ -115,6 +176,7 @@ docker logs magpie</pre>
       <pre>● magpie web on http://127.0.0.1:3430/?k=0f3c9a1e…
   on the network http://172.17.0.2:3430/?k=0f3c9a1e…
   these are the container's own addresses: other machines use the host's, and MAGPIE_PUBLIC_URL=http://&lt;host&gt;:&lt;port&gt; puts it here
+  other containers on this host http://172.17.0.1:3425
 ! anyone with the link can change magpie and see its keys, and the network carries it unencrypted
   the link carries MAGPIE_WEB_KEY · gateway http://127.0.0.1:3425 · Ctrl-C to stop</pre>
     </div>
@@ -123,7 +185,7 @@ docker logs magpie</pre>
 
     <h2 id="web"><a class="anchor" href="#web">Web 界面</a></h2>
     <p>打开日志里的链接。链接里的 key 会换成一个 cookie，并从地址栏里去掉；不带 key 打开会被拒绝（401）。设置了 <code>MAGPIE_WEB_KEY</code>（16 个以上的字母、数字或 <code>- . _ ~</code>；<code>openssl rand -hex 16</code> 可以生成一个）时，重启后 key 不变，浏览器保持登录 400 天。不设置时每次启动都会生成新 key，cookie 只在本次浏览器会话里有效。</p>
-    <p>这个页面处于<b>网关模式</b>：只有 <span class="ui">供应商</span>、<span class="ui">网关</span>、<span class="ui">路由</span>、<span class="ui">用量</span>、<span class="ui">插件</span>和 <span class="ui">设置</span>，没有 Agent、会话和资源库，因为容器里没有 Agent。<span class="ui">设置</span> → <span class="ui">常规</span> → <span class="ui">网关模式</span> 可以关掉它。</p>
+    <p>这个页面处于<b>网关模式</b>：只有 <span class="ui">供应商</span>、<span class="ui">网关</span>、<span class="ui">路由</span>、<span class="ui">用量</span>、<span class="ui">会话</span>、<span class="ui">插件</span>和 <span class="ui">设置</span>，没有 Agent 和资源库，因为容器里没有 Agent。<span class="ui">会话</span>只列出其他电脑上通过这个网关的 Agent 会话，从不读这台机器上 Agent 的会话文件。<span class="ui">设置</span> → <span class="ui">常规</span> → <span class="ui">网关模式</span> 可以关掉它。</p>
     <p>NAS 或通过 SSH 访问的服务器上，用隧道打开页面，不要发布 3430：<code>ssh -L 3430:127.0.0.1:3430 you@nas</code>，然后在自己电脑上打开日志里的链接。</p>
     <div class="callout"><b>拿到链接的人都能修改 magpie、看到它的密钥。</b>让 3430 只在回环地址或 VPN 上。要跨网络访问，就用 HTTPS：用 <code>MAGPIE_TLS_CERT</code> 和 <code>MAGPIE_TLS_KEY</code> 给 magpie 一张证书，或者放在带 TLS 的反向代理（如 Caddy）后面。</div>
 
@@ -136,13 +198,17 @@ docker logs magpie</pre>
       <pre id="ex-signin">docker exec -it magpie magpie accounts add codex</pre>
     </div>
     <p>打开它打印的链接并登录，再把浏览器最后停在的地址粘贴回去。Web 界面也能从文件导入登录。</p>
-    <p>Claude 订阅的登录和请求都经过 Claude Code，而镜像里没有它。先让 magpie 下载 Anthropic 官方的构建：它会说明版本、下载来源和保存位置，问过你再下载，并用 Anthropic 清单里的 SHA-256 校验。它保存在 <code>/config/cache</code> 里；再运行一次可以更新到新版本。缺少 Claude Code 时，<code>magpie accounts add claude</code> 也会提出下载。</p>
+    <p>Claude 订阅的登录和请求都经过 Claude Code，而镜像里没有它。先让 magpie 下载 Anthropic 官方的构建：它会说明版本、下载来源和保存位置，问过你再下载，并用 Anthropic 清单里的 SHA-256 校验。它保存在卷里的 <code>/config/cache</code>，换新镜像也还在；magpie 会自己让它保持在 Claude Code 的最新版本：启动一分钟后检查一次，之后每六小时一次，有新版本就同样校验后下载。更新 magpie 后不用重新安装。想固定某个版本，设置 <code>-e DISABLE_AUTOUPDATER=1</code>。缺少 Claude Code 时，<code>magpie accounts add claude</code> 也会提出下载。</p>
     <div class="code">
       <span class="lang">Shell</span>
       <button class="copy" data-copy="ex-claude-code">复制</button>
       <pre id="ex-claude-code">docker exec -it magpie magpie claude-code install</pre>
     </div>
     <p>Grok（SuperGrok）订阅通过 xAI 的 Grok Build CLI 登录，镜像里同样没有它。在浏览器界面里登录，或者用 <code>magpie plugin login grok</code> 登录时，magpie 会先按 xAI 安装脚本的方式安装它：从 <code>x.ai/cli</code> 下载 stable 版本，放在 <code>/config/home/.grok</code>。要用你自己放进数据卷的 Grok Build，把 <code>GROK_BIN_DIR</code> 设为它所在的文件夹。</p>
+
+    <h2 id="browser"><a class="anchor" href="#browser">你自己的浏览器</a></h2>
+    <p>Magpie Browser 通过它的扩展，让 Agent 在你自己的浏览器里操作。容器里的文件夹没法直接加载成扩展，所以在浏览器界面打开 <span class="ui">资源库</span> → <span class="ui">Magpie Browser</span>，点 <span class="ui">下载扩展</span>。下载的 zip 指向这个页面自己的地址，并带一个名为 <b>Magpie Browser</b> 的专用网关密钥。解压后打开 <code>chrome://extensions</code>，打开开发者模式，点 <span class="ui">加载已解压的扩展程序</span>，选择解压出的文件夹。已经加载过的扩展，也可以在它的弹窗里填地址（<code>http://localhost:3430</code>，或网关发布到主机的端口）和网关密钥。</p>
+    <p>Magpie Browser 密钥只用来连接扩展，不能使用模型、MCP 服务器或统计，所以留在下载文件夹里的 zip 副本花不了你的额度。主机上的浏览器经 Docker 的网桥连到容器，不算容器所在电脑本机的连接，所以它只属于这个密钥，容器里的 Agent 暂时用不到它（<a href="https://github.com/yetone/magpie/issues/5529">#5529</a>）。要让主机上的 Agent 用它：给这个 Agent 一个完整权限的网关密钥，在扩展弹窗里填同一个密钥连上，再用它调用 <code>/mcp/magpie/browser</code>。填了别的密钥连上的浏览器只属于那个密钥；密钥被停用、删除或轮换后，连接随即断开。</p>
 
     <h2 id="volume"><a class="anchor" href="#volume">保存了什么</a></h2>
     <p>magpie 写的所有东西都在 <code>/config</code> 下，所以重启、或者在同一个数据卷上新建容器，供应商、密钥、登录和插件都还在。</p>
@@ -172,10 +238,13 @@ docker logs magpie</pre>
       <li><b>发布端口</b>用 <code>-p 3425:3425</code>（或绑定到 NAS 的局域网或 VPN 地址，<code>-p 192.168.1.20:3425:3425</code>）并加上 <code>-e MAGPIE_PUBLIC_URL=http://192.168.1.20:3425</code> 重新创建容器。</li>
     </ol>
     <p>在其他电脑上，把 Agent 指向这个网关，用其中一个密钥作为 API key：OpenAI 客户端用 <code>http://192.168.1.20:3425/v1</code>，Anthropic 或 Gemini 客户端用 <code>http://192.168.1.20:3425</code>。模型 id 是 <code>provider/model</code> 或路由组的名字，<code>GET /v1/models</code> 会列出它们。如果那台电脑自己也运行 magpie，就把容器添加为<a href="/docs/zh/remote">远程 magpie</a>，由 magpie 替你配置 Agent。</p>
+    <p id="containers"><b>同一宿主机上的其他容器。</b>NAS 上的其他容器通过 Docker bridge 的网关和发布的端口访问宿主机上的 magpie：Docker 默认 bridge 网络上是 <code>http://172.17.0.1:3425</code>。容器自己的 <code>172.17.x</code> 地址对它们没用，宿主机的局域网地址也可能不行，因为 NAS 的防火墙可能挡住来自容器的访问。<code>host.docker.internal</code> 在 Docker Desktop 上是同一个地址，在 Linux 上只有加了 <code>extra_hosts: ["host.docker.internal:host-gateway"]</code> 的容器里才有。和 magpie 在同一个 compose 网络或你自己建的网络里的容器，可以按名字访问：<code>http://magpie:3425</code>。无论哪种都要带网关密钥。日志和 Web 界面把这个地址列为 <span class="ui">同一主机上的其他容器</span>，排在打开页面所用的宿主机地址之后。</p>
     <p>容器里不需要打开 <span class="ui">设置</span> → <span class="ui">网络与共享</span> → <span class="ui">局域网共享</span>：打开它会另外生成一个名为 <span class="ui">Magpie</span> 的网关密钥，而不论开关如何，网关都会向容器外的请求要密钥。</p>
     <p><b>从旧镜像升级。</b>容器外发送 <code>magpie</code> 或其他非启用网关密钥的 Agent，现在会收到 401（“the API key sent is not an enabled magpie gateway key”）。按上面的步骤给它生成一个密钥，填进 Agent 的设置。已经发送网关密钥的 Agent，以及用网关密钥添加的远程 magpie，照常工作。</p>
     <p id="allow"><b>允许的地址。</b>在公网主机上，用 <code>-e MAGPIE_ALLOW_IPS=203.0.113.7,10.0.0.0/8</code> 写上你的客户端所在的地址。来自其他地址的请求在看密钥之前就被拒绝（403），所以泄露的密钥从别处也用不了；拒绝信息和容器日志都会写出请求来自的地址。magpie 判断的是连接本身的地址，从不采信 <code>X-Forwarded-For</code> 头；写错的条目不会放行任何地址，而不是放行所有地址。Docker 默认的 bridge 网络会把客户端自己的地址传进容器，但宿主机自己发出的请求来自 bridge 的网关（<code>172.17.0.1</code>），Docker Desktop 和 rootless Docker 则把所有客户端显示成它们自己的一个地址：把它加上，或看 403 里写的是哪个。在反向代理或隧道后面时，所有请求都来自代理的地址，请在代理那里限制谁能访问。桌面版里同一个列表在 <span class="ui">设置</span> → <span class="ui">网络与共享</span> → <span class="ui">允许的地址</span>。</p>
     <div class="callout"><b>跨互联网访问时，优先用 VPN</b>（如 Tailscale 或 WireGuard），不要直接开放 3425。容器前面的反向代理或隧道也算网络：它的客户端和其他机器一样需要网关密钥。</div>
+
+    <p id="statusline"><b>Claude Code 在容器外时的状态栏。</b>状态栏开关无法写入另一台机器的 <code>~/.claude/settings.json</code>，它写下的命令也指向容器里的程序。网关自己就能给出同一行：在运行 Claude Code 的机器上，把 <code>~/.claude/settings.json</code> 的 <code>statusLine</code> 设为 <code>{"type": "command", "command": "curl -fsS -m 1 -H 'Authorization: Bearer sk-magpie-key-…' --data-binary @- http://&lt;host&gt;:3425/v1/magpie/statusline || true"}</code>，地址换成能访问容器的主机，并带上网关密钥（只读密钥即可）。受预算、模型或账号限制的密钥，在主人为它打开<span class="ui">额度</span>后才能拿到这一行，且只含它可用的账号。加上 <code>?format=json</code> 则以 JSON 返回同样的内容（这一行、模型，以及每个账号各窗口的 <code>used</code> 和 <code>resetsAt</code>），供自己绘制的状态栏使用。Claude Code 每条消息都会运行它，并通过 stdin 传入会话，由此加上该会话所走的模型。浏览器界面的<span class="ui">设置</span> → <span class="ui">关于</span>里也显示这条命令。</p>
 
     <h2 id="compose"><a class="anchor" href="#compose">在 NAS 上用 Docker Compose</a></h2>
     <div class="code">
@@ -202,7 +271,7 @@ docker logs magpie</pre>
     <ul>
       <li><b>健康检查。</b>镜像带 <code>HEALTHCHECK</code>：网关能应答时 <code>magpie healthcheck</code> 返回 0，<code>serve</code> 和 <code>web</code> 都一样，所以 <code>docker ps</code> 会显示 healthy，Compose 可以用 <code>depends_on: condition: service_healthy</code> 等它。</li>
       <li><b>终端。</b><code>docker exec -it magpie bash</code> 或 NAS 面板里的终端会打开一个 shell，<code>magpie</code> 在 PATH 里：<code>magpie providers</code>、<code>magpie models</code>、<code>magpie usage</code>、<code>magpie quota</code> 以及其他 <a href="https://github.com/yetone/magpie/blob/main/docs/reference.md">CLI 命令</a>。</li>
-      <li><b>更新。</b>拉取新镜像，在同一个数据卷上重新创建容器：<code>docker pull ghcr.io/yetone/magpie:latest</code>，然后 <code>docker rm -f magpie</code> 再执行同样的 <code>docker run</code>；或 <code>docker compose pull &amp;&amp; docker compose up -d</code>。</li>
+      <li><b>更新。</b>拉取新镜像，在同一个数据卷上重新创建容器：<code>docker pull ghcr.io/yetone/magpie:latest</code>，然后 <code>docker rm -f magpie</code> 再执行同样的 <code>docker run</code>；或 <code>docker compose pull &amp;&amp; docker compose up -d</code>。magpie 一天会发好几个版本；用 Renovate 或 Watchtower 想一天只更新一次，就跟 <code>daily</code>（Renovate 请固定它的 digest），想一周一次就跟 <code>stable</code>。</li>
       <li><b>自己构建。</b>在<a href="https://github.com/yetone/magpie">仓库</a>的检出目录里 <code>docker build -t magpie .</code> 得到同样的镜像。</li>
     </ul>
 
@@ -221,10 +290,20 @@ docker logs magpie</pre>
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

@@ -78,19 +78,52 @@ func TestPiecesCut(t *testing.T) {
 	}
 }
 
+// Text that isn't UTF-8 is cut too: a run of stray continuation bytes
+// has no rune's start to cut at, and the scan for one read past the
+// text's end and panicked on the model's goroutine (#4553's class: a
+// malformed request ended magpie). Its pieces still cover the text, each
+// overlapping the one before, none over pieceSize.
+func TestPiecesCutMalformed(t *testing.T) {
+	for name, text := range map[string]string{
+		"continuations":      strings.Repeat("\x80", 3*pieceSize),
+		"after a byte":       "a" + strings.Repeat("\x80", 3*pieceSize),
+		"after valid text":   strings.Repeat("ab", pieceSize) + strings.Repeat("\x80", pieceSize),
+		"0xff":               strings.Repeat("\xff", 3*pieceSize),
+		"one short of a cut": strings.Repeat("\x80", pieceSize+1),
+		"between cjk":        strings.Repeat("张伟", 3000) + strings.Repeat("\xbf", 2*pieceSize) + strings.Repeat("张伟", 3000),
+	} {
+		ps := pieces(text)
+		if len(ps) < 2 || ps[0].at != 0 || ps[len(ps)-1].end != len(text) {
+			t.Fatalf("%s: pieces %v don't cover 0..%d", name, ps, len(text))
+		}
+		for i, p := range ps {
+			if p.end <= p.at || p.end-p.at > pieceSize {
+				t.Fatalf("%s: piece %d %v", name, i, p)
+			}
+			if i > 0 && (p.at <= ps[i-1].at || p.at > ps[i-1].end || ps[i-1].end-p.at > pieceOverlap) {
+				t.Fatalf("%s: piece %d %v after %v", name, i, p, ps[i-1])
+			}
+		}
+	}
+}
+
 // Spans from overlapping pieces: one found twice is one, one cut by a
 // piece's end and whole in the next is the whole, labels kept apart where
-// spans only touch, and of one label joined.
+// spans only touch, and of one label joined, as sure as the surer.
 func TestMergeAcrossPieces(t *testing.T) {
 	email := func(s, e int) redact.Found { return redact.Found{Start: s, End: e, Label: "private_email"} }
+	sure := email(209, 222)
+	sure.Score = .99
 	got := merge([]redact.Found{
 		person(100, 105), person(10, 15), person(100, 105), // twice, from two pieces
 		person(200, 205), person(200, 211), // cut by a piece's end, whole in the next
-		email(209, 222),                   // runs into the name: one, the longer's label
+		sure,                              // runs into the name: one, the longer's label
 		person(300, 305), email(305, 310), // touching, two labels
 		person(400, 405), person(405, 410), // touching, one label
 	})
-	want := []redact.Found{person(10, 15), person(100, 105), email(200, 222), person(300, 305), email(305, 310), person(400, 410)}
+	joined := email(200, 222)
+	joined.Score = sure.Score
+	want := []redact.Found{person(10, 15), person(100, 105), joined, person(300, 305), email(305, 310), person(400, 410)}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("merge =\n%v\nwant\n%v", got, want)
 	}
@@ -153,6 +186,7 @@ func TestLongTextKeepsPiecesWhenStopped(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := findAsync(ctx, text)
+	waitForStart(t, log)
 	waitFor(t, "a first piece asked", func() bool { return len(fakeLines(t, log, "request")) >= 1 })
 	cancel()
 	if r := <-c; r.err == nil {
@@ -174,6 +208,7 @@ func TestShortRequestGoesBetweenPieces(t *testing.T) {
 	text := numbered(1500)
 	n := len(pieces(text))
 	long := findAsync(context.Background(), text)
+	waitForStart(t, log)
 	waitFor(t, "a first piece asked", func() bool { return len(fakeLines(t, log, "request")) >= 1 })
 	short := findAsync(context.Background(), "hi Alice")
 	var r found
@@ -197,5 +232,111 @@ func TestShortRequestGoesBetweenPieces(t *testing.T) {
 	}
 	if len(reqs) != n+1 || at < 1 || at >= n {
 		t.Fatalf("the short request was request %d of %d (%d pieces)", at, len(reqs), n)
+	}
+}
+
+// prose is about n bytes of lines of varied length, as a system prompt's
+// are, each its own.
+func prose(n int) string {
+	words := []string{"the", "agent", "reads", "files", "before", "it", "edits", "them,", "and", "runs", "tests", "on", "mote", "when", "Alice", "asks."}
+	var b strings.Builder
+	x := uint32(7)
+	for line := 0; b.Len() < n; line++ {
+		fmt.Fprintf(&b, "%d.", line)
+		x = x*1664525 + 1013904223
+		for w := range 4 + x>>27 {
+			x = x*1664525 + 1013904223
+			b.WriteString(" " + words[(x>>20+uint32(w))%uint32(len(words))])
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// wangwu25685333 on X (10-29): every fresh session of an agent sends its
+// system prompt again, a line of it changed (a date, a memory, a file in
+// its workspace), and the model reads again only the pieces around that
+// line, not every piece after it.
+func TestEditedTextReadsItsPiecesAgainOnly(t *testing.T) {
+	text := prose(40 << 10)
+	for at := 500; at < 20000; at += 1499 {
+		for _, ins := range []string{"x", "Conversation started: Thursday, October 29", "memory: the user likes tea\n", strings.Repeat("y ", 300)} {
+			at := strings.IndexByte(text[at:], '\n') + at + 1
+			edited := text[:at] + ins + text[at:]
+			r := newReader(t, guardChunk)
+			if _, err := r.find(context.Background(), []string{text}); err != nil {
+				t.Fatal(err)
+			}
+			r.asked = nil
+			got, err := r.find(context.Background(), []string{edited})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := alices(edited)
+			for i := range got[0] {
+				if i < len(want) && (got[0][i].Start != want[i].Start || got[0][i].End != want[i].End) {
+					t.Fatalf("edit at %d: span %d %v, want %v", at, i, got[0][i], want[i])
+				}
+			}
+			if len(got[0]) != len(want) {
+				t.Fatalf("edit at %d: found %d, want %d", at, len(got[0]), len(want))
+			}
+			read, _ := r.bytes()
+			if read > 3*guardChunk {
+				t.Fatalf("%q at %d of %d bytes: %d bytes read again, want at most 3 pieces' (%d)", ins, at, len(text), read, 3*guardChunk)
+			}
+		}
+	}
+}
+
+// wangwu25685333 on X (10-29): an address on 400 lines alike was found by
+// the model on every line, sure (0.90) on some and unsure (0.50) on most,
+// so masking left most as they were. A value found sure once in a text is
+// sure wherever it is found again there, in one piece or many; one never
+// found sure stays unsure, and a short one (a house number) isn't looked
+// for.
+func TestValueFoundSureOnceIsSureThroughoutItsText(t *testing.T) {
+	addr, other, short := "1600 Amphitheatre Parkway", "Elm Street 42", "1600"
+	r := newReader(t, guardChunk)
+	r.classify = func(texts []string) ([][]redact.Found, error) {
+		out := make([][]redact.Found, len(texts))
+		for i, s := range texts {
+			for v, score := range map[string]float64{addr: .5, other: .5, short: .5} {
+				for at := 0; ; {
+					j := strings.Index(s[at:], v)
+					if j < 0 {
+						break
+					}
+					f := redact.Found{Start: at + j, End: at + j + len(v), Label: "private_address", Score: score}
+					if v == addr && at == 0 && strings.HasPrefix(s, "sure ") || v == short && at == 0 {
+						f.Score = .9 // the model's first in each read
+					}
+					if v != short || f.Score == .9 {
+						out[i] = append(out[i], f)
+					}
+					at += j + len(v)
+				}
+			}
+		}
+		return out, nil
+	}
+	line := "Please ship it to " + addr + ", or to " + other + " by Friday. Room 1600.\n"
+	for _, text := range []string{"sure " + strings.Repeat(line, 3), "sure " + strings.Repeat(line, 400)} {
+		got, err := r.find(context.Background(), []string{text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := map[string]int{}
+		for _, f := range got[0] {
+			v := text[f.Start:f.End]
+			if v == addr && f.Score != .9 || v == other && f.Score != .5 {
+				t.Fatalf("%d bytes: %q at %d scored %.2f", len(text), v, f.Start, f.Score)
+			}
+			n[v]++
+		}
+		lines := strings.Count(text, "\n")
+		if n[addr] != lines || n[other] != lines || n[short] > len(cut(text, guardChunk)) {
+			t.Fatalf("%d bytes, %d lines: found %v", len(text), lines, n)
+		}
 	}
 }

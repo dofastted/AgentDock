@@ -14,6 +14,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +30,8 @@ var keyAllowances struct {
 
 type keyAllowance struct {
 	a       Allowance
-	at      time.Time // when read; zero to read again at the next ask
+	aAt     time.Time // when a was read, for a window that started again
+	at      time.Time // when last read, either way; zero to read again at the next ask
 	loading bool
 	// stale: made stale (StaleKeyAllowance) while a reading was out, which
 	// was asked before the key said it was out and is followed by another
@@ -62,8 +64,71 @@ func readsKeyWindows(p Provider) bool {
 	if sub2APIKeyLimits(p) {
 		return true
 	}
-	_, ok := planQuotaSourceOf(p)
-	return ok
+	if _, ok := planQuotaSourceOf(p); ok {
+		return true
+	}
+	return accountPlanOf(p) != ""
+}
+
+// accountPlanOf is which plan p's key is on whose windows the key's
+// account tells, not the key: Volcengine Ark's Coding and Agent Plans and
+// Tencent Cloud's Token Plan Enterprise and Alibaba Cloud's Token Plan, read
+// with the account's access key (volcengine_usage.go, tencent_usage.go,
+// alibaba_usage.go), and StepFun's Step Plan,
+// read with magpie's sign-in to its platform (stepfun_plan.go). The
+// Usage page had their windows while routing had none, and the Routing
+// page said "one key" of a plan with them (chen on Discord). "" for any
+// other key, or one whose access key magpie isn't given; said without
+// asking anything or reading a file, as a request routes by it.
+func accountPlanOf(p Provider) string {
+	if p.Account != nil || p.Key == "" {
+		return ""
+	}
+	keyed := p.AccessKeyID != "" && p.SecretAccessKey != ""
+	if _, _, _, ok := volcPlanOf(p); ok && keyed {
+		return "volc"
+	}
+	if _, ok := tencentPlanRegion(p); ok && keyed {
+		return "tencent"
+	}
+	if _, ok := aliPlanSite(p); ok && keyed {
+		return "alibaba"
+	}
+	if StepFunSite(p) != "" {
+		return "stepfun"
+	}
+	return ""
+}
+
+// accountPlanWindows reads q's account's plan windows, as its card on the
+// Usage page reads them. A Tencent account with several team plans has
+// no windows here: which one a key is of isn't told.
+func accountPlanWindows(ctx context.Context, q Provider) (keyReading, error) {
+	var c SubscriptionQuota
+	switch accountPlanOf(q) {
+	case "volc":
+		action, plan, region, _ := volcPlanOf(q)
+		c = volcPlanQuota(q.Via(ctx), q, action, plan, region)
+	case "tencent":
+		region, _ := tencentPlanRegion(q)
+		cs := tencentPlanCards(ctx, q, region, time.Now)
+		if len(cs) != 1 {
+			return keyReading{}, nil
+		}
+		c = cs[0]
+	case "alibaba":
+		site, _ := aliPlanSite(q)
+		c = aliPlanQuota(q.Via(ctx), q, site)
+	case "stepfun":
+		if !StepFunSignedIn(q.ID) {
+			return keyReading{}, nil
+		}
+		c = stepPlanQuota(q.Via(ctx), q)
+	}
+	if c.Error != "" {
+		return keyReading{}, errors.New(c.Error)
+	}
+	return keyReading{ws: c.Windows, plan: c.Plan}, nil
 }
 
 func keyAllowanceID(p Provider) string { return p.ID + "#" + keyID(p.Key) }
@@ -113,7 +178,8 @@ func KeyAllowance(p Provider) (Allowance, bool) {
 	// last till the user asks, or the key says it is out (#1518)
 	if !e.loading && time.Since(e.at) > age && (e.refused || !readsAsked()) {
 		e.loading = true
-		go readKeyAllowance(p, id, c.gen)
+		gen := c.gen
+		goRead(func() { readKeyAllowance(p, id, gen) })
 	}
 	return e.a, len(e.a) > 0
 }
@@ -142,29 +208,42 @@ func readKeyAllowance(p Provider, id string, gen int) {
 		return // forgotten while it was read: read again
 	}
 	e.loading, e.at = false, now
-	renewed := err == nil && e.keep(allowanceOf(ws, now), SpentShareOf(p.Routing), now)
+	var renewed, started bool
+	if err == nil {
+		renewed, started = e.keep(allowanceOf(ws, now), SpentShareOf(p.Routing), now)
+	}
 	if err == nil {
 		r.at, r.seq = now, seq
 		e.read = r
 	}
 	if e.stale {
 		e.stale, e.loading, e.at = false, true, time.Time{}
-		go readKeyAllowance(p, id, gen)
+		goRead(func() { readKeyAllowance(p, id, gen) })
 	}
 	c.Unlock()
 	if renewed {
 		tellRenewed("", id)
 	}
+	if started {
+		tellStarted("", id)
+	}
 }
 
 // keep has the key go by a, read at now, and says whether a window it
 // was full in (at share, as routing counts it full) is full no more, or
-// till sooner: its limit raised, its usage reset, or the window started
-// again.
-func (e *keyAllowance) keep(a Allowance, share float64, now time.Time) (renewed bool) {
-	was := e.a.Full("", share, now)
-	e.a, e.at = a, now
-	return was.After(a.Full("", share, now))
+// till sooner — its limit raised, its usage reset, or the window started
+// again — and whether one stands started again in fact, its reset gone
+// by or a new, later cycle (what the vendor itself timed waits for,
+// #2718).
+func (e *keyAllowance) keep(a Allowance, share float64, now time.Time) (renewed, started bool) {
+	old, wasAt := e.a, e.aAt
+	was := old.Full("", share, now)
+	e.a, e.aAt = a, now
+	if was.After(a.Full("", share, now)) {
+		renewed = true
+	}
+	started = a.startedAgain(old, wasAt, share, now)
+	return renewed, started
 }
 
 // keyWindows asks the vendor for p's key's windows, as the key's card
@@ -179,12 +258,17 @@ func keyWindows(ctx context.Context, p Provider) (keyReading, error) {
 	}
 	var r keyReading
 	var err error
+	if accountPlanOf(q) != "" && !sub2APIKeyLimits(q) {
+		if _, ok := planQuotaSourceOf(q); !ok {
+			return accountPlanWindows(ctx, q)
+		}
+	}
 	if src, ok := planQuotaSourceOf(q); ok && !sub2APIKeyLimits(q) {
 		r.plan, r.ws, _, err = planKeyWindows(q.Via(ctx), q, src, q.Key)
 		return r, err
 	}
 	var parts []BalancePart
-	r.balance, parts, r.split, r.ws, _, err = balanceRead(ctx, q)
+	r.balance, parts, r.split, r.ws, _, _, err = balanceRead(ctx, q)
 	r.parts = cardParts(parts)
 	return r, err
 }
@@ -192,6 +276,23 @@ func keyWindows(ctx context.Context, p Provider) (keyReading, error) {
 // keyCardTag is what p's key's card is kept on disk by (keepLast): its
 // plan's card, or its balance's.
 func keyCardTag(p Provider) string {
+	if _, ok := planQuotaSourceOf(p); !ok && !sub2APIKeyLimits(p) {
+		// an account's plan is its own card, never a key's
+		// (withKeyReadings): Volcengine's the access key's plan's
+		// (volcPlanQuotas), named for the first provider on it
+		switch accountPlanOf(p) {
+		case "volc":
+			action, _, _, _ := volcPlanOf(p)
+			return keyTag("volc "+action, p.AccessKeyID)
+		case "tencent":
+			return keyTag("tencent", p.AccessKeyID)
+		case "alibaba":
+			site, _ := aliPlanSite(p)
+			return keyTag("alibaba "+site.region, p.AccessKeyID)
+		case "stepfun":
+			return keyTag("stepfun", p.ID)
+		}
+	}
 	if _, ok := planQuotaSourceOf(p); ok && !sub2APIKeyLimits(p) {
 		return keyTag("plan", p.Key)
 	}
@@ -229,10 +330,14 @@ func noteKeyAllowance(p Provider, ws []QuotaWindow, now time.Time) {
 		e = &keyAllowance{}
 		c.m[id] = e
 	}
-	renewed := e.keep(allowanceOf(ws, now), SpentShareOf(p.Routing), now)
+	renewed, started := e.keep(allowanceOf(ws, now), SpentShareOf(p.Routing), now)
+	e.at = now
 	c.Unlock()
 	if renewed {
 		tellRenewed("", id)
+	}
+	if started {
+		tellStarted("", id)
 	}
 }
 

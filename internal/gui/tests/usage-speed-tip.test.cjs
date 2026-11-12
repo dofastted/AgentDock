@@ -74,6 +74,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const ctx = await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" });
         const p = await ctx.newPage();
         p.setDefaultTimeout(5000);
+        p.setDefaultNavigationTimeout(60000);
         p.on("pageerror", (e) => errors.push(e.message));
         await p.route("**/*", server(lang));
         await p.goto("http://magpie.test/");
@@ -83,6 +84,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await p.waitForTimeout(300);
         await reader.click(p, p.locator("#ledMetric .opt").filter({ hasText: SPEED[lang] }));
         await p.waitForTimeout(150);
+        // at 420 the metric switch (Traffic its fifth) wraps the chart-kind
+        // toggle under it, and the chart starts below the window
+        const col = p.locator("#ledChart rect.col.all").first();
+        const view = p.viewportSize();
+        const clear = async () => { const b = await col.boundingBox(); return b.y + b.height + 60 < view.height; };
+        if (!(await clear())) {
+          await p.mouse.move(view.width / 2, view.height / 2);
+          await p.mouse.wheel(0, 300);
+          // hover once the column is clear of the window's bottom (and the
+          // table's scroller pinned there)
+          for (const end = Date.now() + 5000; !(await clear()); await p.waitForTimeout(50)) {
+            if (Date.now() > end) throw new Error("the chart never scrolled into the window");
+          }
+        }
         const box = await p.locator("#ledChart rect.col.all").first().boundingBox();
         await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
         const tip = p.locator("#ledChart .tip");

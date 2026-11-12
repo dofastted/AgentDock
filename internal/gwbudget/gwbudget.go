@@ -34,6 +34,13 @@ type Limiter interface {
 	Reserve(who access.Identity, body int64, model string, now time.Time) (release func(), refused Refusal)
 }
 
+// Spender is a Limiter that can tell which of a key's limits of some
+// models (access.Limit.Models) have nothing left: the gateway leaves
+// their models out of the request's candidates (access.Identity.Spent).
+type Spender interface {
+	Spent(who access.Identity, now time.Time) []access.SpentScope
+}
+
 var (
 	mu       sync.Mutex
 	limiters []*Limiter
@@ -104,7 +111,7 @@ var ErrUnlimited = errors.New("this gateway key is held to a limit, but magpie's
 // so a limit set a moment ago turns the plugin on for the request that
 // needs it. Fail closed.
 func Limiting(who access.Identity) (Limiter, error) {
-	if who.KeyID == "" || len(who.Limits()) == 0 {
+	if !who.Limited() {
 		return nil, nil
 	}
 	l, f := served()

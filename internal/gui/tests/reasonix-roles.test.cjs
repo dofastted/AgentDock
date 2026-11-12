@@ -21,6 +21,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         const page = await browser.newPage({ viewport: { width: mode === "panel" ? 440 : 1000, height: mode === "panel" ? 560 : 700 } });
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const fields = [
@@ -32,7 +33,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const roleText = { executor: "执行模型", planner: "规划模型" };
         const labelText = (l) => (lang === "zh" ? roleText[l] : l);
         const posts = [];
-        const state = () => ({ agents: [{ id: "reasonix", name: "Reasonix Studio", icon: "reasonix-color", path: "/fixture/config.toml", wired: fields.some((f) => f.value.startsWith("magpie/")), fields }], profiles: [], settings: { lang, theme: "light" } });
+        const state = () => ({ agents: [{ id: "reasonix", name: "Reasonix Studio", icon: "reasonix-color", path: "/fixture/config.toml", wired: fields.some((f) => f.value.startsWith("magpie/")), fields }], profiles: [], settings: { lang, theme: "light", guideHidden: true } });
         await page.addInitScript(() => localStorage.setItem("magpie.modelFavorites", '["a/pro"]'));
         await page.route("**/*", async (route) => {
           const url = new URL(route.request().url());

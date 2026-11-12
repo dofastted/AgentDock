@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -33,10 +34,38 @@ type Limit struct {
 	// the same window doesn't count. Zero for a calendar limit never
 	// reset, as every limit from before #1509 is.
 	Since time.Time `json:"since,omitzero"`
+	// Models scope the limit to some models (zola_xynb on X: a cap for
+	// one model or one provider under one key): "<provider>/<model>" or
+	// "<provider>/*", as a key's models are written. The limit counts
+	// only the key's calls a model of them answered, and holds only
+	// requests that would go to one: a routing group goes on to its
+	// members outside it. None, the whole key, as every limit from
+	// before this.
+	Models []string `json:"models,omitempty"`
+}
+
+// Scoped: l counts only some models' calls (Limit.Models).
+func (l *Limit) Scoped() bool { return l != nil && len(l.Models) > 0 }
+
+// Scope is l's models as one string, the same for the same models in any
+// order or letter case; "" for the whole key.
+func (l *Limit) Scope() string {
+	if !l.Scoped() {
+		return ""
+	}
+	ms := make([]string, len(l.Models))
+	for i, m := range l.Models {
+		ms[i] = strings.ToLower(m)
+	}
+	slices.Sort(ms)
+	return strings.Join(ms, ",")
 }
 
 // MaxLimits is how many limits one key can have (#2227).
 const MaxLimits = 5
+
+// MaxLimitModels is how many models one limit can count.
+const MaxLimitModels = 50
 
 // Limits are k's limits, its Limit first; none for a key with no limit.
 // Each holds the key on its own: a request passes only while all of them
@@ -88,8 +117,18 @@ func (l *Limit) sameWindow(o *Limit) bool {
 	return l.Period == o.Period && l.Days == o.Days && l.Hours == o.Hours
 }
 
+// sameLimit: l and o count the same calls in the same window, so a key
+// with both would have one limit twice. Limits of other models in one
+// window are each their own.
+func (l *Limit) sameLimit(o *Limit) bool {
+	return l.sameWindow(o) && l.Scope() == o.Scope()
+}
+
 // Periods are the windows a limit can be set for.
-var Periods = []string{"day", "week", "month", "days", "hours"}
+//
+// "total" never resets by the calendar: it counts from when it was set,
+// or last reset, and only a reset starts it again.
+var Periods = []string{"day", "week", "month", "days", "hours", "total"}
 
 // MaxDays is the longest "days" cycle, ten years.
 const MaxDays = 3650
@@ -129,7 +168,7 @@ func (l *Limit) Valid() (*Limit, error) {
 		v.Period = "day"
 	}
 	switch v.Period {
-	case "day", "week", "month":
+	case "day", "week", "month", "total":
 		v.Days, v.Hours = 0, 0
 	case "days":
 		v.Hours = 0
@@ -142,14 +181,27 @@ func (l *Limit) Valid() (*Limit, error) {
 			return nil, fmt.Errorf("A limit's cycle is a whole number of hours from 1 to %d", MaxHours)
 		}
 	default:
-		return nil, errors.New("A limit's period is day, week, month, every N days or every N hours")
+		return nil, errors.New("A limit's period is day, week, month, total, every N days or every N hours")
 	}
 	v.Cost = math.Round(v.Cost*1e4) / 1e4
+	ms, err := CleanModels(v.Models)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range ms {
+		if strings.HasPrefix(strings.ToLower(m), "group/") || strings.HasPrefix(strings.ToLower(m), "auto/") {
+			return nil, errors.New("A limit counts models or providers, like openai/* or openai/gpt-5, not a routing group: " + m)
+		}
+	}
+	if len(ms) > MaxLimitModels {
+		return nil, fmt.Errorf("A limit can count at most %d models", MaxLimitModels)
+	}
+	v.Models = ms
 	return &v, nil
 }
 
 // Per is the window as a sentence ends it: "day", "week", "month",
-// "10-day cycle" or "5-hour cycle".
+// "total", "10-day cycle" or "5-hour cycle".
 func (l *Limit) Per() string {
 	switch l.Period {
 	case "days":
@@ -160,12 +212,18 @@ func (l *Limit) Per() string {
 	return l.Period
 }
 
+// Counts says a call model answered ("<provider>/<model>") counts toward
+// l: every call for a limit of the whole key.
+func (l *Limit) Counts(model string) bool {
+	return !l.Scoped() || ModelAllowed(l.Models, model)
+}
+
 // sinceOf is the Since a limit set as next keeps, with prev the key's
 // limit before: its own while the period and cycle stay the same (a new
 // cap doesn't restart the window), else a new cycle from now for "days"
-// and "hours", and none for a calendar period.
+// and "hours" and for "total", and none for a calendar period.
 func sinceOf(prev, next *Limit, now time.Time) time.Time {
-	cyclic := next.cycle() > 0
+	cyclic := next.cycle() > 0 || next.Period == "total"
 	if prev != nil && prev.Period == next.Period && prev.Days == next.Days && prev.Hours == next.Hours && (!cyclic || !prev.Since.IsZero()) {
 		return prev.Since
 	}
@@ -186,6 +244,16 @@ var epoch = time.Unix(0, 0)
 // in it.
 func (l *Limit) Window(now time.Time) (start, reset time.Time) {
 	loc := now.Location()
+	if l.Period == "total" {
+		// counted from when it was set or reset (a hand-written one with
+		// no Since, from the epoch), and never ends: the reset a refusal
+		// names is a hundred years off
+		start = l.Since
+		if start.Before(epoch) {
+			start = epoch
+		}
+		return start.In(loc), start.AddDate(100, 0, 0).In(loc)
+	}
 	if n := l.cycle(); n > 0 {
 		anchor := l.Since
 		if anchor.Before(epoch) {

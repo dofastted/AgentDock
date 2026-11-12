@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,10 +38,14 @@ func fakeClaudeUsage(t *testing.T, out *atomic.Value, fail *atomic.Bool) *atomic
 	claudeUsageWait = func() time.Duration { return usageTestWait }
 	claudeUsedSince = func(time.Time) bool { return true }
 	claudeAsked.Store(0)
+	// no refresh of every allowance (AskEveryClaudeUsage) left from
+	// another test
+	claudeEveryAsked.Store(0)
 	claudeUsage.Lock()
 	claudeUsage.m = nil
 	claudeUsage.Unlock()
 	t.Cleanup(func() {
+		claudeEveryAsked.Store(0)
 		UsageClaudeVia(old)
 		claudeBase, claudeUsageWait, claudeUsedSince = oldBase, oldWait, oldUsed
 		claudeAsked.Store(oldAsked)
@@ -183,6 +188,52 @@ What's contributing to your limits usage?
 	}
 	if _, err := parseClaudeUsage("Error: not logged in", now); err == nil {
 		t.Fatal("nothing told, no error")
+	}
+}
+
+func TestParseClaudeUsageCountsSayRequests(t *testing.T) {
+	now := time.Date(2026, 10, 1, 4, 0, 0, 0, time.UTC)
+	// /usage closes with the account's local activity. A count of 401 or
+	// 403 is not the HTTP status it reads as (SCIYYDy, #4995)
+	text := `Current session: 48% used
+Current week (all models): 57% used
+
+What's contributing to your usage?
+Approximate · sessions on this machine only · shares overlap
+
+Last 24h · 291 requests · 276 sessions
+Last 7d · 403 requests · 388 sessions`
+	ws, err := parseClaudeUsage(text, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ws) != 2 {
+		t.Fatalf("windows %+v", ws)
+	}
+	if ws[0].Name != "5 hours" || ws[0].Used != 48 {
+		t.Errorf("session: %+v", ws[0])
+	}
+	if ws[1].Name != "7 days" || ws[1].Used != 57 {
+		t.Errorf("week: %+v", ws[1])
+	}
+	// another span, and a count past a thousand written with separators
+	if ws, err := parseClaudeUsage("Current session: 48% used\nLast 30d · 1,403 requests · 1,401 sessions", now); err != nil || len(ws) != 1 {
+		t.Fatalf("a separated count: %+v %v", ws, err)
+	}
+	// a count alone tells no windows: unknown, not denied
+	if _, err := parseClaudeUsage("Last 24h · 401 requests · 403 sessions", now); err == nil || !strings.Contains(err.Error(), "no usage figures") || claudeUsageDenied.MatchString(err.Error()) {
+		t.Fatalf("counts: %v", err)
+	}
+	// a denial still reads as one: on its own line, with the account's
+	// windows around it, or on a count line that says more
+	for _, line := range []string{
+		"Error: HTTP 401 Unauthorized",
+		"Last 7d · 403 requests · 388 sessions · HTTP 403 Forbidden",
+		"Last 24h · 291 requests · 276 sessions\nError: authentication failed",
+	} {
+		if _, err := parseClaudeUsage("Current session: 48% used\n"+line, now); err == nil {
+			t.Errorf("%q: no error", line)
+		}
 	}
 }
 
@@ -447,4 +498,38 @@ func soon(n int) string { return time.Now().UTC().AddDate(0, 0, n).Format("Jan 2
 // five hours.
 func sessionReset() string {
 	return time.Now().UTC().Add(3*time.Hour).Format("Jan 2 at 3:04pm") + " (UTC)"
+}
+
+// A first reading that failed is tried again after the wait even when
+// Claude Code wasn't used since: with nothing kept, an account whose
+// Claude Code is never run through magpie showed "not read" for good.
+func TestClaudeFirstReadFailureTriedAgain(t *testing.T) {
+	var out atomic.Value
+	out.Store("Current session: 40% used · resets " + sessionReset() + "\nCurrent week (all models): 10% used · resets " + soon(3) + " at 2pm (UTC)\n")
+	var fail atomic.Bool
+	runs := fakeClaudeUsage(t, &out, &fail)
+	claudeUsedSince = func(time.Time) bool { return false }
+	ctx := context.Background()
+	fail.Store(true)
+	if _, err := claudeWindows(ctx, "me@x", true); err == nil || runs.Load() != 1 {
+		t.Fatalf("a failing first read: %v, %d runs", err, runs.Load())
+	}
+	// before the wait is up it is not run again
+	if _, err := claudeWindows(ctx, "me@x", true); err == nil || runs.Load() != 1 {
+		t.Fatalf("before the wait: %v, %d runs", err, runs.Load())
+	}
+	claudeUsage.Lock()
+	e := claudeUsage.m["me@x"]
+	e.tried = e.tried.Add(-time.Hour)
+	claudeUsage.m["me@x"] = e
+	claudeUsage.Unlock()
+	fail.Store(false)
+	ws, err := claudeWindows(ctx, "me@x", true)
+	if err != nil || len(ws) == 0 || runs.Load() != 2 {
+		t.Fatalf("after the wait: %v %v, %d runs", ws, err, runs.Load())
+	}
+	// and once read, it is kept without another run
+	if _, err := claudeWindows(ctx, "me@x", true); err != nil || runs.Load() != 2 {
+		t.Fatalf("kept: %v, %d runs", err, runs.Load())
+	}
 }

@@ -105,7 +105,9 @@ func RunIn(m *testing.M, setup func(home string)) int {
 // Isolate points the home and the config, cache and data folders into a
 // new temporary folder, clears the agents' variables, puts the stand-ins
 // first on PATH and gives the folder. It fails when Go would still
-// resolve any of them, or a stand-in's tool, outside that folder.
+// resolve any of them, or a stand-in's tool, outside that folder. The
+// system's config folders ($XDG_CONFIG_DIRS, /etc/xdg when unset), where
+// a package keeps its autostart entry (#3372), are one in it too.
 func Isolate() (string, error) {
 	home, err := os.MkdirTemp("", prefix)
 	if err != nil {
@@ -114,6 +116,7 @@ func Isolate() (string, error) {
 	for k, v := range map[string]string{
 		"HOME": home, "USERPROFILE": home,
 		"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+		"XDG_CONFIG_DIRS": filepath.Join(home, "etc", "xdg"),
 		"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
 		"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
 		"XDG_STATE_HOME":  filepath.Join(home, ".local", "state"),
@@ -131,6 +134,9 @@ func Isolate() (string, error) {
 		}
 	}
 	ClearProxy()
+	if err := dropWindowsPath(); err != nil {
+		return "", err
+	}
 	if err := inertTools(home); err != nil {
 		return "", err
 	}
@@ -187,8 +193,12 @@ func SetHome(t testing.TB, dir string) {
 
 // tools are the programs a test must never reach for real: the system
 // keychains (macOS' security, Linux's secret-tool), which hold the user's
-// sign-ins outside any home, and the agents' CLIs.
-var tools = []string{"security", "secret-tool", "claude", "codex", "cursor-agent", "devin", "grok", "kiro-cli"}
+// sign-ins outside any home, the agents' CLIs, and wsl.exe, which opens
+// the WSL distros' homes: a home of its own doesn't cover those, and a
+// test on Windows listed the real distro's Codex sessions beside its
+// fixtures (#4177). A test of the real WSL puts System32 before the
+// stand-in itself.
+var tools = []string{"security", "secret-tool", "claude", "codex", "cursor-agent", "devin", "grok", "kiro-cli", "wsl.exe"}
 
 // inertTools puts a failing stand-in for each of tools first on PATH, in
 // home/bin. Tests can still put their own fakes before it.
@@ -201,6 +211,47 @@ func inertTools(home string) error {
 		return err
 	}
 	return os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// dropWindowsPath takes Windows' folders off PATH in WSL. WSL's interop
+// appends them (/mnt/c/Windows/System32, …\VS Code\bin and the rest)
+// over 9P, where a stat takes milliseconds, and a test binary takes the
+// PATH folders' stamp again at every look (proc's lookFreshInTests): a
+// `magpie <agent> <field>` run looked for each agent's command through
+// them, and internal/cli's TestEveryAgentFieldNameWritesNothing ran past
+// 40 minutes in the magpie-desktop distro (0.3s without them). They
+// also hold the machine's own Windows programs, such as VS Code's `code`
+// script, which no Linux test is to find.
+func dropWindowsPath() error {
+	if runtime.GOOS != "linux" || !inWSL() {
+		return nil
+	}
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	kept := slices.DeleteFunc(slices.Clone(dirs), windowsDrive)
+	if len(kept) == len(dirs) {
+		return nil
+	}
+	return os.Setenv("PATH", strings.Join(kept, string(os.PathListSeparator)))
+}
+
+// inWSL is whether this Linux runs in WSL, with Windows' interop on.
+func inWSL() bool {
+	if os.Getenv("WSL_DISTRO_NAME") != "" || os.Getenv("WSL_INTEROP") != "" {
+		return true
+	}
+	_, err := os.Stat("/proc/sys/fs/binfmt_misc/WSLInterop")
+	return err == nil
+}
+
+// windowsDrive is whether dir is on a Windows drive WSL mounts:
+// /mnt/<letter> or below it.
+func windowsDrive(dir string) bool {
+	rest, ok := strings.CutPrefix(dir, "/mnt/")
+	if !ok || rest == "" {
+		return false
+	}
+	c := rest[0] | 0x20
+	return c >= 'a' && c <= 'z' && (len(rest) == 1 || rest[1] == '/')
 }
 
 // StandIns writes a failing program for each name in bin. On macOS each

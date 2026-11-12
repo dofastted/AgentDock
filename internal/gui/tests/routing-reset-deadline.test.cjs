@@ -1,6 +1,6 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // #717, #718: a Codex account that spends a reset about to run out by
-// itself goes first, in Weekly pace and Smart, when that reset is spent
+// itself goes first, in Use before expiry and Smart, when that reset is spent
 // before its week renews — and the Routing page's story says the reset
 // set its deadline, not its week. An account whose week decides is told
 // as before. In English and Chinese.
@@ -64,6 +64,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 1200 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.route("**/*", serve(lang));

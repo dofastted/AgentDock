@@ -10,6 +10,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // A relay can serve only the agents its plan is sold for, and tell them by
@@ -79,6 +82,11 @@ func (p Provider) TestsAs(client string) string {
 	}
 	if p.IsOpenCode() || p.IsCline() || p.IsKilo() {
 		return "its requests are asked as its own client already"
+	}
+	if p.IsVertex() && client == ClientCodex {
+		// Google's own endpoints, as Claude Code's are below: its chat
+		// completions serve the partner models alone
+		return "a test is asked as Codex only of a relay"
 	}
 	if clientProto(client, p.Speaks()) == "" {
 		if client == ClientClaudeCode {
@@ -175,12 +183,25 @@ func equalHeaders(a, b http.Header) bool {
 	return a != nil && maps.EqualFunc(map[string][]string(a), map[string][]string(b), slices.Equal[[]string])
 }
 
+// shapeParses counts client-shapes.json's parses (a test reads it).
+var shapeParses atomic.Int64
+
 // clientShape is the headers last seen from client, nil when it hasn't
-// come through.
+// come through. The file is parsed once until it changes: /api/providers
+// asks it of every relay a list shows, and read anew each time it was a
+// sixth of the list's CPU. A copy goes out, as a request's headers take
+// it.
 func clientShape(client string) http.Header {
-	clientShapes.Lock()
-	defer clientShapes.Unlock()
-	return readClientShapes(clientShapesPath())[client]
+	m, err := filememo.Read("client-shapes", clientShapesPath(), func(b []byte) (map[string]http.Header, error) {
+		shapeParses.Add(1)
+		m := map[string]http.Header{}
+		json.Unmarshal(b, &m)
+		return m, nil
+	})
+	if err != nil {
+		return nil
+	}
+	return m[client].Clone()
 }
 
 // clientHeaders puts client's headers on a test request: those last seen

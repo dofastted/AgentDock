@@ -3,20 +3,23 @@ package pii
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
-	"regexp"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/redact"
 )
@@ -32,9 +35,15 @@ type hello struct {
 
 // helper is one pf-serve running.
 type helper struct {
-	cmd    *exec.Cmd
-	in     io.WriteCloser
-	out    *bufio.Reader
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
+	// outf is out's end of the stdout pipe. It is magpie's, not
+	// cmd's: cmd.Wait closes a StdoutPipe as the process exits, so a
+	// read after a death got "read |0: file already closed" in place of
+	// the EOF that says pf-serve died, and the status showed that as why
+	// the GPU was lost (#3741). Closed by kill and end.
+	outf   *os.File
 	stderr *tail
 	hello  hello
 	exited chan struct{}
@@ -163,7 +172,15 @@ type candidate struct {
 // which runs on Metal; then pf-serve on the CPU, which runs anywhere.
 // macOS's was tried on Metal alone: one whose load hung there, or ended,
 // was tried again on Metal by every request (lazyeo, an M2).
+// A CPU without what pf-serve is built for runs pf-serve-base, on the
+// CPU alone: pf-serve-vulkan is built like pf-serve, and would end the
+// same way.
 func candidates(cpu bool) []candidate {
+	if !fullX86() {
+		if _, err := os.Stat(exe("pf-serve-base")); err == nil {
+			return []candidate{{exe("pf-serve-base"), true}}
+		}
+	}
 	var out []candidate
 	if !cpu {
 		if _, err := os.Stat(exe("pf-serve-vulkan")); err == nil {
@@ -180,6 +197,21 @@ func candidates(cpu bool) []candidate {
 func start(cpu bool, stop <-chan struct{}) (*helper, error) {
 	if !Installed() {
 		return nil, ErrNotInstalled
+	}
+	if !strings.HasSuffix(binDir(), "-"+target()) {
+		// only the Intel pf-serve under Rosetta, which may not start at
+		// all: Apple silicon's is fetched first, and one that can't be
+		// leaves the Intel one to try
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		ensureServe(ctx)
+		cancel()
 	}
 	upgrades.Add(1)
 	go func() {
@@ -219,7 +251,15 @@ var upgrades sync.WaitGroup
 var errStopped = errors.New("the local masking model was stopped")
 
 func startOne(path string, cpu bool, stop <-chan struct{}) (*helper, error) {
-	cmd := proc.Command(path, modelPath())
+	// pf-serve is given the model's name, run in its folder, and never
+	// the whole path: on Windows a C program's argv comes in the ANSI
+	// code page, where ggml's fopen reads UTF-8 and the GPU's weights
+	// are read again through a narrow ifstream, so a folder with a
+	// character outside ASCII (a Chinese user name in C:\Users) failed
+	// to load on every device, its error a path in mojibake. magpie's
+	// own names are ASCII.
+	cmd := proc.Command(path, modelName())
+	cmd.Dir = filepath.Dir(modelPath())
 	// Without GGML_METAL_NO_RESIDENCY, ggml's Metal residency set keeps a
 	// heartbeat that woke an idle pf-serve ~146 times a second for the 10
 	// minutes it stays up after a request, and macOS's Energy Impact
@@ -227,10 +267,14 @@ func startOne(path string, cpu bool, stop <-chan struct{}) (*helper, error) {
 	// second, and the first request after an idle spell takes 0.1-0.45s
 	// more (51-78ms hot either way).
 	cmd.Env = append(os.Environ(), "GGML_METAL_NO_RESIDENCY=1")
+	// PF_MOE_CHUNK is left at the engine's default (the window, 4096) on
+	// every device: on an RX 470 through Vulkan, interleaved A/B in one
+	// session read the same spans 6-9% faster at 4096 than at 2048 (#3682;
+	// the 1.77x once measured for 2048 was the machine's own 2x swing
+	// between runs hours apart), and on an M4 Pro's Metal 2048 was ~6%
+	// slower. A PF_MOE_CHUNK the user set is inherited through Environ.
 	if cpu {
 		cmd.Env = append(cmd.Env, "PF_DEVICE=cpu")
-	} else if v := moeChunk(path); v != "" {
-		cmd.Env = append(cmd.Env, "PF_MOE_CHUNK="+v)
 	}
 	wait := loadTimeout
 	if !cpu {
@@ -240,13 +284,19 @@ func startOne(path string, cpu bool, stop <-chan struct{}) (*helper, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := cmd.StdoutPipe()
+	out, w, err := os.Pipe()
 	if err != nil {
+		in.Close()
 		return nil, err
 	}
-	h := &helper{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 64<<10), stderr: &tail{}, exited: make(chan struct{})}
+	cmd.Stdout = w
+	h := &helper{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 64<<10), outf: out, stderr: &tail{}, exited: make(chan struct{})}
 	cmd.Stderr = h.stderr
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	// pf-serve has its own copy: once it exits, a read here sees EOF
+	w.Close()
+	if err != nil {
+		out.Close()
 		return nil, err
 	}
 	go func() {
@@ -274,32 +324,12 @@ func startOne(path string, cpu bool, stop <-chan struct{}) (*helper, error) {
 		if why == "" {
 			why = h.died()
 		}
+		// the name it was given ("failed to read GGUF: <name>"), as the
+		// path the user can find
+		why = strings.ReplaceAll(why, " "+modelName(), " "+modelPath())
 		return nil, fmt.Errorf("%s: %s", baseName(path), why)
 	}
 	return h, nil
-}
-
-// vulkanMoEChunk is the MoE's token chunk pf-serve-vulkan runs with
-// (privacy-filter.cpp's PF_MOE_CHUNK, src/model.cpp): the expert matmul
-// over a window's tokens in pieces of this many, exactly the same answer
-// either way. Its own default is the window, 4096. On an RX 470/580-class
-// GPU through Vulkan, 2048 read the same texts 1.77x faster at every size
-// from 24 KB to 480 KB (#3682: 480 KB in 90s, not 159s), and was the
-// fastest of 1024 to 3072. On Metal it is a little slower (an M4 Pro: 96
-// KB in 2.00s, 1.87s at 4096), so macOS's pf-serve keeps the default, and
-// the CPU's is the window either way.
-const vulkanMoEChunk = "2048"
-
-// moeChunk is the PF_MOE_CHUNK magpie gives the GPU's pf-serve at path:
-// pf-serve-vulkan's, unless the user set their own, which it inherits.
-func moeChunk(path string) string {
-	if _, set := os.LookupEnv("PF_MOE_CHUNK"); set {
-		return ""
-	}
-	if strings.TrimSuffix(baseName(path), ".exe") == "pf-serve-vulkan" {
-		return vulkanMoEChunk
-	}
-	return ""
 }
 
 func baseName(path string) string {
@@ -343,10 +373,14 @@ func (h *helper) died() string {
 
 // startup are the lines ggml writes as it starts, every time, on a GPU
 // and on the CPU alike: what the device is, the kernels it built.
-var startup = regexp.MustCompile(`^(ggml_metal_(device_init|library_init|init|free|library_compile_pipeline)|ggml_vulkan|load_backend|register_backend|register_device):`)
+var startup = lazyre.New(`^(ggml_metal_(device_init|library_init|init|free|library_compile_pipeline)|ggml_vulkan|load_backend|register_backend|register_device):`)
 
 // trouble is a line that says something went wrong, startup's or not.
-var trouble = regexp.MustCompile(`(?i)error|fail|assert|abort|unable|cannot|can't|could not|out of memory|exception|lost`)
+var trouble = lazyre.New(`(?i)error|fail|assert|abort|unable|cannot|can't|could not|out of memory|exception|lost`)
+
+// deviceLost is a GPU the driver reset under pf-serve, as ggml's Vulkan
+// says it (vk::DeviceLostError, VK_ERROR_DEVICE_LOST) and Metal's.
+var deviceLost = lazyre.New(`(?i)DeviceLost|device[ _]lost`)
 
 // lastSaid is the last n lines of stderr that say more than ggml's
 // startup, joined.
@@ -371,6 +405,7 @@ func (h *helper) kill() {
 		h.cmd.Process.Kill()
 	}
 	<-h.exited
+	h.outf.Close()
 }
 
 // Warm starts pf-serve in the background, where the model is on disk, so
@@ -381,7 +416,7 @@ func Warm() {
 		go func() {
 			turn <- struct{}{}
 			defer func() { <-turn }()
-			classify([]string{"warm"})
+			classifySafely(classify, []string{"warm"})
 		}()
 	}
 }
@@ -444,17 +479,21 @@ func end(h *helper) {
 	h.in.Close()
 	select {
 	case <-h.exited:
+		h.outf.Close()
 	case <-time.After(5 * time.Second):
 		h.kill()
 	}
 }
 
 // classify asks pf-serve, started if it isn't, what is in texts. One that
-// fails is ended and started again; one that died on the GPU is started
-// on the CPU, until the GPU is tried again. One that magpie ended on the
-// GPU for taking too long is started again on the GPU: a request too
-// slow for its time is no lost GPU. Twice in a row there is, and the CPU
-// is tried for the next. The caller holds turn.
+// fails is ended and started again. One that failed on the GPU is started
+// again on the GPU: one that died there is most often a GPU the driver
+// reset under it (vk::DeviceLostError, kongbai01203's after an idle
+// spell), which a new pf-serve gets a new device of, and one magpie ended
+// for taking too long had a request too slow for its time. Twice in a row
+// the GPU is lost, and the CPU is tried, until the GPU is tried again: at
+// once for one that died, and from the next request for one that hung,
+// whose request has waited twice already. The caller holds turn.
 func classify(texts []string) ([][]redact.Found, error) {
 	out, err := classifyTurn(texts)
 	srv.mu.Lock()
@@ -488,7 +527,7 @@ func heldBack() error {
 
 func classifyTurn(texts []string) ([][]redact.Found, error) {
 	var last error
-	for try := 0; try < 2; try++ {
+	for try := 0; try < 3; try++ {
 		srv.mu.Lock()
 		h, cpu, stop := srv.h, srv.cpu, stopCh()
 		var gone *helper
@@ -546,17 +585,19 @@ func classifyTurn(texts []string) ([][]redact.Found, error) {
 			h.kill()
 			return nil, errStopped
 		}
-		if h.hello.GPU {
-			if h.slow.Load() != nil && try == 0 {
-				// ended for taking too long: a slow request, or a
-				// GPU's hang that a new pf-serve gets past, is no lost
-				// GPU, and the try again is on the GPU
-			} else {
-				lostGPULocked(err.Error())
-			}
+		hung := h.slow.Load() != nil
+		if h.hello.GPU && try > 0 {
+			lostGPULocked(err.Error())
 		}
+		// else the try again is on the GPU: a GPU the driver reset
+		// (device lost), a crash, or a hang that a new pf-serve gets
+		// past, is no lost GPU yet
 		srv.mu.Unlock()
 		h.kill()
+		if try == 1 && (!h.hello.GPU || hung) {
+			// a third try only after the GPU died twice, on the CPU
+			break
+		}
 	}
 	return nil, fmt.Errorf("the local masking model failed: %w", last)
 }
@@ -621,6 +662,7 @@ func (h *helper) classify(texts []string) ([][]redact.Found, error) {
 	if _, err := h.in.Write(b.Bytes()); err != nil {
 		return nil, fmt.Errorf("pf-serve %s (%v)", h.died(), err)
 	}
+	beforeRead(h)
 	r := &reader{r: h.out}
 	status := r.u32()
 	if status == 1 {
@@ -638,9 +680,10 @@ func (h *helper) classify(texts []string) ([][]redact.Found, error) {
 		}
 		for j := 0; j < n && r.err == nil; j++ {
 			start, end := int32(r.u32()), int32(r.u32())
-			r.u32() // the score: pf-serve sends only those over its threshold
+			// pf-serve sends only those over its default threshold, 0.5: Floor
+			score := math.Float32frombits(r.u32())
 			label := string(r.bytes(int(r.u8())))
-			out[i] = append(out[i], redact.Found{Start: int(start), End: int(end), Label: label})
+			out[i] = append(out[i], redact.Found{Start: int(start), End: int(end), Label: label, Score: float64(score)})
 		}
 	}
 	if status != 0 && r.err == nil {
@@ -651,6 +694,10 @@ func (h *helper) classify(texts []string) ([][]redact.Found, error) {
 	}
 	return out, nil
 }
+
+// beforeRead runs between sending a request and reading its answer, for
+// a test to read after pf-serve has exited (TestGPUDeathReadAfterExit).
+var beforeRead = func(*helper) {}
 
 type reader struct {
 	r   *bufio.Reader

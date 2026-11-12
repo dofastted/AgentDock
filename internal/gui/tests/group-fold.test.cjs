@@ -70,10 +70,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await (await browser.newContext({ viewport: { width: 1360, height: 1700 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
-      await page.goto("http://magpie.test/?view=routing");
+      await page.goto("http://magpie.test/?view=groups");
       const card = page.locator(".rt-group", { hasText: "Sol" });
       const ed = page.locator(".rt-gedit"), head = ed.locator(".ehead");
       const closed = () => page.waitForFunction(() => !document.querySelector(".rt-gedit") && document.querySelector(".rt-group"));

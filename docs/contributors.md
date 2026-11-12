@@ -1,4 +1,4 @@
-# Community PRs: what is closed unreviewed, and who is blocked
+# Community PRs: what is closed unreviewed, who is credited, and who is blocked
 
 magpie merges community PRs through agents. Two things keep that from
 wearing the project down: a PR that could harm users is caught before any
@@ -34,6 +34,22 @@ Close with a short reason, without running it, a PR that:
 - is a resubmission of a PR closed for its idea, with nothing new to answer
   the reason it was closed;
 - is one of several near-identical PRs opened seconds apart.
+
+## Credit what a reporter gave
+
+PRs are open to collaborators only, so a reporter's fix often arrives in
+an issue. Whoever uses it credits it in the commit:
+
+- A fix branch on the reporter's fork is merged with their commits as they
+  are, authored by them. The look-for-harm check above applies to it
+  first. What has to change goes in a commit of our own on top, and the
+  issue says what changed and why.
+- A fix that uses the reporter's patch, test fixture, request body, error
+  text or root cause carries `Co-authored-by: <login> <email>` for them.
+  Use their noreply address, `<id>+<login>@users.noreply.github.com`
+  (`gh api users/<login> --jq .id`), when no other address is known.
+- A report that only says something is broken is named in the body
+  (`#<n>, <login>`), with no trailer.
 
 ## Blocking an author
 
@@ -81,6 +97,7 @@ reviewed, but more strictly than others:
 | Author | Evidence |
 | --- | --- |
 | lunar-me | #233, #234, #235 opened within 12 seconds, all rewriting `codex_prompt.md`, which is kept byte for byte. #590 resubmitted after the rejection. #592 broke a path in AGENTS.md. #590, #592 and #593 opened within 51 seconds. The same template across many repositories. |
+| muzimu217 (commits as blackEvil217) | plugins#601 (11-11) added a Doubao plugin the maintainer declined on 10-06 (it needs bot-detection evasion). It reads Doubao.app's HttpOnly session cookies over CDP, clicks through Doubao's reward campaigns and schedules throwaway jobs to earn credits ("anti-abuse hardening"), copies a .dmg from ~/Downloads into /Applications and pkills the app. It also adds a third-party relay (relay.mirasim.ai), which stops a review by itself. Closed unrun. |
 
 ### Watched
 

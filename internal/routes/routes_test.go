@@ -79,6 +79,29 @@ func TestSmart(t *testing.T) {
 	}
 }
 
+// Smart passes over a biggest window that can't be used up before it
+// renews any more (Seat.Unreached) and ranks the seat by the next: an
+// Agent Plan whose month renews in 15 days, its week tomorrow, goes before
+// a week renewing in three days once its month is out of reach (#5639),
+// and after it while the month isn't. An Unreached past Soon is harmless.
+func TestSmartPassesAnUnreachedWindow(t *testing.T) {
+	now := time.Now()
+	week := now.Add(3 * 24 * time.Hour)
+	plan := []time.Time{now.Add(15 * 24 * time.Hour), now.Add(24 * time.Hour), now.Add(5 * time.Hour)}
+	for _, c := range []struct {
+		unreached int
+		want      []string
+	}{{0, []string{"weekly", "plan"}}, {1, []string{"plan", "weekly"}}, {5, []string{"weekly", "plan"}}} {
+		s := []Seat{
+			{Key: "weekly", Used: 10, Soon: []time.Time{week, now.Add(5 * time.Hour)}},
+			{Key: "plan", Used: 8, Soon: plan, Unreached: c.unreached},
+		}
+		if got := keys(s, Apply(Smart, "p", s)); !slices.Equal(got, c.want) {
+			t.Errorf("unreached %d: %v, want %v", c.unreached, got, c.want)
+		}
+	}
+}
+
 func keys(s []Seat, order []int) []string {
 	out := make([]string, len(order))
 	for i, j := range order {
@@ -122,12 +145,81 @@ func TestLeastUsedAndOrdered(t *testing.T) {
 	}
 }
 
-// Weekly pace: the most of a week left per hour first; one running low
+// A seat that tells no share of its allowance — a pay-as-you-go key, a
+// prepaid wallet, an account whose use wasn't read — has Used read 0, and
+// by that 0 alone it went first, burning paid balance while subscription
+// quota sat idle (#4535). It goes after those whose share was told and has
+// room, and before those running low or spent, as Smart and Pace keep the
+// unknown; a learning account still goes first, once. Of the shareless, a
+// wallet goes by what it has left and a key by what magpie sent it lately.
+func TestLeastUsedSeatsWithNoShare(t *testing.T) {
+	now := time.Now()
+	sub := func(key string, used float64) Seat {
+		return Seat{Key: key, Known: true, Used: used, Soon: []time.Time{now.Add(48 * time.Hour)}}
+	}
+	key := Seat{Key: "key"} // a pay-as-you-go key: no window, so Used reads 0
+	s := []Seat{key, sub("sub", 5)}
+	if got := keys(s, Apply(LeastUsed, "p", s)); !slices.Equal(got, []string{"sub", "key"}) {
+		t.Fatalf("a key with no share went first: %v", got)
+	}
+	// a wallet has no share either, but what it has left still orders it
+	// behind a told share, and before a key that told nothing at all
+	wallet := Seat{Key: "wallet", Known: true, Left: 50, LeftIn: "prov\x00usd"}
+	s = []Seat{key, wallet, sub("sub", 5)}
+	if got := keys(s, Apply(LeastUsed, "p", s)); !slices.Equal(got, []string{"sub", "wallet", "key"}) {
+		t.Fatalf("wallet: %v, want [sub wallet key]", got)
+	}
+	// one running low or spent is kept for when the others can't, past a
+	// key: its share is nearly gone, but it isn't gone
+	s = []Seat{key, sub("fine", 5), sub("low", 92), sub("spent", 99)}
+	if got := keys(s, Apply(LeastUsed, "p", s)); !slices.Equal(got, []string{"fine", "key", "low", "spent"}) {
+		t.Fatalf("low and spent: %v, want [fine key low spent]", got)
+	}
+	// one learning goes first, once, as in Smart and Pace
+	learns := Seat{Key: "learns", Learns: true}
+	s = []Seat{key, learns, sub("sub", 5)}
+	if got := keys(s, Apply(LeastUsed, "p", s)); !slices.Equal(got, []string{"learns", "sub", "key"}) {
+		t.Fatalf("learns: %v, want [learns sub key]", got)
+	}
+	// those with a told share go by it as before
+	s = []Seat{sub("much", 80), sub("little", 10)}
+	if got := keys(s, Apply(LeastUsed, "p", s)); !slices.Equal(got, []string{"little", "much"}) {
+		t.Fatalf("told shares: %v, want [little much]", got)
+	}
+}
+
+// Use before expiry: the most of a week left per hour first; one running low
 // after, whatever its pace.
 func TestPace(t *testing.T) {
 	s := []Seat{{Key: "slow", Pace: 1}, {Key: "low", Used: 95, Pace: 50}, {Key: "fast", Pace: 10}}
 	if got := keys(s, Apply(Pace, "p", s)); !slices.Equal(got, []string{"fast", "slow", "low"}) {
 		t.Fatalf("pace: %v", got)
+	}
+}
+
+// A seat at 90% of its week alone (WeekLow) keeps its place in Smart and
+// Use before expiry: renewing sooner, or with more per hour to lose, it
+// goes ahead of one with room (ysicing_01858 on Discord). Least used first
+// still puts it by its share; at 98% it is all but used up in every one.
+func TestWeekLowKeepsItsPlace(t *testing.T) {
+	now := time.Now()
+	s := []Seat{
+		{Key: "room", Known: true, Used: 30, Soon: []time.Time{now.Add(48 * time.Hour)}, Pace: 70.0 / 48},
+		{Key: "week", Known: true, Used: 91, WeekLow: true, Soon: []time.Time{now.Add(3 * time.Hour)}, Pace: 3},
+	}
+	for name, st := range map[string]Strategy{"smart": Smart, "pace": Pace} {
+		if got := keys(s, Apply(st, "p", s)); !slices.Equal(got, []string{"week", "room"}) {
+			t.Errorf("%s: %v, want [week room]", name, got)
+		}
+	}
+	if got := keys(s, Apply(LeastUsed, "p", s)); !slices.Equal(got, []string{"room", "week"}) {
+		t.Errorf("least used: %v, want [room week]", got)
+	}
+	s[1].Used = 98
+	for name, st := range map[string]Strategy{"smart": Smart, "pace": Pace} {
+		if got := keys(s, Apply(st, "p", s)); !slices.Equal(got, []string{"room", "week"}) {
+			t.Errorf("%s at 98%%: %v, want [room week]", name, got)
+		}
 	}
 }
 
@@ -152,7 +244,7 @@ func TestWeighted(t *testing.T) {
 
 // Of those all but used up, one that goes on on its credits (a Codex
 // account holding them) goes before those with nothing left, though it
-// has used more, in Smart, Weekly pace and Least used alike; still after
+// has used more, in Smart, Use before expiry and Least used alike; still after
 // every one with room or running low, its allowance spent before its
 // credits are.
 func TestCreditsFirstOfTheSpent(t *testing.T) {
@@ -166,5 +258,32 @@ func TestCreditsFirstOfTheSpent(t *testing.T) {
 		if got := keys(s, Apply(st, "p", s)); !slices.Equal(got, []string{"fine", "low", "credits", "spent"}) {
 			t.Errorf("%s: %v", name, got)
 		}
+	}
+}
+
+// A seat whose provider is set to be used first (Seat.Lead) goes ahead of
+// the others Smart weighs it with: an API key's monthly credit before a
+// subscription with room, which renews soonest (hzh_1119 on Discord). One
+// all but used up goes with the others that are, and with none set to
+// lead, Smart goes as it did.
+func TestSmartLeadFirst(t *testing.T) {
+	now := time.Now()
+	s := []Seat{
+		{Key: "plus", Used: 10, Soon: []time.Time{now.Add(2 * time.Hour)}},
+		{Key: "pro", Used: 40, Soon: []time.Time{now.Add(24 * time.Hour)}},
+		{Key: "api", Lead: true},
+		{Key: "api-spent", Lead: true, Used: 99},
+		{Key: "spent", Used: 98},
+	}
+	got := keys(s, Apply(Smart, "p", s))
+	if want := []string{"api", "plus", "pro", "spent", "api-spent"}; !slices.Equal(got, want) {
+		t.Fatalf("Smart with a lead: %v, want %v", got, want)
+	}
+	for i := range s {
+		s[i].Lead = false
+	}
+	got = keys(s, Apply(Smart, "p", s))
+	if want := []string{"plus", "pro", "api", "spent", "api-spent"}; !slices.Equal(got, want) {
+		t.Fatalf("Smart with none set: %v, want %v", got, want)
 	}
 }

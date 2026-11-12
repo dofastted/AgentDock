@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -118,5 +119,125 @@ func TestCallerKeyAccountsRoutes(t *testing.T) {
 	var free struct{ Keys []access.Key }
 	if w := request("POST", "/api/caller-keys/accounts-key", `{"key":"`+id+`","accounts":[]}`); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &free) != nil || free.Keys[0].Accounts != nil {
 		t.Fatal("every account", w.Code, w.Body)
+	}
+}
+
+// The key editor offers the decision models (Kautism on Discord: Clef and
+// Jev listed nowhere for a key held to two groups), each after its own
+// provider's chat models and marked as one, so a key held to some models
+// can be let ask one: the gateway holds a key to them as to any model.
+func TestCallerKeyModelsOfferDeciders(t *testing.T) {
+	sandboxHome(t)
+	for _, p := range []provider.Provider{
+		{ID: "relay", Name: "Relay", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m"}},
+		{ID: "ts", Name: "TypeSafe", Key: "k", Decide: "http://127.0.0.1:1/v1"},
+		{ID: "cf", Name: "Cloudflare", Key: "k", Decide: "https://api.cloudflare.com/client/v4/accounts/test/ai", Models: []string{provider.CloudflareJev, provider.CloudflareClefModel}},
+	} {
+		if err := provider.Save(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := http.NewServeMux()
+	callerKeyRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/caller-keys/models", nil))
+	var l struct{ Models []keyModelJSON }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &l) != nil {
+		t.Fatal(w.Code, w.Body)
+	}
+	var ids, deciders []string
+	for _, m := range l.Models {
+		ids = append(ids, m.ID)
+		if m.Decides {
+			deciders = append(deciders, m.ID)
+			if m.Provider == "" || m.ProviderName == "" || m.Name == "" {
+				t.Fatalf("decider %+v", m)
+			}
+		}
+	}
+	for _, id := range []string{"ts/" + provider.JevLatest, "cf/" + provider.CloudflareJev, "cf/" + provider.CloudflareClefModel} {
+		if !slices.Contains(deciders, id) {
+			t.Fatalf("%s not offered as a decision model: %v", id, ids)
+		}
+	}
+	if slices.Contains(deciders, "relay/m") {
+		t.Fatal("a chat model marked a decision model", ids)
+	}
+	// a provider's models stay together
+	seen := map[string]bool{}
+	last := ""
+	for _, m := range l.Models {
+		if m.Provider != last && seen[m.Provider] {
+			t.Fatalf("%s's models split: %v", m.Provider, ids)
+		}
+		seen[m.Provider], last = true, m.Provider
+	}
+}
+
+// The key editor offers the image and video models too (aipha2025 on X:
+// "can't pick an image model for a key"): the gateway holds a key to them
+// on /v1/images and /v1/videos as to a chat model, so a key held to some
+// models had no way to be let draw but All models.
+func TestCallerKeyModelsOfferImageAndVideoModels(t *testing.T) {
+	sandboxHome(t)
+	live := []catalog.Model{{ID: "gpt-5.5"}, {ID: "gpt-image-2", Draws: true}, {ID: "gpt-image-1", Draws: true}}
+	p := provider.Provider{ID: "pix", Name: "Pix", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"gpt-5.5"}, HiddenDrawers: []string{"gpt-image-1"}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive(p.ID, p.Chat, live); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	callerKeyRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/caller-keys/models", nil))
+	var l struct{ Models []keyModelJSON }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &l) != nil {
+		t.Fatal(w.Code, w.Body)
+	}
+	var ids []string
+	for _, m := range l.Models {
+		ids = append(ids, m.ID)
+	}
+	for _, want := range []string{"pix/gpt-5.5", "pix/gpt-image-2", "pix/gpt-image-1"} {
+		if n := strings.Count(" "+strings.Join(ids, " ")+" ", " "+want+" "); n != 1 {
+			t.Fatalf("%s offered %d times: %v", want, n, ids)
+		}
+	}
+	seen, last := map[string]bool{}, ""
+	for _, m := range l.Models {
+		if m.Provider != last && seen[m.Provider] {
+			t.Fatalf("%s's models split: %v", m.Provider, ids)
+		}
+		seen[m.Provider], last = true, m.Provider
+	}
+}
+
+// A provider that serves no model now can still be allowed whole,
+// <provider>/*, for the models it serves later (CoderCCz on X): the
+// models list names it in "providers".
+func TestCallerKeyModelsOfferAnEmptyProviderWhole(t *testing.T) {
+	sandboxHome(t)
+	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "later", Name: "Later", Key: "k", Chat: "http://127.0.0.1:1/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	callerKeyRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/caller-keys/models", nil))
+	var l struct{ Providers []keyModelJSON }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &l) != nil {
+		t.Fatal(w.Code, w.Body)
+	}
+	var ids []string
+	for _, p := range l.Providers {
+		ids = append(ids, p.ID)
+	}
+	if !slices.Contains(ids, "later/*") || slices.Contains(ids, "relay/*") {
+		t.Fatal("providers", ids)
 	}
 }

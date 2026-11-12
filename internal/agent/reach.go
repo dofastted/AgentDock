@@ -2,6 +2,7 @@ package agent
 
 import (
 	"cmp"
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -36,7 +37,9 @@ var reachAge = 20 * time.Second
 var reachProbe = realReachProbe
 
 func realReachProbe(base string) bool {
-	c := &http.Client{Timeout: 2 * time.Second}
+	// a certificate magpie made itself isn't one this computer trusts, and
+	// whether something answers is all that is asked here
+	c := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 	res, err := c.Get(strings.TrimSuffix(base, "/") + "/v1/models")
 	if err != nil {
 		return false
@@ -116,6 +119,9 @@ func loopbackWithPath(base string) bool {
 // magpie, as an address not yet tried isn't unreachable either: telling
 // drift first would offer Reconnect, which writes the proxy away.
 func reachesMagpie(v, want string) bool {
+	if chainsToGateway(v, want) {
+		return true
+	}
 	base, ok := proxyBase(v, want)
 	if !ok {
 		return false
@@ -125,15 +131,70 @@ func reachesMagpie(v, want string) bool {
 }
 
 // surelyMagpie is reachesMagpie once magpie has answered there: what a
-// write that keeps the address waits for, so a relay not yet tried never
-// gets magpie's model or key.
+// write that keeps the address waits for (magpieAsked), so a relay not yet
+// tried never gets magpie's model or key.
 func surelyMagpie(v, want string) bool {
+	if chainsToGateway(v, want) {
+		return true
+	}
 	base, ok := proxyBase(v, want)
 	if !ok {
 		return false
 	}
 	ok, known := magpieAt(base)
 	return ok && known
+}
+
+// chainsToGateway says v is a proxy on this machine's loopback that names
+// want, magpie's gateway, as its upstream at the end of its path:
+// billion-context's http://127.0.0.1:18787/bili/http://127.0.0.1:3425
+// (its Claude Code lane, which the Library's billion-context tab installs;
+// also /bili/anthropic/<upstream>, and bili start's 8787). Its requests
+// reach magpie whether or not the proxy answers GET / as magpie: a bili
+// lane runs only beside its agent, and magpieProbe asked it while it was
+// down, so the Agents page told drift and Reconnect wrote the gateway over
+// the user's billion-context (33sczf on X). No probe is needed, as the
+// upstream is the gateway itself.
+func chainsToGateway(v, want string) bool {
+	v = strings.TrimSuffix(strings.TrimSpace(v), "/")
+	if !loopbackWithPath(v) {
+		return false
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	rest := u.Path
+	i := strings.Index(rest, "/http://")
+	if j := strings.Index(rest, "/https://"); j >= 0 && (i < 0 || j < i) {
+		i = j
+	}
+	if i < 0 {
+		return false
+	}
+	up, err := url.Parse(rest[i+1:])
+	if err != nil {
+		return false
+	}
+	w, err := url.Parse(strings.TrimSuffix(want, "/"))
+	if err != nil || onAnotherMachine(want) || onAnotherMachine(rest[i+1:]) {
+		return false
+	}
+	return up.Scheme == w.Scheme && up.Port() == w.Port() && up.Port() != "" &&
+		strings.TrimSuffix(up.Path, "/") == strings.TrimSuffix(w.Path, "/") &&
+		up.User == nil && up.RawQuery == ""
+}
+
+// magpieAsked is magpieAt waited for, for a write: base, not asked yet, is
+// asked now (probedNow, as codexProxyOK asks a proxy), so what the write
+// reads after is magpie's answer there. Unasked, surelyMagpie is no, and
+// the first write in a magpie just started, the CLI's, took a proxy to
+// magpie for the user's own endpoint (#1985). One answered before, at any
+// age, is what the write goes by, as the reads do.
+func magpieAsked(base string) {
+	if _, known := magpieAt(base); !known {
+		probedNow("magpie "+base, func() bool { return magpieProbe(base) })
+	}
 }
 
 var reach struct {

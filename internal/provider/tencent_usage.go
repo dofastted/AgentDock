@@ -7,10 +7,15 @@ package provider
 // 2026-03-22, signed TC3-HMAC-SHA256 with the account's API key, a
 // SecretId and SecretKey (AccessKeyID, SecretAccessKey), never with the
 // plan's own sk- key. The plan a provider is on is its endpoint's: /plan
-// on tokenhub.tencentmaas.com is the enterprise plan in Guangzhou, on
-// tokenhub-intl.tencentmaas.com in Singapore. The personal plan
-// (api.lkeap.cloud.tencent.com) has no API for its usage, only the
-// console, and TokenHub's pay as you go no plan: neither has a card.
+// on tokenhub.tencentmaas.com is a Token Plan in Guangzhou, on
+// tokenhub-intl.tencentmaas.com 企业版 in Singapore. Guangzhou's is 个人版
+// too, at the same endpoints since Tencent moved it there from
+// api.lkeap.cloud.tencent.com (ysm119, 11-02), and the key alone tells
+// which: 个人版 has no API for its usage, only the console. So a provider
+// there is asked for the access key, but given none it has no card
+// saying so, which a personal plan would show for nothing; in Singapore,
+// where 企业版 alone is sold, it has. TokenHub's pay as you go has no
+// plan and no card.
 //
 // The request is signed as Tencent's signing doc (api/213/30654) says:
 // the canonical request with content-type, host and x-tc-action signed,
@@ -41,7 +46,10 @@ const (
 	tcAPIService  = "tokenhub"
 	tcContentType = "application/json; charset=utf-8"
 	tcPlanName    = "Token Plan Enterprise"
-	tcKeyHint     = "check the SecretId and SecretKey in the provider's editor (Tencent Cloud console → Access management → API keys), and that the key may read TokenHub (CAM)"
+	// tcSharedRegion is the cloud API region whose /plan endpoints serve
+	// Token Plan 个人版 as well as 企业版
+	tcSharedRegion = "ap-guangzhou"
+	tcKeyHint      = "check the SecretId and SecretKey in the provider's editor (Tencent Cloud console → Access management → API keys), and that the key may read TokenHub (CAM)"
 )
 
 // TakesTencentAccessKey says p is on Tencent Cloud's Token Plan 企业版 (at
@@ -54,26 +62,47 @@ func TakesTencentAccessKey(p Provider) bool {
 
 // AccessKeyVendor is whose account access key p's plan is read with:
 // "volcengine" (Ark's Coding and Agent Plans), "tencent" (Token Plan
-// 企业版), or "" for none.
+// 企业版), "alibaba" (Token Plan on aliyuncs.com), or "" for none.
 func AccessKeyVendor(p Provider) string {
 	switch {
 	case TakesVolcAccessKey(p):
 		return "volcengine"
 	case TakesTencentAccessKey(p):
 		return "tencent"
+	case TakesAlibabaAccessKey(p):
+		return "alibaba"
 	}
 	return ""
 }
 
+// AsksAccessKey is whose account access key p's editor and Usage page
+// ask for: AccessKeyVendor's for a preset's provider, and for a custom
+// one only once it has one saved. A custom provider is the user's own
+// address and key, sent as typed, whatever host it is on: one at
+// tokenhub.tencentmaas.com/plan was asked for a SecretId and SecretKey
+// it never needs (ysm119 on Discord).
+func AsksAccessKey(p Provider) string {
+	if p.Preset == "" && p.AccessKeyID == "" && p.SecretAccessKey == "" {
+		return ""
+	}
+	return AccessKeyVendor(p)
+}
+
 // tencentPlanRegion is the cloud API region of the enterprise plan p's
-// endpoint is on: ap-guangzhou for tokenhub.tencentmaas.com/plan,
-// ap-singapore for tokenhub-intl.tencentmaas.com/plan; ok false for
-// TokenHub's pay as you go, the personal plan or another vendor.
+// endpoint is on: ap-guangzhou for tokenhub.tencentmaas.com/plan (which
+// is 个人版's too), ap-singapore for tokenhub-intl.tencentmaas.com/plan;
+// ok false for TokenHub's pay as you go or another vendor.
 func tencentPlanRegion(p Provider) (string, bool) {
 	if p.Account != nil {
 		return "", false
 	}
 	for _, base := range []string{p.Chat, p.Responses, p.Anthropic} {
+		// both hosts below hold it: every other base, asked for each
+		// provider on each Providers page, isn't parsed (ToLower makes
+		// no copy of a base already lower-case)
+		if !strings.Contains(strings.ToLower(base), "tencentmaas.com") {
+			continue
+		}
 		u, err := url.Parse(base)
 		if err != nil || !strings.HasPrefix(strings.TrimSuffix(u.Path, "/")+"/", "/plan/") {
 			continue
@@ -111,7 +140,9 @@ func tencentPlanQuotas(ctx context.Context) []SubscriptionQuota {
 			continue
 		}
 		if p.AccessKeyID == "" || p.SecretAccessKey == "" {
-			keyless = append(keyless, job{p, region})
+			if AsksAccessKey(p) != "" {
+				keyless = append(keyless, job{p, region})
+			}
 			continue
 		}
 		keyed[region] = true
@@ -128,6 +159,12 @@ func tencentPlanQuotas(ctx context.Context) []SubscriptionQuota {
 		go func() {
 			defer wg.Done()
 			got[i] = tencentPlanCards(ctx, j.p, j.region, time.Now)
+			if qs := got[i]; len(qs) == 1 && qs[0].Error == "" {
+				// the account's one plan is what routing goes by, read
+				// just now (KeyAllowance); of several, which a key is of
+				// isn't told
+				noteKeyAllowance(j.p, qs[0].Windows, time.Now())
+			}
 		}()
 	}
 	wg.Wait()
@@ -136,7 +173,7 @@ func tencentPlanQuotas(ctx context.Context) []SubscriptionQuota {
 		out = append(out, qs...)
 	}
 	for _, j := range keyless {
-		if keyed[j.region] || seen["none "+j.region] || !wantsCard(ctx, j.p.ID, "") {
+		if keyed[j.region] || seen["none "+j.region] || j.region == tcSharedRegion || !wantsCard(ctx, j.p.ID, "") {
 			continue
 		}
 		seen["none "+j.region] = true
@@ -366,7 +403,7 @@ func tencentAPICall(ctx context.Context, secretID, secretKey, region, action str
 	req.Header.Set("X-TC-Region", region)
 	req.Header.Set("X-TC-Timestamp", strconv.FormatInt(now.Unix(), 10))
 	req.Header.Set("Authorization", tc3Sign(secretID, secretKey, tcAPIService, tcAPIHost, action, body, now))
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -44,11 +44,14 @@ func Restore(ps []Provider) (added, replaced int, err error) {
 			}
 		}
 		if i < 0 {
+			p.KeepSelf = false
 			f.Providers = append(f.Providers, p)
 			added++
 			continue
 		}
+		keepSelf := f.Providers[i].KeepSelf // this computer's own (Mirror)
 		f.Providers[i] = KeepSecrets(p, f.Providers[i], p.Key == "" && len(p.Keys) == 0)
+		f.Providers[i].KeepSelf = keepSelf
 		replaced++
 	}
 	if added+replaced == 0 {
@@ -91,7 +94,12 @@ func RestoreGroups(gs []Group) error {
 // Mirror makes the providers and groups exactly these, as sync brings them
 // from another computer: one not among them goes, one that came without
 // keys keeps the keys it has here, and an access key or balance token it
-// came without is kept too (KeepSecrets).
+// came without is kept too (KeepSecrets). Which account an agent is kept
+// signed in to (KeepLogin, KeepLoginAs, SwitchOnly), whether its app is
+// restarted to follow (RestartApp), and whether a Remote magpie that is
+// this magpie is used anyway (KeepSelf), is this computer's own:
+// one person signs in to a personal account at home and a work account at
+// the office, and sync set each computer to the other's every day.
 func Mirror(ps []Provider, gs []Group) error {
 	f, err := read()
 	if err != nil {
@@ -109,6 +117,11 @@ func Mirror(ps []Provider, gs []Group) error {
 		}
 		if h, ok := here[p.ID]; ok {
 			p = KeepSecrets(p, h, p.Key == "" && len(p.Keys) == 0)
+			p.KeepLogin, p.KeepLoginAs, p.SwitchOnly, p.RestartApp = h.KeepLogin, h.KeepLoginAs, h.SwitchOnly, h.RestartApp
+			p.KeepSelf = h.KeepSelf
+		} else {
+			p.KeepLoginAs = "" // an account signed in on the other computer
+			p.KeepSelf = false // kept on the other computer, of a magpie that isn't this one
 		}
 		out = append(out, p)
 	}
@@ -170,8 +183,8 @@ func withoutSecretOptions(opts map[string]any) map[string]any {
 // AddPlugins installs the plugins another computer has (Carried) that
 // aren't here, the way Settings → Plugins adds one, and hands each a
 // deprecated built-in it serves (HandOver). It never takes a plugin away
-// or changes one already here: a plugin removed on one computer stays on
-// the others. It returns the specs added and why the others couldn't be.
+// or changes one already here; a removal is davsync's, which tracks the
+// plugins both sides had at the last sync. It returns the specs added and why the others couldn't be.
 func AddPlugins(ctx context.Context, es []plugin.Entry) (added []string, failed map[string]error) {
 	here := map[string]bool{}
 	for _, e := range plugin.Load().Plugins {

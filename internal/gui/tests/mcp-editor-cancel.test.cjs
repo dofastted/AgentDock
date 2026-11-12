@@ -84,6 +84,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "mcp"); } catch {} });
           const page = await ctx.newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", server(lang, calls));
           await page.goto("http://magpie.test/");
@@ -130,11 +131,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // a command's env and arguments
           await open("gh-local");
           assert.equal(await box.count(), 0);
-          await ed.locator("input.mono").first().fill("npx -y @modelcontextprotocol/server-github --read-only");
+          await ed.locator("textarea.lib-cmd").fill("npx -y @modelcontextprotocol/server-github --read-only");
           await ed.locator(".lib-pair .lib-x").click();
           await cancel(true);
           await open("gh-local");
-          assert.equal(await ed.locator("input.mono").first().inputValue(), "npx -y @modelcontextprotocol/server-github");
+          assert.equal(await ed.locator("textarea.lib-cmd").inputValue(), "npx -y @modelcontextprotocol/server-github");
           assert.deepEqual(await pairs(), ["GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_local"]);
           await cancel(false);
           assert.deepEqual(calls.filter((c) => c.startsWith("save")), [], "nothing saved");

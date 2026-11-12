@@ -18,15 +18,14 @@ package provider
 //
 // Both are the user's own settings, kept by every save that doesn't set
 // them (the window's editor among them), and only a provider of the user's
-// own has them: an account's list is fetched for it (FetchNew), and a
-// plugin's by the plugin (KeepPluginsListed).
+// own has them: an account's list is fetched for it (FetchNew, then
+// KeepAccountsListed), and a plugin's by the plugin (KeepPluginsListed).
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/beat"
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 // MinRefreshEvery is the shortest RefreshEvery: a vendor's list changes
@@ -200,7 +200,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var res []*regexp.Regexp
+	var res []matcher
 	for _, r := range p.AutoInclude {
 		if x, err := compilePattern(r); err == nil {
 			res = append(res, x)
@@ -219,7 +219,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 		if !isNew(m.ID) || slices.Contains(served, m.ID) || slices.Contains(taken, m.ID) {
 			continue
 		}
-		if slices.ContainsFunc(res, func(x *regexp.Regexp) bool { return x.MatchString(m.ID) }) {
+		if slices.ContainsFunc(res, func(x matcher) bool { return x.MatchString(m.ID) }) {
 			taken = append(taken, m.ID)
 		}
 	}
@@ -237,7 +237,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 	q := &f.Providers[i]
 	// new ones first, as the vendor's list and withNewlyListed have them
 	q.Models = append(slices.Clone(taken), served...)
-	q.NoModels = false
+	q.NoModels, q.BestInFamily = false, false
 	// picked from the list as it is now: one it lists later and no rule
 	// matches stays out, unless the picks hold every model
 	q.PickedFrom = nil
@@ -295,17 +295,27 @@ func refreshDueLists(ctx context.Context, now time.Time) []string {
 	own, _ := ownOf(f)
 	for _, p := range ordered(own, f.Order) {
 		every := p.RefreshInterval()
+		// a list saved before lists kept the models made for other APIs
+		// (embeddings, rerank, speech, transcriptions) is fetched again
+		// once, schedule or none, so their routes and groups have them
+		// without the user's Refresh (#5339); tried once a run, so one
+		// that fails waits for its schedule, the next start or a Refresh
+		listsTried.Lock()
+		_, triedOnce := listsTried.m[p.ID]
+		listsTried.Unlock()
+		_, fetched := p.Fetched()
+		once := !triedOnce && fetched && !catalog.LiveKinded(p.ID)
 		// one that lists nothing (Preset.NoList) has no list to keep fresh
-		if every == 0 || p.Off || !p.lists() {
+		if every == 0 && !once || p.Off || !p.lists() {
 			continue
 		}
-		if at, ok := p.Fetched(); ok && now.Sub(at) < every {
+		if at, ok := p.Fetched(); ok && !once && now.Sub(at) < every {
 			continue
 		}
 		listsTried.Lock()
 		tried, ok := listsTried.m[p.ID]
 		retry := min(every, listRetry)
-		if ok && now.Sub(tried) < retry {
+		if !once && ok && now.Sub(tried) < retry {
 			listsTried.Unlock()
 			continue
 		}
@@ -320,7 +330,11 @@ func refreshDueLists(ctx context.Context, now time.Time) []string {
 		cancel()
 		switch {
 		case err != nil && !errors.Is(err, context.Canceled):
-			log.Printf("%s: its scheduled list fetch failed: %s (tried again in %s)", p.ID, err, retry)
+			again := "tried again in " + retry.String()
+			if every == 0 {
+				again = "tried again on the next start or Refresh"
+			}
+			log.Printf("%s: its scheduled list fetch failed: %s (%s)", p.ID, err, again)
 		case err == nil:
 			log.Printf("%s: fetched its list on schedule, %d models%s%s", p.ID, len(ms), listNote(" taken by rule: ", taken), listNote(" no longer listed: ", dropped))
 		}

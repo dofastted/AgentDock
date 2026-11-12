@@ -74,6 +74,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await ctx.addInitScript(() => { try { if (!localStorage.getItem("magpie.libTab")) localStorage.setItem("magpie.libTab", "mcp"); } catch {} });
         const page = await ctx.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang));
@@ -94,7 +95,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const tips = (sort) => page.locator(`.segs.sortby[data-sort="${sort}"] .opt`).evaluateAll((os) => os.map((o) => o.title));
 
         // the Library's MCP servers: A→Z first, whatever order magpie gave them in
-        const serverNames = () => names("#view-library .lib-list .lib-row > .who > .name");
+        // (the MCP router's row below them is no server, and isn't sorted)
+        const serverNames = () => names("#view-library .lib-list:not(.lib-hublist) .lib-row > .who > .name");
         const openLib = async () => {
           await page.goto("http://magpie.test/");
           await page.locator('button[data-view="library"]').click();
@@ -107,7 +109,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await serverNames(), ["gamma", "beta", "Alpha"]);
 
         // the skills: by source at first, then one flat list by name
-        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(2).click();
+        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(3).click();
         await page.locator("#view-library .lib-group").first().waitFor();
         const skillBox = page.locator('.segs.sortby[data-sort="libSkills"]');
         assert.deepEqual(await skillBox.locator(".opt").allTextContents(), [w.source, "A→Z", "Z→A"]);
@@ -123,10 +125,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // each list keeps its own pick through a reload
         await openLib();
         assert.deepEqual(await skillNames(), ["pear", "mango", "kiwi", "cherry", "apple"]);
-        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(1).click();
+        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(2).click();
         await page.locator("#view-library .lib-body:not(.lib-skel) .lib-list .lib-row").first().waitFor();
         assert.deepEqual(await serverNames(), ["gamma", "beta", "Alpha"]);
-        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(2).click();
+        await page.locator(":is(#view-library .lib-tabs .opt, .nav-s):visible").nth(3).click();
         await pick("libSkills", 0);
         await page.locator("#view-library .lib-group").first().waitFor();
 

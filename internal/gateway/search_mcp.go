@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // magpie's web search, the one a model that can't search is given
@@ -36,6 +40,7 @@ var OwnMCPServers = []struct{ Name, Path string }{
 	{"image", ImageMCPPath},
 	{"vision", VisionMCPPath},
 	{"web-search", SearchMCPPath},
+	{"memory", MemoryMCPPath},
 	{"tools", ToolsMCPPath},
 }
 
@@ -45,21 +50,60 @@ var searchMCPVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 const searchMCPTool = "web_search"
 
+// searchMCPSchema is web_search's input: the query, and how many results,
+// held to 1 through searchHitsMost; when not given, n, the count the user
+// set (settings.SearchPages).
+func searchMCPSchema(n int) string {
+	return fmt.Sprintf(`{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},`+
+		`"count":{"type":"integer","minimum":1,"maximum":%d,"default":%d,"description":"How many results to return, 1 to %d (%d when not given)"}},"required":["query"]}`,
+		searchHitsMost, n, searchHitsMost, n)
+}
+
+// searchCountArg is the count a web_search call names: a number, or a
+// number in a string, as a model may write it; nil when it names none, or
+// something that isn't a number, which is searched for as if not given.
+func searchCountArg(raw json.RawMessage) *int {
+	if t := bytes.TrimSpace(raw); len(t) == 0 || bytes.Equal(t, []byte("null")) {
+		return nil
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) != nil {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return nil
+		}
+		var err error
+		if f, err = strconv.ParseFloat(strings.TrimSpace(s), 64); err != nil {
+			return nil
+		}
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil
+	}
+	n := int(max(min(f, 1e6), -1e6))
+	return &n
+}
+
 type mcpMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	// a client's answer to a request of the server's (askClient)
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  json.RawMessage `json:"error,omitempty"`
 }
 
 func (s *Server) searchMCP(w http.ResponseWriter, r *http.Request) {
-	serveMCP(w, r, "magpie's web search", 1<<20, s.searchMCPCall)
+	serveMCP(w, r, "magpie's web search", "magpie-web-search", 1<<20, s.searchMCPCall)
 }
 
 // serveMCP answers the JSON-RPC messages POSTed to one of magpie's own MCP
-// servers (what names it in a refusal) with call, a body up to limit bytes
-// long: guarded as a gateway route, and a web page turned away.
-func serveMCP(w http.ResponseWriter, r *http.Request, what string, limit int64, call func(*http.Request, mcpMessage) (any, map[string]any)) {
+// servers (what names it in a refusal, server in the request log) with
+// call, a body up to limit bytes long: guarded as a gateway route, and a
+// web page turned away. Each tools/call is a row of the request log
+// (callMCPTool).
+func serveMCP(w http.ResponseWriter, r *http.Request, what, server string, limit int64, call func(*http.Request, mcpMessage) (any, map[string]any)) {
 	if !local(r) && !sharedWith(r) {
 		http.Error(w, what+" is served to another machine only when magpie is shared on the local network and the request carries a gateway key (Authorization: Bearer <key>)", http.StatusForbidden)
 		return
@@ -69,6 +113,10 @@ func serveMCP(w http.ResponseWriter, r *http.Request, what string, limit int64, 
 	// call this
 	if o := r.Header.Get("Origin"); o != "" && !corsAllowed(o) {
 		http.Error(w, what+" MCP server answers agents, not web pages", http.StatusForbidden)
+		return
+	}
+	// a gateway key held to some MCP servers (access.Key.MCP)
+	if !mcpKeyServe(w, r, server) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -96,14 +144,42 @@ func serveMCP(w http.ResponseWriter, r *http.Request, what string, limit int64, 
 		writeJSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32700, "message": "parse error: the body isn't a JSON-RPC message"}})
 		return
 	}
+	// one request, by a client that takes an event stream back, may be
+	// answered by one, for the server to ask the client something first
+	// a client that initializes is given a session id, which it sends on
+	// every request after (Streamable HTTP's Mcp-Session-Id): magpie keeps
+	// nothing by it and never refuses a request for it, but tells two
+	// clients of one server apart by it, as Magpie Browser does to give
+	// each its own tab (browserSession, hubSession)
+	if r.Header.Get("Mcp-Session-Id") == "" && slices.ContainsFunc(msgs, func(m mcpMessage) bool { return m.Method == "initialize" }) {
+		w.Header().Set("Mcp-Session-Id", newMCPSession())
+	}
+	x := &mcpExchange{w: w, canStream: !batch && strings.Contains(r.Header.Get("Accept"), "text/event-stream")}
+	r = r.WithContext(context.WithValue(r.Context(), mcpExchangeKey{}, x))
 	var out []any
 	for _, m := range msgs {
 		// a notification (no id) or a response to the server is answered
-		// with nothing
+		// with nothing; a response is handed to the request it answers
+		if m.Method == "" && len(m.ID) > 0 {
+			clientAnswered(m)
+		}
 		if len(m.ID) == 0 || bytes.Equal(m.ID, []byte("null")) || m.Method == "" {
 			continue
 		}
-		result, rpcErr := call(r, m)
+		var result any
+		var rpcErr map[string]any
+		switch {
+		case m.Method == "tools/call":
+			if rpcErr = mcpKeyCall(r, server, m); rpcErr == nil {
+				result, rpcErr = callMCPTool(r, server, m, call)
+			}
+		case m.Method == "tools/list":
+			if result, rpcErr = call(r, m); rpcErr == nil {
+				result = mcpKeyList(r, server, result)
+			}
+		default:
+			result, rpcErr = call(r, m)
+		}
 		reply := map[string]any{"jsonrpc": "2.0", "id": m.ID}
 		if rpcErr != nil {
 			reply["error"] = rpcErr
@@ -111,6 +187,10 @@ func serveMCP(w http.ResponseWriter, r *http.Request, what string, limit int64, 
 			reply["result"] = result
 		}
 		out = append(out, reply)
+	}
+	if x.streamed {
+		x.send(out[0])
+		return
 	}
 	if len(out) == 0 {
 		w.WriteHeader(http.StatusAccepted)
@@ -141,14 +221,15 @@ func (s *Server) searchMCPCall(r *http.Request, m mcpMessage) (any, map[string]a
 			"name":        searchMCPTool,
 			"title":       "Web search",
 			"description": t.Description,
-			"inputSchema": t.Schema,
+			"inputSchema": json.RawMessage(searchMCPSchema(settings.Shared().SearchPages())),
 			"annotations": map[string]any{"readOnlyHint": true, "openWorldHint": true},
 		}, fetchTool()}}, nil
 	case "tools/call":
 		var p struct {
 			Name      string `json:"name"`
 			Arguments struct {
-				Query string `json:"query"`
+				Query string          `json:"query"`
+				Count json.RawMessage `json:"count"`
 				fetchArgs
 			} `json:"arguments"`
 		}
@@ -159,7 +240,7 @@ func (s *Server) searchMCPCall(r *http.Request, m mcpMessage) (any, map[string]a
 		var err error
 		switch p.Name {
 		case searchMCPTool:
-			said, err = s.searchMCPRun(r, strings.TrimSpace(p.Arguments.Query))
+			said, err = s.searchMCPRun(r, strings.TrimSpace(p.Arguments.Query), searchCountArg(p.Arguments.Count))
 		case fetchMCPTool:
 			said, err = s.fetchMCPRun(r, p.Arguments.fetchArgs)
 		default:
@@ -196,8 +277,9 @@ func (e searchMCPError) Error() string { return string(e) }
 
 // searchMCPRun searches for the query as a model's web_search would be:
 // held to the calling gateway key's limit, and named in the Routing view
-// as the agent's MCP call.
-func (s *Server) searchMCPRun(r *http.Request, query string) (string, error) {
+// as the agent's MCP call; for count results when it is given (held to 1
+// through searchHitsMost), else the count the user set (searchCount).
+func (s *Server) searchMCPRun(r *http.Request, query string, count *int) (string, error) {
 	if query == "" {
 		return "", searchMCPError("web_search needs a query")
 	}
@@ -207,6 +289,9 @@ func (s *Server) searchMCPRun(r *http.Request, query string) (string, error) {
 	}
 	defer release()
 	ctx := context.WithValue(r.Context(), searchForKey{}, &CallFor{Agent: callerOf(r).agent, MCP: true})
+	if count != nil {
+		ctx = withSearchCount(ctx, *count)
+	}
 	said, _, err := s.webSearch(ctx, query)
 	if err != nil {
 		if r.Context().Err() == nil {

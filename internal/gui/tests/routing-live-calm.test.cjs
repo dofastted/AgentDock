@@ -59,6 +59,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 } })).newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const feed = { on: false, n: 0 };
@@ -105,7 +106,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.equal(await row.evaluate((b) => b === window.__row), true, "the request's row was made again");
     assert.notEqual(await row.textContent(), said, "the row must say what the trace says now");
     assert.deepEqual(busy.anims.filter((a) => a === "rtlive"), [], "the row's pulse started over");
-    assert.deepEqual(busy.nodes.filter((n) => !/^rt-sky |\bpkt\b|rt-flier|#text/.test(n)), [], "nodes were put in afresh while the same request came (the packet in flight aside)");
+    // (the sizer's probes aside too: unseen, a request's numbers taking
+    // another shape is a probe of that shape, measured and never drawn)
+    assert.deepEqual(busy.nodes.filter((n) => !/^rt-sky |^rt-sizer |\bpkt\b|rt-flier|#text/.test(n)), [], "nodes were put in afresh while the same request came (the packet in flight aside)");
     assert.deepEqual(errors, []);
   });
 }

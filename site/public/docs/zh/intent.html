@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>意图路由 · magpie 文档</title>
+<title>意图路由：按任务把每一轮自动交给合适的模型 · magpie 文档</title>
 <meta name="description" content="magpie 如何按用户想做什么来路由每一轮：何时询问意图判断模型、它具体看到什么、回答怎么用、失败时怎么办，以及详细答疑。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/intent">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/intent">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/intent">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/intent">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/intent">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="意图路由">
 <meta property="og:description" content="按用户想做什么，把每一轮交给合适的模型。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/intent">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "意图路由",
+   "description": "magpie 如何按用户想做什么来路由每一轮：何时询问意图判断模型、它具体看到什么、回答怎么用、失败时怎么办，以及详细答疑。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/intent",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "意图路由",
+     "item": "https://usemagpie.ai/docs/zh/intent"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -328,10 +388,20 @@ The number of its kind (0 for none):</pre>
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

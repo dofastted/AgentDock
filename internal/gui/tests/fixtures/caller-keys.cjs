@@ -22,14 +22,29 @@ function fixture(lang, theme, events, options = {}) {
   }
   let serial = 0;
   let lan = !!options.lan;
+  let accountGroups = structuredClone(options.accountGroups || []);
   let lanKeyID = "", rotations = 0, lanSecret = "";
   const secrets = new Map([["laptop", "fixture-laptop"], ["server", "fixture-server"], ["work", "fixture-work"]]);
   // options.lanURLs is the test's own list, so it can take the network away
   const lanURLs = options.lanURLs || ["http://192.168.1.10:3999", "http://10.0.0.10:3999"];
-  // options.publicURL is MAGPIE_PUBLIC_URL's, offered while shared (#1551)
-  const publicURL = () => lan && options.publicURL ? { publicURL: options.publicURL } : {};
+  // options.lanPublic are those of them at an internet address
+  const lanPublic = () => lan && options.lanPublic ? { lanPublic: options.lanPublic } : {};
+  // options.publicURL is MAGPIE_PUBLIC_URL's, offered while shared (#1551),
+  // and options.publicKind what kind of address it is (gateway.URLKind)
+  const publicURL = () => lan && options.publicURL ? { publicURL: options.publicURL,
+    ...(options.publicKind ? { publicKind: options.publicKind } : {}) } : {};
+  // options.container: magpie runs in a container, and lanURLs are its
+  // own; options.containerHost is where other containers on the host
+  // reach the gateway (the host's Docker bridge address)
+  // options.lazyCat: a LazyCat app's domain, and options.lazyCatBox that
+  // magpie is on the box's network, so lanURLs are the box's
+  const container = () => ({ ...(lan && options.container ? { container: true } : {}),
+    ...(lan && options.containerHost ? { containerHost: options.containerHost } : {}),
+    ...(options.lazyCat ? { lazyCat: options.lazyCat, ...(options.lazyCatBox ? { lazyCatBox: true } : {}) } : {}) });
   const lanState = () => ({ lang, theme, lan,
-    lanURLs: lan ? lanURLs : [], fx: { rate: 7.2, at: new Date().toISOString() },
+    lanURLs: lan ? lanURLs : [], ...lanPublic(), ...(container().container ? { lanContainer: true } : {}),
+    ...(container().containerHost ? { lanContainerHost: container().containerHost } : {}),
+    ...(lan && options.lazyCat ? { lanLazyCat: options.lazyCat, ...(options.lazyCatBox ? { lanLazyCatBox: true } : {}) } : {}), fx: { rate: 7.2, at: new Date().toISOString() },
     ...(options.publicURL ? { gateway: "http://127.0.0.1:3999", ...publicURL() } : {}) });
   const rows = [
     { callerKeyId: "laptop", callerKeyName: "Laptop", in: 100, out: 10, cost: 0.1 },
@@ -57,13 +72,18 @@ function fixture(lang, theme, events, options = {}) {
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme, web: !!options.web })};` });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme, web: !!options.web,
+      // with options.publicURL or options.bootGateway, where this process's
+      // gateway listens, as magpie's boot.js says it, and while shared the
+      // addresses other machines use, MAGPIE_PUBLIC_URL with them
+      ...(options.publicURL || options.bootGateway ? { sideGateway: { url: "http://127.0.0.1:3999", running: true, boot: true,
+        ...(lan ? { lan, lanURLs } : {}), ...container(), ...publicURL() } } : {}) })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/favicon.ico") return route.fulfill({ status: 204 });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme } });
     if (url.pathname === "/api/providers") return json({
       providers: [{ id: "relay", name: "Relay", icon: "generic", models: [{ id: "m", name: "Model", on: true }], agents: [] }],
-      gateway: { running: true, window: true, mine: true, url: "http://127.0.0.1:3999", lan, lanURLs: lan ? lanURLs : [], ...publicURL(), calls: [], groups: [] },
+      gateway: { running: true, window: true, mine: true, url: "http://127.0.0.1:3999", lan, lanURLs: lan ? lanURLs : [], ...lanPublic(), ...container(), ...publicURL(), calls: [], groups: [] },
     });
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/settings/lan") {
@@ -73,7 +93,7 @@ function fixture(lang, theme, events, options = {}) {
       let key = keys.find((k) => k.id === lanKeyID);
       if (lan && (!key || body.newKey)) {
         if (!key) {
-          key = { id: "lan-key-" + (++serial), name: "Magpie" };
+          key = { id: "lan-key-" + (++serial), name: "Magpie", lan: true };
           lanKeyID = key.id;
           keys.push(key);
         }
@@ -92,7 +112,28 @@ function fixture(lang, theme, events, options = {}) {
     }
     // options.keysError: the list can't be read
     if (url.pathname === "/api/caller-keys" && options.keysError) return route.fulfill({ status: 500, json: { error: options.keysError } });
-    if (url.pathname === "/api/caller-keys") return json({ keys });
+    if (url.pathname === "/api/caller-keys") return json({ keys, accountGroups });
+    // options.accountGroups: named sets of accounts a key's list names as
+    // "@<id>" or "!@<id>" (LeiWang_2000 on X), saved and removed as
+    // access.SaveAccountGroup and RemoveAccountGroup do
+    if (url.pathname === "/api/account-groups") return json({ groups: accountGroups });
+    if (url.pathname.startsWith("/api/account-groups/")) {
+      const action = url.pathname.split("/").at(-1), body = req.postDataJSON();
+      events.push({ action: "group-" + action, body });
+      if (action === "save") {
+        const name = (body.name || "").trim();
+        if (accountGroups.some((g) => g.id !== body.id && g.name.toLowerCase() === name.toLowerCase())) return route.fulfill({ status: 400, json: { error: "There is an account group named " + name + " already" } });
+        const g = { id: body.id || "g" + (++serial), name, accounts: body.accounts || [] };
+        const i = accountGroups.findIndex((o) => o.id === g.id);
+        if (i < 0) accountGroups.push(g); else accountGroups[i] = g;
+      }
+      if (action === "remove") {
+        const users = keys.filter((k) => (k.accounts || []).some((a) => a === "@" + body.id || a === "!@" + body.id));
+        if (users.length) return route.fulfill({ status: 400, json: { error: "The account group is used by the gateway key " + users.map((k) => k.name).join(", ") + ": take it off the key first" } });
+        accountGroups = accountGroups.filter((g) => g.id !== body.id);
+      }
+      return json({ groups: accountGroups });
+    }
     if (url.pathname === "/api/caller-keys/models") return json({ models: [
       ...(options.groups ? [
         { id: "group/coding", name: "Coding", group: true },
@@ -101,10 +142,22 @@ function fixture(lang, theme, events, options = {}) {
       { id: "relay/m", name: "Model", provider: "relay", providerName: "Relay" },
       { id: "relay/m-mini", name: "Model mini", provider: "relay", providerName: "Relay" },
       { id: "openai/gpt-5", name: "GPT-5", provider: "openai", providerName: "OpenAI" },
+      // options.deciders: decision models, which no agent lists
+      ...(options.deciders ? [
+        { id: "cf/@cf/cloudflare/clef", name: "Clef", provider: "cf", providerName: "Cloudflare", decides: true },
+        { id: "ts/jev-latest", name: "Jev", provider: "ts", providerName: "TypeSafe", decides: true },
+      ] : []),
     ], accounts: options.accounts === false ? [] : [
       { id: "relay/me@example.com", name: "me@example.com", provider: "relay", providerName: "Relay", account: true, plan: "Pro" },
       { id: "relay/spare@example.com", name: "spare@example.com", provider: "relay", providerName: "Relay", account: true },
       { id: "openai/k-1a2b3c", name: "k-1a2b3c", provider: "openai", providerName: "OpenAI", key: true },
+    ], providers: options.emptyProvider ? [{ id: "later/*", name: "Later", provider: "later", providerName: "Later" }] : [], groups: accountGroups });
+    // the MCP servers and tools a key may be held to: magpie's own, then
+    // the Library's (wakaka on Discord)
+    if (url.pathname === "/api/caller-keys/mcp") return json({ servers: [
+      { name: "magpie-web-search", title: "Magpie Web Search", tools: ["web_search", "web_fetch"], own: true },
+      { name: "magpie-browser", title: "Magpie Browser", tools: ["browser"], own: true },
+      { name: "github", tools: ["create_issue", "search_code"] },
     ] });
     if (url.pathname.startsWith("/api/caller-keys/")) {
       const action = url.pathname.split("/").at(-1), body = req.postDataJSON();
@@ -122,10 +175,12 @@ function fixture(lang, theme, events, options = {}) {
       }
       if (action === "rename-key") k.name = body.name;
       if (action === "rotate-key") {
-        secret = "fixture-rotated-" + (++rotations);
+        // a value of the user's own, checked as access.ownSecret does
+        if (body.secret !== undefined && body.secret.trim().length < 8) return route.fulfill({ status: 400, json: { error: "Use a key between 8 and 256 characters" } });
+        secret = body.secret?.trim() || "fixture-rotated-" + (++rotations);
         secrets.set(k.id, secret);
         if (k.id === lanKeyID) lanSecret = secret;
-        k.masked = "sk-magpie-key-…" + secret.slice(-6);
+        k.masked = body.secret ? "…" + secret.slice(-4) : "sk-magpie-key-…" + secret.slice(-6);
       }
       if (action === "remove-key") keys = keys.filter((v) => v !== k);
       if (action === "on-key" || action === "off-key") k.off = action === "off-key";
@@ -134,7 +189,8 @@ function fixture(lang, theme, events, options = {}) {
         const usedOf = (l) => {
           const span = l.period === "hours" ? l.hours * 36e5 : (l.days || 1) * 864e5;
           return { period: l.period, days: l.days, hours: l.hours, start: new Date().toISOString(), reset: new Date(Date.now() + span).toISOString(),
-            calls: 0, tokens: 0, cost: 0, tokenLimit: l.tokens, costLimit: l.cost, tokensLeft: l.tokens, costLeft: l.cost, spent: false };
+            calls: 0, tokens: 0, cost: 0, tokenLimit: l.tokens, costLimit: l.cost, tokensLeft: l.tokens, costLeft: l.cost, spent: false,
+            ...(l.models ? { models: l.models } : {}) };
         };
         // one of several by its index (#2227), as access.Update keeps them;
         // without one, the key's only limit
@@ -160,10 +216,29 @@ function fixture(lang, theme, events, options = {}) {
         else k.used = reset(k.used);
       }
       if (action === "models-key") k.models = body.models?.length ? body.models : undefined;
+      if (action === "aliases-key") {
+        if (Object.values(body.aliases || {}).some((v) => !String(v).includes("/"))) return route.fulfill({ status: 400, json: { error: "An alias names a model as provider/model" } });
+        k.aliases = Object.keys(body.aliases || {}).length ? body.aliases : undefined;
+      }
       if (action === "accounts-key") k.accounts = body.accounts?.length ? body.accounts : undefined;
+      if (action === "mcp-key") k.mcp = body.mcp?.length ? body.mcp : undefined;
       if (action === "quotas-key") k.quotas = body.quotas || undefined;
+      // as access.Update: a whole number from 0 (no limit) to 1000
+      if (action === "concurrency-key") {
+        if (!Number.isInteger(body.maxConcurrency) || body.maxConcurrency < 0 || body.maxConcurrency > 1000) return route.fulfill({ status: 400, json: { error: "Concurrency: a whole number from 0 to 1000" } });
+        k.maxConcurrency = body.maxConcurrency || undefined;
+      }
+      if (action === "tier-key") k.serviceTier = body.serviceTier || undefined;
+      if (action === "redact-key") k.redact = body.redact === "on" || body.redact === "off" ? body.redact : undefined;
+      if (action === "access-key") k.readOnly = body.readOnly || undefined;
+      // a key put at a place in the list, as access.Update keeps it;
+      // options.refuseMove: the store can't be written
+      if (action === "move-key") {
+        if (options.refuseMove) return route.fulfill({ status: 500, json: { error: "There is no such place in the list of keys" } });
+        keys.splice(body.index, 0, ...keys.splice(keys.indexOf(k), 1));
+      }
       if (action === "copy-key") secret = k.id === lanKeyID ? lanSecret : secrets.get(k.id);
-      return json({ keys, secret });
+      return json({ keys, accountGroups, secret });
     }
     if (url.pathname === "/api/copy") { events.push({ action: "clipboard", body: req.postDataJSON() }); return json({}); }
     if (url.pathname === "/api/usage") return json({ ...sum(rows), ...groups(), agents: [], models: [], series: [], bucket: "day", path: "~/.config/magpie/usage.jsonl" });
@@ -175,9 +250,14 @@ function fixture(lang, theme, events, options = {}) {
     await route.fulfill({ body: await fs.readFile(file), contentType: { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)] });
   };
 }
+// keyAction picks Rotate key or Remove from a key's … menu
+async function keyAction(page, row, label) {
+  await row.locator(".gw-key-more").click();
+  await page.locator(".row-menu").getByRole("menuitem", { name: label, exact: true }).click();
+}
 async function confirmKeyAction(page, row, label) {
-  await row.getByRole("button", { name: label, exact: true }).click();
+  await keyAction(page, row, label);
   await page.locator("#modal").getByRole("button", { name: label, exact: true }).click();
   await page.locator("#modal").waitFor({ state: "hidden" });
 }
-module.exports = { fixture, confirmKeyAction };
+module.exports = { fixture, keyAction, confirmKeyAction };

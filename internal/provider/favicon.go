@@ -12,11 +12,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // FaviconFor finds the site behind a provider's base URL and keeps its icon
@@ -38,6 +39,31 @@ func FaviconFor(ctx context.Context, base, name string) (string, error) {
 		return "", err
 	}
 	return favicon(ctx, guardClient(), sites, name, iconURL)
+}
+
+// IconFromURL keeps the picture at an address the user typed for a custom
+// provider, since many sites have no /favicon.ico (usrname1833). It is
+// fetched as a site's icon is: a public https host only, through the guarded
+// client, within fetchIcon's time and MaxIcon, and kept only when StoreIcon
+// knows it as a picture. With no address, or one that fails, it keeps the
+// letter tile of name (or of base's site) instead, and failed says why.
+func IconFromURL(ctx context.Context, raw, name, base string) (icon, failed string, err error) {
+	return iconFromURL(ctx, guardClient(), raw, cmp.Or(strings.TrimSpace(name), siteLabel(base)), iconURL)
+}
+
+func iconFromURL(ctx context.Context, c *http.Client, raw, name string, check func(string) (string, error)) (icon, failed string, err error) {
+	if raw = strings.TrimSpace(raw); raw != "" {
+		u, err := check(raw)
+		if err != nil {
+			failed = fmt.Sprintf("%s is not a picture's https address on a public host", raw)
+		} else if icon, err = fetchIcon(ctx, c, u); err == nil {
+			return icon, "", nil
+		} else {
+			failed = err.Error()
+		}
+	}
+	icon, err = letterIcon(name)
+	return icon, failed, err
 }
 
 // faviconSites are the https origins to look on for base's icon: its host
@@ -225,9 +251,9 @@ func letterIcon(name string) (string, error) {
 const iconUA = "magpie"
 
 var (
-	linkTag  = regexp.MustCompile(`(?is)<link\b[^>]*>`)
-	tagAttr  = regexp.MustCompile(`(?is)\b(rel|href|sizes|type)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
-	headDone = regexp.MustCompile(`(?i)</head>|<body\b`)
+	linkTag  = lazyre.New(`(?is)<link\b[^>]*>`)
+	tagAttr  = lazyre.New(`(?is)\b(rel|href|sizes|type)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
+	headDone = lazyre.New(`(?i)</head>|<body\b`)
 )
 
 // pageIcons are the pictures a site's home page names as its icon, the

@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,6 +30,7 @@ import (
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -62,6 +65,30 @@ type message struct {
 	Title    string `json:"title"`
 	Variant  string `json:"variant"`
 	Count    int    `json:"count"`
+	// Loads is a "load" event's models and how busy each is, a percent;
+	// -1 clears one (magpie.load in host.js)
+	Loads map[string]float64 `json:"loads"`
+	// Usage is a "usage" event's request, one the plugin sent its vendor
+	// on its own (magpie.usage in host.js)
+	Usage *OwnCall `json:"usage"`
+}
+
+// OwnCall is a request a plugin sent its vendor on its own, outside any
+// request magpie handed it, as it reported it (magpie.usage in host.js):
+// Devin's cache keepalive ping (plugins#592). Kind says what it was for
+// ("cache_keepalive"), Model is the model's id as magpie handed it to the
+// plugin, Input the prompt's tokens without the cache's, Status the
+// vendor's (0 for none) and Millis how long it took.
+type OwnCall struct {
+	Kind       string `json:"kind"`
+	Model      string `json:"model"`
+	Input      int    `json:"input"`
+	Output     int    `json:"output"`
+	CacheRead  int    `json:"cacheRead"`
+	CacheWrite int    `json:"cacheWrite"`
+	Status     int    `json:"status"`
+	Millis     int64  `json:"ms"`
+	Error      string `json:"error"`
 }
 
 type callState uint8
@@ -93,7 +120,7 @@ type call struct {
 	// the body's reader takes them: the host's reader queues them without
 	// ever waiting on one request's consumer (see push).
 	stream      bool
-	cancellable bool // a gateway request owns asynchronous I/O, without a stream slot
+	cancellable bool // asynchronous I/O of its own, without a stream slot: an aborted call is told to the host
 	mu          sync.Mutex
 	queue       []message
 	queued      int           // the queued chunks' decoded bytes
@@ -153,6 +180,13 @@ var (
 	// under it, and so is any RPC result, so a child that never ends a line
 	// fails the host rather than making it allocate without bound.
 	maxWireLine = 32 << 20
+	// streamWait is how long a fetch waits for a stream's window to come
+	// free when the budget's are all held, while its request lives. Past
+	// the budget a fetch used to fail at once (errTooManyCalls), and the
+	// gateway counted that as a 502 and tried again: 192 streams at once
+	// through one plugin gave 298 local refusals that never reached the
+	// vendor (#3890).
+	streamWait = time.Minute
 	// maxHeadBytes and maxHeadEntries are magpie's own head-envelope policy,
 	// not HTTP's: a fetch's head carries at most maxHeadBytes of header bytes
 	// (the UTF-8 bytes of every name and value, plus headEntryCost an entry)
@@ -457,6 +491,88 @@ type host struct {
 	// with magpie's now (proxyMoved), zero for a host not started here.
 	proxy   string
 	proxyAt time.Time
+	// addr is the gateway's address the host was told (hostAddr)
+	addr string
+	// output is the child's stdout and stderr, read apart from its Wait,
+	// and waited gives what that Wait said; both are nil in the tests'
+	// fake hosts, which have no child
+	output *proc.Output
+	waited func() error
+	// tree is the child with what it starts (Output.StartTree), ended
+	// together; nil in the fake hosts
+	tree *proc.Tree
+}
+
+// wait is the child's end: what Wait said, once it has ended and the
+// reader is done with its stdout.
+func (h *host) wait() error {
+	if h.waited == nil {
+		return h.cmd.Wait()
+	}
+	return h.waited()
+}
+
+// reap ends the host the moment its child ends, not once its stdout
+// does. A program the host started that kept the host's stdout (a
+// plugin's Bun.spawn given a copy of fd 1, a daemon it left behind) held
+// the pipe open past the host's end, so the reader never reached EOF,
+// the child was never waited for, and every host stopped left a
+// <defunct> magpie-bun behind until magpie quit (acezan on Discord: 57
+// after 47 hours as a systemd service). proc.Output waits for the child
+// at once and closes the pipe a moment later, which ends the reader too.
+func (h *host) reap() {
+	h.fail(quitErr(h.wait()))
+	live.Lock()
+	delete(live.hosts, h)
+	live.Unlock()
+}
+
+// live are the hosts started and not yet reaped, the retired ones on their
+// way out among them.
+var live = struct {
+	sync.Mutex
+	hosts map[*host]bool
+	// ended is set by EndHosts: no host starts after it
+	ended bool
+}{hosts: map[*host]bool{}}
+
+// errHostsEnded is a host asked for once EndHosts has run.
+var errHostsEnded = errors.New("magpie is restarting; the plugins are back in a moment")
+
+// EndHosts stops every plugin host, waits until each has been waited for,
+// and starts none after: what magpie runs before it puts a new version in
+// its own place (update.Reexec). A host still running at the exec was one
+// nothing waited for after it, so each restart to update (magpie web's
+// AutoRestart) left one <defunct> magpie-bun under magpie's pid for as long
+// as it ran (#3285, found by skygunner and AAEE86; acezan on Discord saw
+// 57 after 47 hours as a systemd service).
+func EndHosts() {
+	live.Lock()
+	live.ended = true
+	hs := make([]*host, 0, len(live.hosts))
+	for h := range live.hosts {
+		hs = append(hs, h)
+	}
+	live.Unlock()
+	hostMu.Lock()
+	current = nil
+	hostMu.Unlock()
+	var wg sync.WaitGroup
+	for _, h := range hs {
+		wg.Go(func() {
+			h.stop()
+			_ = h.wait()
+		})
+	}
+	wg.Wait()
+}
+
+// quitErr is the error of a host whose child ended with err.
+func quitErr(err error) error {
+	if err == nil {
+		err = errors.New("the plugin host quit")
+	}
+	return fmt.Errorf("the plugin host quit: %v", err)
 }
 
 // lineLimit is the longest line this host reads from the child.
@@ -505,6 +621,8 @@ type Loaded struct {
 	ServedBy map[string]string `json:"servedBy,omitempty"`
 	// Tools are the tools its tool hook gives (tools.go)
 	Tools []Tool `json:"tools,omitempty"`
+	// Searches are the web search APIs its search hook gives (search.go)
+	Searches []SearchDef `json:"searches,omitempty"`
 }
 
 // Clash is a provider id more than one plugin signs in to. The host runs
@@ -606,6 +724,20 @@ func OnSignIn(f func(provider, account, said string)) {
 	onSignInMu.Lock()
 	onSignIn = f
 	onSignInMu.Unlock()
+}
+
+var (
+	onUsageMu sync.Mutex
+	onUsage   func(provider, account string, u OwnCall)
+)
+
+// OnUsage registers f to be told of each request a plugin reported it
+// sent on its own (OwnCall): its provider id and the account key it was
+// sent for. f is told in the background.
+func OnUsage(f func(provider, account string, u OwnCall)) {
+	onUsageMu.Lock()
+	onUsage = f
+	onUsageMu.Unlock()
 }
 
 var (
@@ -740,6 +872,23 @@ func Running() bool {
 	return current != nil && current.alive()
 }
 
+// Warm starts the host if none is up and Bun is here. A plugin's page in
+// the window whose plugin has a part for the host too (a local service
+// its page goes to, as Magiczerowxy/magpie-chat's does) is served by the
+// host, which is otherwise started only by a call: at launch, while the
+// providers are first read, and after every Restart (a plugin installed,
+// updated or set, a Bun update) only once something asks a plugin again.
+// Opening such a page is that ask. A host that is up goes through get
+// too, so one started before the gateway moved (hostAddr) is started
+// again with the address the page's service needs.
+func Warm(ctx context.Context) error {
+	if !Running() && !HasBun() {
+		return nil
+	}
+	_, err := get(ctx)
+	return err
+}
+
 func (h *host) alive() bool {
 	select {
 	case <-h.dead:
@@ -777,8 +926,21 @@ func (h *host) stop() {
 		case <-tick.C:
 		}
 	}
+	h.kill()
+}
+
+// kill ends the host's child and every process it started: a plugin's
+// headless browser or daemon outlived a host killed alone, with no parent
+// to end it (620 msedge.exe and 57GB of temp profiles in an hour on one
+// Windows machine, #5402). The tree is the host's session on Unix and its
+// job on Windows (proc.StartTree), so nothing outside it is reached.
+func (h *host) kill() {
+	if h.tree != nil {
+		h.tree.Kill()
+		return
+	}
 	if h.cmd.Process != nil {
-		h.cmd.Process.Kill()
+		_ = h.cmd.Process.Kill()
 	}
 }
 
@@ -900,6 +1062,7 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
 		return nil, false, err
 	}
+	catalog.Seed() // the shipped copy, read until models.dev answers
 	if catalog.Source() == "" {
 		// a plugin's provider has the models models.dev lists for it, as in
 		// OpenCode; sync in the background so starting the host never stalls
@@ -928,20 +1091,30 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	// the host outlives the request that started it
 	proxy := hostProxy(env()) // what bunCommand gives it
 	cmd := bunCommand(context.Background(), bun, settings.Dir(), "run", js)
+	addr := hostAddr(cmd.Env)
+	log.Printf("plugin: host starts with %s", netLine(cmd.Env))
 	cmd.Env = hostEnv(cmd.Env)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, false, err
 	}
-	out, err := cmd.StdoutPipe()
+	// stdout and stderr are read apart from Wait (proc.Output), so the
+	// child is reaped when it ends, whatever holds a copy of them
+	output, err := proc.NewOutput(cmd)
 	if err != nil {
 		return nil, false, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, false, err
+	// started and counted live under one lock, so EndHosts misses none
+	live.Lock()
+	if live.ended {
+		live.Unlock()
+		output.Close()
+		return nil, false, errHostsEnded
 	}
-	if err := cmd.Start(); err != nil {
+	// in a tree of its own: what its plugins start is ended with it
+	tree, waited, err := output.StartTree(cmd)
+	if err != nil {
+		live.Unlock()
 		return nil, false, err
 	}
 	hctx, hcancel := context.WithCancel(context.Background())
@@ -958,10 +1131,20 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		cancel:   hcancel,
 		proxy:    proxy,
 		proxyAt:  time.Now(),
+		addr:     addr,
+		output:   output,
+		waited:   waited,
+		tree:     tree,
 	}
-	go drainStderr(stderr)
+	live.hosts[h] = true
+	live.Unlock()
+	go func() {
+		drainStderr(output.Err)
+		output.ErrRead()
+	}()
 
-	go h.read(out)
+	go h.read(output.Out)
+	go h.reap()
 	go h.writerLoop()
 	go h.ctrlLoop()
 	generation.Add(1)
@@ -978,7 +1161,7 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		// a plugin that is only gateway middleware or an agent runs in
 		// magpie (internal/middleware, internal/agentplug), not here
 		if !e.Off && !InMagpieOnly(Target(e.Spec)) {
-			items = append(items, item{e.Spec, Target(e.Spec), e.Options, Gateway(Target(e.Spec))})
+			items = append(items, item{e.Spec, Target(e.Spec), hostOptions(Target(e.Spec), e.Options), Gateway(Target(e.Spec))})
 		}
 	}
 	var res struct {
@@ -1001,6 +1184,11 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		"plugins":       items,
 		"loadMillis":    pluginLoadWait.Milliseconds(),
 		"listMillis":    pluginListWait.Milliseconds(),
+		"heavy": map[string]any{
+			"mb":          heavyMB,
+			"afterMillis": heavyAfter.Milliseconds(),
+			"everyMillis": heavyEvery.Milliseconds(),
+		},
 	}, &res)
 	if err != nil {
 		crashed := !h.alive()
@@ -1009,12 +1197,57 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	}
 	h.loaded = res.Plugins
 	noteTools(res.Plugins)
+	noteSearches(res.Plugins)
 	for _, p := range res.Plugins {
 		if p.Error != "" {
 			log.Printf("plugin %s didn't load: %s", p.Spec, p.Error)
 		}
 	}
 	return h, false, nil
+}
+
+// ServePages sets whether this magpie's host runs the services plugins'
+// pages talk to (magpie.page.service), true until it is set. The app,
+// magpie web, serve, tray and tui do; a command such as magpie plugin
+// update doesn't, and its host may start while the app's host holds the
+// service's port: a plugin that waits for its port then holds the
+// command up, and goes on trying it in the background, to take it from
+// the app's host when that restarts (#5187).
+func ServePages(on bool) { noPageServices.Store(!on) }
+
+var noPageServices atomic.Bool
+
+// hostOptions are the options the host hands the plugin at target. In a
+// magpie that runs no page services, a service the plugin's option
+// moves is moved to a free port of its own, so the plugin's other parts
+// load at once beside the app's host holding the real one. One no
+// option moves is handed the plugin's options as they are.
+func hostOptions(target string, options map[string]any) map[string]any {
+	if !noPageServices.Load() {
+		return options
+	}
+	w, _ := Window(target)
+	if w == nil || w.Page == nil || w.Page.Service == nil || w.Page.Service.Option == "" {
+		return options
+	}
+	port, err := freePort()
+	if err != nil {
+		return options
+	}
+	out := make(map[string]any, len(options)+1)
+	maps.Copy(out, options)
+	out[w.Page.Service.Option] = float64(port)
+	return out
+}
+
+// freePort is a TCP port on 127.0.0.1 nothing listens on just now.
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
 // pluginLoadWait bounds one plugin's load in the host, and
@@ -1026,6 +1259,41 @@ var (
 	pluginLoadWait = 20 * time.Second
 	pluginListWait = 20 * time.Second
 )
+
+// heavyMB is how much memory a host may hold before it is replaced:
+// past it, and still past it after a full collection, the host says so
+// ("heavy") and a new host takes the calls made from then on while the
+// old one finishes its own (recycle). A plugin that holds on to what
+// its requests leave behind grows the shared host until the system ends
+// it: 783 MiB after 2h25m on a small Linux server, where the kernel's
+// OOM killer took it, with four plugins and their requests going through
+// it. Measured with every plugin of that report loaded and 3000 600KB
+// requests, 4 at a time, a host holds 84 to 236 MiB, so the bound leaves
+// room for that twice over. The host checks every heavyEvery, once it
+// has been up heavyAfter; tests shorten all three.
+var (
+	heavyMB    = 512
+	heavyAfter = 10 * time.Minute
+	heavyEvery = time.Minute
+)
+
+// recycle replaces h, when it is still the host calls go to, as a plugin
+// update does (Restart): the calls h is answering finish on it, and the
+// next call starts a new host. recycles counts the hosts it replaced.
+func (h *host) recycle() {
+	hostMu.Lock()
+	if current != h {
+		hostMu.Unlock()
+		return
+	}
+	current = nil
+	hostMu.Unlock()
+	recycles.Add(1)
+	h.retire()
+	changed()
+}
+
+var recycles atomic.Int64
 
 // drainStderr logs the child's stderr a line at a time. A line over 4 MiB
 // stops the scanner; the rest is read and dropped, so the child is never left
@@ -1056,20 +1324,17 @@ func (h *host) read(out io.Reader) {
 		if errors.Is(err, errLineTooLong) {
 			// a child that never ends a line: stop it rather than allocate
 			h.fail(fmt.Errorf("the plugin host sent a line longer than %d bytes", h.lineLimit()))
-			if h.cmd.Process != nil {
-				_ = h.cmd.Process.Kill()
-			}
+			h.kill()
 			break
 		}
 		if err != nil {
 			break
 		}
 	}
-	err := h.cmd.Wait()
-	if err == nil {
-		err = errors.New("the plugin host quit")
+	if h.output != nil {
+		h.output.OutRead()
 	}
-	h.fail(fmt.Errorf("the plugin host quit: %v", err))
+	h.fail(quitErr(h.wait()))
 }
 
 var (
@@ -1149,10 +1414,23 @@ func (h *host) dispatch(m message) {
 				// account's lapse into logins.json (#1935)
 				tell(func() { f(m.Provider, m.Account, m.Said) })
 			}
+		case "load":
+			noteLoads(m.Provider, m.Loads, time.Now())
+		case "usage":
+			onUsageMu.Lock()
+			f := onUsage
+			onUsageMu.Unlock()
+			if f != nil && m.Usage != nil && m.Provider != "" {
+				u := *m.Usage
+				tell(func() { f(m.Provider, m.Account, u) })
+			}
 		case "toast":
 			log.Printf("plugin: %s %s", m.Title, m.Message)
 		case "log":
 			log.Printf("plugin [%s]: %s", m.Level, m.Message)
+		case "heavy":
+			log.Printf("plugin: the host holds %d MiB after a collection; a new one takes the next calls", m.Count)
+			go h.recycle()
 		}
 		return
 	}
@@ -1445,14 +1723,7 @@ func (h *host) dropCtrl() {
 // when the host already holds its limit of live and retiring calls, so a new
 // call fails clearly rather than a legitimate accepted reply being cut short.
 func (h *host) begin(stream bool) (int64, *call, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.alive() {
-		return 0, nil, errHostGone
-	}
-	c := &call{done: make(chan message, 1), stream: stream, wake: make(chan struct{}, 1), state: callSending}
 	if stream {
-		c.window = streamWindow
 		// a stream holds one window of the budget as well as a call slot, so
 		// the RPC reserve is never spent on one more stream
 		select {
@@ -1460,6 +1731,46 @@ func (h *host) begin(stream bool) (int64, *call, error) {
 		default:
 			return 0, nil, errTooManyCalls
 		}
+	}
+	return h.admit(stream)
+}
+
+// beginStream is begin for a fetch: while the budget's windows are all held
+// it waits for one to come free, for streamWait at most and only while ctx
+// lives, rather than failing a request that would have run a moment later.
+// The wait is outside h.mu, which the call that frees a window takes.
+func (h *host) beginStream(ctx context.Context) (int64, *call, error) {
+	select {
+	case h.streams <- struct{}{}:
+	default:
+		t := time.NewTimer(streamWait)
+		defer t.Stop()
+		select {
+		case h.streams <- struct{}{}:
+		case <-ctx.Done():
+			return 0, nil, context.Cause(ctx)
+		case <-h.dead:
+			return 0, nil, errHostGone
+		case <-t.C:
+			return 0, nil, errTooManyCalls
+		}
+	}
+	return h.admit(true)
+}
+
+// admit registers a call whose stream window, if it is a stream, is taken.
+func (h *host) admit(stream bool) (int64, *call, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.alive() {
+		if stream {
+			<-h.streams
+		}
+		return 0, nil, errHostGone
+	}
+	c := &call{done: make(chan message, 1), stream: stream, wake: make(chan struct{}, 1), state: callSending}
+	if stream {
+		c.window = streamWindow
 	}
 	select {
 	case h.slots <- struct{}{}:
@@ -1491,7 +1802,14 @@ func (h *host) call(ctx context.Context, method string, params, out any) error {
 		return err
 	}
 	c.mu.Lock()
-	c.cancellable = method == "gatewayRequest"
+	// An ordinary RPC is cancellable too: a caller whose context ends has
+	// the host told, so its plugin work is not left running unseen (#4678).
+	// A gateway request and a sign-in's steps were already; now every other
+	// call but init is as well, and a sign-in cancelled or timed out still
+	// saves nothing the plugin answers after (#5016). init is the exception:
+	// a start that overruns is stopped whole, and aborting it would only
+	// interrupt its own load.
+	c.cancellable = method != "init"
 	c.mu.Unlock()
 	if err := h.enqueueCall(ctx, map[string]any{"id": id, "method": method, "params": params}, nil, c); err != nil {
 		c.settle(err)
@@ -1600,6 +1918,10 @@ func forHost(choice string) string {
 		if u, err := netproxy.Parse(c); err == nil {
 			return netproxy.ForBun(u.String())
 		}
+		if settings.IsProxyRef(c) {
+			// a saved proxy that is gone: the request goes nowhere, not direct
+			return netproxy.DeadProxy
+		}
 		return c
 	}
 }
@@ -1646,8 +1968,9 @@ func proxied(hp string) bool {
 // sign-in, renewed by its CLI through the host, then lapsed after every
 // restart of the computer, and only a new host (moving the account back
 // to the built-in and on to the plugin again) brought it back. A proxy
-// changed in Settings never reached a running host either. Called under
-// hostMu.
+// changed in Settings never reached a running host either. Nor did the
+// gateway's address (hostAddr): a port changed in Settings is the next
+// host's. Called under hostMu.
 func (h *host) proxyMoved() bool {
 	every := proxyLookEvery
 	if !proxied(h.proxy) {
@@ -1657,15 +1980,87 @@ func (h *host) proxyMoved() bool {
 		return false
 	}
 	h.proxyAt = time.Now()
-	return hostProxy(env()) != h.proxy
+	e := env()
+	if p := hostProxy(e); p != h.proxy {
+		log.Printf("plugin: the proxy moved, from %s to %s; a new host takes over",
+			netLine(strings.Split(h.proxy, "\x00")), netLine(strings.Split(p, "\x00")))
+		return true
+	}
+	if a := hostAddr(e); h.addr != "" && a != h.addr {
+		log.Printf("plugin: the gateway moved, from %s to %s; a new host takes over", h.addr, a)
+		return true
+	}
+	return false
 }
 
-// hostEnv is env for the host, its *_PROXY named MAGPIE_*_PROXY: Bun
+// netLine is a host's network settings in env as a log line says them:
+// its proxy, without the user and password (netproxy.Redact), NO_PROXY,
+// and what tells Bun which roots to trust. A host's TLS or proxy failure
+// ("unable to get issuer certificate" for a chain that verifies outside
+// it, youyo.p_10001) is read beside it.
+func netLine(env []string) string {
+	keys := []string{"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+		"NODE_EXTRA_CA_CERTS", "NODE_USE_SYSTEM_CA", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+	got := map[string]string{}
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		k = strings.ToUpper(k)
+		if slices.Contains(keys, k) {
+			got[k] = v // exec takes the last
+		}
+	}
+	var parts []string
+	for _, k := range keys {
+		v := strings.TrimSpace(got[k])
+		if v == "" {
+			continue
+		}
+		if strings.HasSuffix(k, "_PROXY") && k != "NO_PROXY" {
+			if v = netproxy.Redact(v); v == "" {
+				v = "(malformed)"
+			}
+		}
+		parts = append(parts, k+"="+v)
+	}
+	if !slices.ContainsFunc(parts, func(p string) bool { return strings.Contains(p, "_PROXY=") && !strings.HasPrefix(p, "NO_PROXY=") }) {
+		parts = append([]string{"no proxy"}, parts...)
+	}
+	return strings.Join(parts, " ")
+}
+
+// hostAddr is the gateway's address a host is told, as MAGPIE_ADDR: the
+// variable's own value when magpie runs under one, else Settings' port on
+// loopback. A plugin with a service of its own reaches magpie's gateway
+// there: Magiczerowxy/magpie-chat's chat server asks MAGPIE_ADDR, then
+// 3425, so with the port set in Settings (or a portable magpie's) its
+// model list was empty and every message failed, "Unable to connect"
+// (yuesh1_ on X, Magiczerowxy/magpie-chat#1). A gateway listening on
+// every interface (MAGPIE_ADDR=0.0.0.0:…) is reached on loopback, as
+// gateway.URL does.
+func hostAddr(env []string) string {
+	a := ""
+	for _, e := range env {
+		if k, v, ok := strings.Cut(e, "="); ok && strings.EqualFold(k, "MAGPIE_ADDR") && v != "" {
+			a = v
+		}
+	}
+	if a == "" {
+		return settings.SavedAddr()
+	}
+	if h, p, err := net.SplitHostPort(a); err == nil && (h == "" || net.ParseIP(h) != nil && net.ParseIP(h).IsUnspecified()) {
+		a = net.JoinHostPort("127.0.0.1", p)
+	}
+	return a
+}
+
+// hostEnv is env for the host, MAGPIE_ADDR the gateway's (hostAddr), its
+// *_PROXY named MAGPIE_*_PROXY: Bun
 // reads *_PROXY once and puts every fetch through them, so a provider set
 // to "direct" couldn't go around them. host.js gives each fetch the proxy
 // they name instead. A SOCKS5 one, which Bun can't use, is bridged.
 func hostEnv(env []string) []string {
-	out := make([]string, 0, len(env))
+	out := make([]string, 0, len(env)+1)
+	addr := hostAddr(env)
 	for _, e := range env {
 		k, v, _ := strings.Cut(e, "=")
 		switch strings.ToUpper(k) {
@@ -1673,11 +2068,13 @@ func hostEnv(env []string) []string {
 			out = append(out, "MAGPIE_"+k+"="+netproxy.ForBun(v))
 		case "NO_PROXY":
 			out = append(out, "MAGPIE_"+k+"="+v)
+		case "MAGPIE_ADDR":
+			// an empty one is Settings' (hostAddr)
 		default:
 			out = append(out, e)
 		}
 	}
-	return out
+	return append(out, "MAGPIE_ADDR="+addr)
 }
 
 // Fetch sends r through the provider's plugin — its loader's fetch, or
@@ -1693,7 +2090,7 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 	if r.Proxy == "" {
 		r.Proxy = proxyOf(ctx)
 	}
-	id, c, err := h.begin(true)
+	id, c, err := h.beginStream(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1733,6 +2130,20 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 
 // errBodyClosed is what a read after the body was closed gets.
 var errBodyClosed = errors.New("the reply's body was closed")
+
+// bodyIdleWait is how long a reply's body may say nothing — no byte between
+// the last and the next — before its read gives the fetch up: a network that
+// died mid-stream can leave a local proxy's socket open but soundless, and a
+// read waiting on the plugin's next chunk then never ends (a stalled read
+// ends only on a chunk, an answer, a close, a cancelled ctx or the host's
+// death). The wait is between bytes, not the reply's whole length: every
+// chunk resets it, so a stream a slow model feeds goes on however long it
+// talks. Thirty minutes, the silence the gateway keeps a translated
+// reply's client alive through (translatedQuietLongest): a reply that
+// comes in one burst at its end (a model at its highest effort, a relay
+// that buffers) is silent for its whole generation, past 10 minutes, and
+// is not cut; a dead connection's read ends at the same bound.
+var bodyIdleWait = 30 * time.Minute
 
 // headRead waits for the call's reply head, giving back the answer it read on
 // the way: the body has to end with that answer too, error and all.
@@ -1793,6 +2204,13 @@ func (b *body) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil // a read that asks for nothing reads nothing
 	}
+	// the idle watchdog: what waits here with no bytes in hand is ended
+	// bodyIdleWait after the last one came, so a plugin gone silent mid-reply
+	// (its socket half-alive on a dead network, #4934) ends the read instead
+	// of holding it for ever. The wait runs only while this Read is the one
+	// waiting, and every pass through the loop waits on a fresh window.
+	idle := time.NewTimer(bodyIdleWait)
+	defer idle.Stop()
 	for {
 		// the end comes first, every time round: a closed body reads
 		// nothing more, and a cancel is not left behind what is queued
@@ -1853,7 +2271,18 @@ func (b *body) Read(p []byte) (int, error) {
 			return 0, b.ctx.Err()
 		case <-b.h.dead:
 			continue
+		case <-idle.C:
+			b.giveUp()
+			return 0, fmt.Errorf("the plugin sent nothing for %s; that fetch was given up on", bodyIdleWait)
 		}
+		// whatever the wait answered, the silence counts afresh from here
+		if !idle.Stop() {
+			select {
+			case <-idle.C:
+			default:
+			}
+		}
+		idle.Reset(bodyIdleWait)
 	}
 }
 

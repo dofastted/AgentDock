@@ -2,19 +2,18 @@ package provider
 
 import (
 	"context"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// The Codex app reads its sign-in only as it opens: an account used up
-// while it runs greys its Send for every model, magpie's included, and
-// stays so after magpie becomes Codex's provider (MasterYi on Discord),
-// till the app is quit and opened again. What follows tells the account
-// is out as soon as a reply says so, not at the next look five minutes
-// on, and keeps which Codex app was open when it ran out, for the GUI to
-// reopen (once) or name.
+// The Codex app greys its Send for every model, magpie's included, while
+// the ChatGPT account it is on is out (MasterYi on Discord), till magpie is
+// its provider and its app-server restarted (codex_app_server.go). What
+// follows tells the account is out as soon as a reply says so, not at the
+// next look five minutes on.
 
 // codexLiveChecks counts the running loops that keep Codex on an account
 // with room (KeepOnAnAccountWithRoom) past their first reading: while one
@@ -32,11 +31,19 @@ var codexRecheck struct {
 	at time.Time
 }
 
-// codexReadNow reads whether Codex's account is out; a var for tests.
+// codexReadNow reads whether Codex's account is out, and signs Codex in
+// to the next account with room when it is, as KeepOnAnAccountWithRoom's
+// look does: the Codex app greys its Send once its account is out, so no
+// request comes to tell magpie again, and that look could be five minutes
+// off (danzi002 on Discord restarted the app each time instead). A var
+// for tests.
 var codexReadNow = func(user string) {
 	StaleAllowance("codex", user)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if _, err := SwitchWhenSpent(ctx, "codex"); err != nil {
+		log.Printf("codex: switching to an account with room: %v", err)
+	}
 	noteCodexUsedUp(CodexUsedUp(ctx))
 }
 
@@ -69,90 +76,24 @@ func CodexMayBeUsedUp(user string) {
 	go codexReadNow(active)
 }
 
-// codexAppOut is the Codex app open when the account it is signed in to
-// ran out: its app-server's pid, and whether the GUI tried reopening it.
-var codexAppOut struct {
-	sync.Mutex
-	user    string
-	pid     int
-	tried   bool
-	checked time.Time
-}
-
-// noteCodexAppOut keeps, as the account Codex is signed in to runs out
-// (out) or has room again, which Codex app was open then.
-func noteCodexAppOut(out bool) {
-	user, pid := "", 0
-	if out {
-		for _, l := range Logins("codex") {
-			if l.Active {
-				user = l.User
-			}
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		ps, err := listProcesses(ctx)
-		cancel()
-		if err == nil {
-			pid = findCodexApp(ps)
-		}
-	}
-	c := &codexAppOut
-	c.Lock()
-	defer c.Unlock()
-	if pid == 0 {
-		// none open: one opened from now reads the sign-in afresh
-		c.user, c.pid, c.tried = "", 0, false
-		return
-	}
-	c.user, c.pid, c.tried, c.checked = user, pid, false, time.Now()
-}
-
-// CodexAppOut is the ChatGPT account of a Codex app that was open when
-// that account ran out and hasn't been opened again since, "" for none:
-// it sends nothing till it is (the agent package's AppOut says whether
-// magpie is Codex's provider for it, which the app needs too).
-func CodexAppOut() string {
-	c := &codexAppOut
-	c.Lock()
-	defer c.Unlock()
-	if c.pid == 0 {
-		return ""
-	}
-	if time.Since(c.checked) > codexDaemonRecheck {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		ps, err := listProcesses(ctx)
-		cancel()
-		// what was known stays when the processes can't be listed
-		if err == nil {
-			c.checked = time.Now()
-			if findCodexApp(ps) != c.pid {
-				c.user, c.pid, c.tried = "", 0, false
-				return ""
-			}
-		}
-	}
-	return c.user
-}
-
-// CodexAppReopenOnce is whether the Codex app CodexAppOut names may be
-// reopened by magpie: true once for each time the account runs out, so
-// a reopen that didn't take is never tried again.
-func CodexAppReopenOnce() bool {
-	c := &codexAppOut
-	c.Lock()
-	defer c.Unlock()
-	if c.pid == 0 || c.tried {
+// CodexServesWhileOut says magpie has something to serve Codex's own
+// model on while the ChatGPT account Codex is signed in to is out: the
+// Codex subscription's fallbacks, set in magpie, or another of its
+// ChatGPT accounts not known out or lapsed. With neither, every turn
+// magpie took over would be refused on that same account, so taking over
+// would only hide the account and its reset from the app and restart the
+// app's app-server twice (xiaoq6285 on Discord, one Plus account).
+func CodexServesWhileOut(model string) bool {
+	if model == "" {
 		return false
 	}
-	c.tried = true
-	return true
-}
-
-// CodexAppReopenTried is whether magpie tried reopening the Codex app
-// CodexAppOut names already, which it doesn't do twice.
-func CodexAppReopenTried() bool {
-	c := &codexAppOut
-	c.Lock()
-	defer c.Unlock()
-	return c.tried
+	if p, _, ok := Resolve("codex/" + model); ok && p.Account != nil && p.Account.Agent == "codex" && len(FallbackModels(p)) > 0 {
+		return true
+	}
+	for _, l := range Logins("codex") {
+		if !l.Active && l.Lapsed == "" && !codexHeldKnown(l.User) {
+			return true
+		}
+	}
+	return false
 }

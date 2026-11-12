@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -36,6 +39,18 @@ type manageAgentJSON struct {
 type managedJSON struct {
 	sessions.Managed
 	Via []usage.Via `json:"via,omitempty"`
+	// Keys: the gateway's other "agent|id" keys for it than its own
+	// (sessions.GatewayKeys), for the page to find its speed by
+	Keys []string `json:"keys,omitempty"`
+}
+
+// otherKeys are s's gateway keys but its own agent|id.
+func otherKeys(s sessions.Session) []string {
+	k := sessions.GatewayKeys(s)
+	if len(k) < 2 {
+		return nil
+	}
+	return k[1:]
 }
 
 // listedGateway are the gateway sessions the session lists show: not those
@@ -57,20 +72,20 @@ type trashedJSON struct {
 	Icon string `json:"icon"`
 }
 
-func agentLooks() map[string]*agent.Agent {
-	out := map[string]*agent.Agent{}
-	for _, a := range agent.Clients() {
+func agentLooks() map[string]agent.Look {
+	out := map[string]agent.Look{}
+	for _, a := range agent.Looks() {
 		out[a.ID] = a
 	}
 	return out
 }
 
-func trashJSON(looks map[string]*agent.Agent) []trashedJSON {
+func trashJSON(looks map[string]agent.Look) []trashedJSON {
 	out := []trashedJSON{}
 	for _, t := range sessions.Trash() {
 		j := trashedJSON{Trashed: t, Name: t.Agent, Icon: "generic"}
-		if a := looks[t.Agent]; a != nil {
-			j.Name, j.Icon = a.SharedName(), a.Icon
+		if a, ok := looks[t.Agent]; ok {
+			j.Name, j.Icon = a.Shared, a.Icon
 		}
 		j.Cwd = tilde(j.Cwd)
 		for i := range j.Items {
@@ -82,6 +97,7 @@ func trashJSON(looks map[string]*agent.Agent) []trashedJSON {
 }
 
 func sessionManageRoutes(mux *http.ServeMux, w Windows) {
+	sessionReadsRoutes(mux)
 	mux.HandleFunc("POST /api/sessions/relocate-claude", func(rw http.ResponseWriter, r *http.Request) {
 		var in sessions.ClaudeRelocation
 		if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 16384)).Decode(&in); err != nil {
@@ -113,9 +129,24 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, map[string]bool{"recording": settings.Load().GatewayConversations})
 	})
+	// speeds: each session's output speed now (gateway.Speeds), for the
+	// page's curves while it is open. Not under /api/sessions, which
+	// holds the session files' warm-up for a page that reads them: this
+	// is asked every second and reads none.
+	mux.HandleFunc("GET /api/speeds", func(rw http.ResponseWriter, r *http.Request) {
+		sp := []gateway.Speed{}
+		if gw := served.Load(); gw != nil {
+			sp = append(sp, gw.Speeds()...)
+		}
+		writeJSON(rw, sp)
+	})
 	// manage is the agents with sessions, and every session of ?agent=
 	// (the one with the most when none is named), and the trash.
 	mux.HandleFunc("GET /api/sessions/manage", func(rw http.ResponseWriter, r *http.Request) {
+		// the Codex app's list forgets the threads deleted before it
+		// was told of each delete, once a run
+		sessions.TidyCodexCatalog()
+		defer sessions.OneListing()()
 		looks := agentLooks()
 		out := struct {
 			Agents   []manageAgentJSON `json:"agents"`
@@ -129,12 +160,18 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			Recording bool   `json:"recording"`
 			// Recorded: some gateway conversation text is kept, to delete
 			Recorded bool `json:"recorded"`
-		}{Agents: []manageAgentJSON{}, Sessions: []managedJSON{}, Terminal: runtime.GOOS == "darwin" && !isWeb(w),
+			// Reads: which agents' own sessions magpie may read; the page
+			// asks first when nothing is decided (asked false)
+			Reads readsJSON `json:"reads"`
+		}{Reads: readsNow(), Agents: []manageAgentJSON{}, Sessions: []managedJSON{}, Terminal: runtime.GOOS == "darwin" && !isWeb(w),
 			Trash: trashJSON(looks), TrashDir: tilde(sessions.TrashDir()), Recording: settings.Load().GatewayConversations,
 			Recorded: sessions.HasGatewayConversations()}
 		out.Home, _ = os.UserHomeDir()
 		want := r.URL.Query().Get("agent")
 		gateway := listedGateway(usage.GatewaySessions(time.Time{}, nil))
+		// one that spent nothing, with no file of the agent's here either,
+		// has nothing to show (SpentNothing)
+		gateway = slices.DeleteFunc(gateway, usage.GatewaySession.SpentNothing)
 		// a gateway session its agent keeps too is counted once; only the
 		// agents with gateway sessions, and the one shown, are read (#2776)
 		of := map[string]bool{}
@@ -145,8 +182,8 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			counts := map[string]*manageAgentJSON{}
 			for _, a := range agents {
 				j := manageAgentJSON{AgentCount: a, Name: a.Agent, Icon: "generic"}
-				if l := looks[a.Agent]; l != nil {
-					j.Name, j.Icon = l.SharedName(), l.Icon
+				if l, ok := looks[a.Agent]; ok {
+					j.Name, j.Icon = l.Shared, l.Icon
 				}
 				counts[a.Agent] = &j
 			}
@@ -157,8 +194,8 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 				j := counts[s.Agent]
 				if j == nil {
 					j = &manageAgentJSON{AgentCount: sessions.AgentCount{Agent: s.Agent}, Name: s.Agent, Icon: "generic"}
-					if l := looks[s.Agent]; l != nil {
-						j.Name, j.Icon = l.SharedName(), l.Icon
+					if l, ok := looks[s.Agent]; ok {
+						j.Name, j.Icon = l.Shared, l.Icon
 					}
 					counts[s.Agent] = j
 				}
@@ -186,6 +223,11 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 		out.Agent = view.Agent
 		if out.Agent != "" {
 			list := view.Sessions
+			if !sessions.Deletable(out.Agent) {
+				// the ones taken off the list (sessions.Forget), until used again
+				hidden := sessions.GatewayHidden()
+				list = slices.DeleteFunc(slices.Clone(list), func(m sessions.Managed) bool { return hidden(m.Agent, m.ID, m.Last) })
+			}
 			var modelEffort map[string][]sessions.ModelEffort
 			if out.Agent == "codex" {
 				modelEffort = usage.CodexModelEffort(usage.All)
@@ -211,7 +253,7 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			vias := usage.Vias(since.Add(-time.Minute))
 			for _, s := range list {
 				s.Path = tilde(s.Path)
-				out.Sessions = append(out.Sessions, managedJSON{Managed: s, Via: vias.Of(s.Agent + "|" + s.ID)})
+				out.Sessions = append(out.Sessions, managedJSON{Managed: s, Via: viaOf(vias, s.Session), Keys: otherKeys(s.Session)})
 			}
 			sizes := sessions.GatewaySizes()
 			for _, g := range gateway {
@@ -227,6 +269,13 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			sort.SliceStable(out.Sessions, func(i, j int) bool {
 				return out.Sessions[i].Last.After(out.Sessions[j].Last)
 			})
+			// the agent's tab counts the rows it lists: a Codex subagent
+			// thread whose parent is gone is no row (keptSubagents)
+			for i := range out.Agents {
+				if out.Agents[i].Agent == out.Agent {
+					out.Agents[i].Count = len(out.Sessions)
+				}
+			}
 		}
 		writeJSON(rw, out)
 	})
@@ -270,6 +319,10 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			var err error
 			if g, ok := listed[id]; ok {
 				_, err = sessions.DeleteGateway(g.Agent, g.ID, g.ID, g.Last)
+			} else if sessions.Forgettable(in.Agent) {
+				// an uninstalled agent's rows of a database magpie only
+				// reads: they leave the list, its files are not touched
+				_, err = sessions.Forget(in.Agent, id)
 			} else if !sessions.Deletable(in.Agent) {
 				err = errors.New("magpie can't delete this agent's sessions")
 			} else {
@@ -421,7 +474,13 @@ func searchSessions(ctx context.Context, agentID, query string, budget time.Dura
 	native := map[string]bool{}
 	if sessions.HasTranscript(agentID) {
 		for _, m := range sessions.ListAgent(agentID) {
-			native[m.ID] = true
+			// every id the gateway can know it by (a ZCode session's bare
+			// id, #5754), so its record is not searched again below
+			for _, k := range sessions.GatewayKeys(m.Session) {
+				if a, id, ok := strings.Cut(k, "|"); ok && a == agentID {
+					native[id] = true
+				}
+			}
 			jobs = append(jobs, job{m.Session, m.Last})
 		}
 	} else {

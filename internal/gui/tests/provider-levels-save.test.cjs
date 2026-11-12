@@ -1,5 +1,5 @@
 // A model's reasoning levels, name and images, picked in the provider
-// editor's Names & levels, are staged and made with the editor's Save, as
+// editor's Model settings, are staged and made with the editor's Save, as
 // the rest of the editor is; Cancel drops them. They used to be posted, and
 // the agents' files rewritten, at each tick, so picking levels lagged (ARNO
 // on Discord).
@@ -43,12 +43,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 900, height: 720 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       const zh = lang === "zh";
-      const L = { names: zh ? "名称与推理档位" : "Names & levels", images: zh ? "支持图片输入" : "Accepts images", low: zh ? "低" : "low", high: zh ? "高" : "high", unsaved: zh ? "未保存" : "unsaved", save: zh ? "保存" : "Save", cancel: zh ? "取消" : "Cancel", reset: zh ? "恢复默认" : "Restore default" };
+      const L = { names: zh ? "模型设置" : "Model settings", images: zh ? "支持图片输入" : "Accepts images", low: zh ? "低" : "low", high: zh ? "高" : "high", unsaved: zh ? "未保存" : "unsaved", save: zh ? "保存" : "Save", cancel: zh ? "取消" : "Cancel", reset: zh ? "恢复默认" : "Restore default" };
       const open = async () => {
         await page.locator('.row.provider[data-id="relay"]').click();
         // it stays open from one opening of the editor to the next

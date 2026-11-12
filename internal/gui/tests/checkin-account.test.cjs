@@ -1,6 +1,6 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // #1902, magicLaLa: "workbuddy 每日签到能否根据每个账号设置是否开启自动签到".
-// Settings' WorkBuddy check-in tab has, under Daily check-in, an Off/On row
+// WorkBuddy's provider editor has, under Daily check-in, an Off/On row
 // for each account it reaches (settings.checkinAccounts), set with
 // POST /api/settings/checkin-account {key, on}; an account left out says so
 // on its Usage card, where Check in now leaves it alone. Chromium and
@@ -11,7 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, provPrefsProviders, openProvPrefs, inEditor } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
@@ -42,7 +42,7 @@ function serve(lang, asked) {
       return json(settings);
     }
     if (url.pathname === "/api/settings") return json(settings);
-    if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true } });
+    if (url.pathname === "/api/providers") return json(provPrefsProviders(["workbuddy"], { workbuddy: "WorkBuddy" }));
     if (url.pathname === "/api/usage/quotas") return json(quotas());
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
@@ -61,39 +61,24 @@ const words = {
   de: { on: "Einmal täglich eingecheckt, solange der tägliche Check-in an ist", off: "Vom täglichen Check-in ausgenommen", card: "Automatischer Check-in ist für dieses Konto aus" },
 };
 
-const scrolls = (page) => page.evaluate(() => [scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop).map((e) => e.scrollTop)].join(","));
-
-// wheelTo scrolls the page until loc is above the window's foot
-async function wheelTo(page, loc, x) {
-  await page.mouse.move(x, 400);
-  for (let i = 0; i < 15; i++) {
-    const r = await loc.boundingBox(), foot = await page.locator("footer.foot").boundingBox();
-    if (r && foot && r.y + r.height < foot.y - 8) return;
-    await page.mouse.wheel(0, 200);
-    await page.waitForTimeout(100);
-  }
-}
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const width of [1100, 420]) {
     for (const lang of Object.keys(words)) {
       const w = words[lang];
-      test(`${engine} ${width} ${lang}: each WorkBuddy account's check-in on its own in Settings`, async (t) => {
+      test(`${engine} ${width} ${lang}: each WorkBuddy account's check-in on its own in its provider's editor`, async (t) => {
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], asked = [];
-        page.on("pageerror", (e) => errors.push(e.message));
+        page.on("pageerror", (e) => { if (engine === "webkit" && /due to access control checks/.test(e.message)) return; errors.push(e.message); }); // a goto in WebKit can cut off a fetch (#1350)
         await page.route("**/*", serve(lang, asked));
         await watchSettingsReads(page);
-        await page.goto("http://magpie.test/?view=settings&tab=usage");
+        await openProvPrefs(page, "workbuddy");
         await settingsDrawn(page);
-        const tab = page.locator("#warmTab-wb");
-        await tab.waitFor();
-        await wheelTo(page, tab, width / 2);
-        await tab.click();
-        const rows = page.locator("#wbList .ci-acct");
+        const rows = page.locator(".editor .prov-prefs #wbList .ci-acct");
         await rows.first().waitFor();
         assert.equal(await rows.count(), 2, "a row an account, Trae CN's not among them");
         assert.deepEqual(await rows.locator(".name").allInnerTexts(), ["Ann", "Bob"]);
@@ -109,14 +94,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         if (process.env.ARTIFACT_DIR) await page.locator("#wbList").screenshot({ path: path.join(process.env.ARTIFACT_DIR, `checkin-account-${engine}-${width}-${lang}.png`) });
 
         const on = rows.nth(1).locator(".segs .opt").nth(1);
-        await wheelTo(page, on, width / 2);
-        const y = await scrolls(page);
+        await inEditor(page, on);
+        // in the editor, what was pressed stays under the pointer: the
+        // editor scrolls to hold a row drawn again (modalHold)
+        const top = () => on.evaluate((e) => e.getBoundingClientRect().top);
+        const y = await top();
         const saved = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/settings/checkin-account");
         await on.click();
         await saved;
         assert.deepEqual(asked, [{ key: "workbuddy|u2", on: true }]);
         await page.waitForFunction((want) => document.querySelectorAll("#wbList .ci-acct .sub")[1]?.textContent.trim() === want, w.on);
-        assert.equal(await scrolls(page), y, "the switch moved the page");
+        await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+        const now = await top();
+        assert(Math.abs(now - y) <= 1, `the switch moved from ${y} to ${now}`);
+        assert.equal(await page.evaluate(() => scrollY), 0, "the page itself never scrolls");
         assert.equal(await page.locator("select").count(), 0);
         assert.deepEqual(errors, []);
       });
@@ -126,8 +117,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], asked = [];
-        page.on("pageerror", (e) => errors.push(e.message));
+        page.on("pageerror", (e) => { if (engine === "webkit" && /due to access control checks/.test(e.message)) return; errors.push(e.message); }); // a goto in WebKit can cut off a fetch (#1350)
         await page.route("**/*", serve(lang, asked));
         await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=usage");

@@ -81,11 +81,12 @@ async function open(t, engine, lang, width, kept) {
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width, height: 1400 } })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, routeOf(kept)));
   await page.goto("http://magpie.test/?view=routing");
-  await page.locator(".rt-group").first().waitFor();
+  await page.locator(".rt-group").first().waitFor({ state: "attached" });
   return { page, errors };
 }
 

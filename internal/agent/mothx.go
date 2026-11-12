@@ -77,7 +77,8 @@ func mothxIn(at place) *Agent {
 			return wiringOff("MothX", path, func(k string) (string, bool) { return edit.GetJSON(path, "providers."+magpieID+"."+k) },
 				"baseUrl", at.v1(), "apiKey", key())
 		},
-		Sync: func() error { return syncJSON(path, "providers."+magpieID, block) },
+		ListOnly: true,
+		Sync:     func() error { return syncJSON(path, "providers."+magpieID, block) },
 		Notice: func() string {
 			if p, _ := get("defaultProvider"); p == magpieID && Running(`(^|/)mothx( |$)`, `(^|/)vibecoding( |$)`) {
 				return noticeMothx.String()
@@ -118,7 +119,7 @@ func mothxIn(at place) *Agent {
 					return pair(v)
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(mothxOwn(path, cur["model"]), viaMagpie("mothx", magpieID+"/")...)
+					return withVia(mothxOwn(path, cur["model"]), "mothx", magpieID+"/")
 				},
 			},
 			{
@@ -155,9 +156,9 @@ func mothxDir(at place) string {
 		if app := appdir.Getenv("APPDATA"); app != "" {
 			return filepath.Join(app, "mothx")
 		}
-		return filepath.Join(at.home, "AppData", "Roaming", "mothx")
+		return at.join("AppData", "Roaming", "mothx")
 	}
-	return filepath.Join(at.home, ".mothx")
+	return at.join(".mothx")
 }
 
 // mothxBlockKept is theirsKept for magpie's provider in MothX's
@@ -187,7 +188,7 @@ func mothxBlockKept(path string, value func() any) func() any {
 // thinking:{type:enabled}, whatever served it.
 func mothxProvider(at place, key string) any {
 	ms := []map[string]any{}
-	for _, m := range magpieModels("mothx") {
+	for _, m := range sharedModels("mothx") {
 		ms = append(ms, mothxModelJSON(m))
 	}
 	return map[string]any{"baseUrl": at.v1(), "api": "openai-chat", "apiKey": key,
@@ -267,7 +268,7 @@ func mothxOffered(model string) []string {
 	if !ok {
 		return nil
 	}
-	for _, m := range magpieModels("mothx") {
+	for _, m := range sharedModels("mothx") {
 		if m.ID != ref || len(m.Efforts) == 0 {
 			continue
 		}

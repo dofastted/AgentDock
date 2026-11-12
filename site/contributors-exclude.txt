@@ -1,0 +1,7 @@
+# People who asked not to be named in magpie's release notes or on the
+# contributors page (usemagpie.ai/docs/contributors). One name or GitHub
+# login a line, as it is credited; case doesn't matter. Lines after # are
+# comments.
+#
+# To be left off: say so on Discord, open an issue, or send a pull request
+# adding your name here.

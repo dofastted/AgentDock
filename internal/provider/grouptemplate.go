@@ -3,10 +3,11 @@ package provider
 import (
 	"cmp"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -32,10 +33,22 @@ const (
 	// providers, in order, so one vendor down or out of quota doesn't stop
 	// the agent.
 	TemplateSteady = "steady"
+	// TemplatePlan is the strongest model of each of up to three
+	// providers, those billed by a plan (a subscription or token plan)
+	// before the pay-as-you-go ones, so the allowance already paid for is
+	// spent first and a key is the last resort.
+	TemplatePlan = "plan"
+	// TemplateFast is the same strongest models as TemplateSteady, the
+	// provider that has answered fastest lately first (Fastest).
+	TemplateFast = "fast"
+	// TemplateEven is the strongest model alone, from every provider that
+	// serves it (up to four), taken in turn over all their keys and
+	// accounts (Rotate).
+	TemplateEven = "even"
 )
 
 // TemplateKinds are the templates, in the order they are offered.
-var TemplateKinds = []string{TemplateSmart, TemplateThrifty, TemplateSteady}
+var TemplateKinds = []string{TemplateSmart, TemplateThrifty, TemplateSteady, TemplatePlan, TemplateFast, TemplateEven}
 
 // The intents TemplateSmart's classifier chooses between. Hard comes
 // first, so a turn the classifier can't place stays on the strong model,
@@ -63,11 +76,14 @@ const (
 	NeedProvider  = "provider"
 	NeedProviders = "providers"
 	NeedCheap     = "cheap"
+	// NeedPlan: no provider is billed by a plan, so "plan first" has
+	// nothing to put first
+	NeedPlan = "plan"
 )
 
 // nonChat are words of a model id that isn't for an agent's chat: it
 // draws, speaks, listens, embeds or searches rather than answering a turn.
-var nonChat = regexp.MustCompile(`embed|rerank|image|imagen|dall-e|tts|whisper|audio|realtime|transcribe|moderation|ocr|veo|sora|speech|research|guard|computer-use`)
+var nonChat = lazyre.New(`embed|rerank|image|imagen|dall-e|tts|whisper|audio|realtime|transcribe|moderation|ocr|veo|sora|speech|research|guard|computer-use`)
 
 // smallWords are words of a cheap model's id; tinyWords those of one too
 // small to be trusted with an agent's turn when a larger cheap one is
@@ -76,7 +92,7 @@ var nonChat = regexp.MustCompile(`embed|rerank|image|imagen|dall-e|tts|whisper|a
 var (
 	smallWords = []string{"mini", "nano", "flash", "haiku", "lite", "small", "air", "turbo", "fast", "instant", "tiny", "highspeed"}
 	tinyWords  = []string{"nano", "lite", "tiny"}
-	sizeWord   = regexp.MustCompile(`^(\d+(?:\.\d+)?)b$`)
+	sizeWord   = lazyre.New(`^(\d+(?:\.\d+)?)b$`)
 )
 
 // sizeOf is how small a model's id says it is: small, and tiny.
@@ -131,7 +147,9 @@ func templateModels() []rated {
 		r := rated{e: e}
 		if pr, ok := MakerPrice(e.Model); ok {
 			r.out, r.maker = pr.Output, true
-		} else if pr, ok := priceOf(s, e.Provider, true, e.Model); ok {
+		} else if pr, ok := priceOf(s, e.Provider, true, e.Model, time.Time{}); ok {
+			// without a rate window's rate (#2463): a template weighs how
+			// strong a model is, which the hour it is made in doesn't change
 			r.out = pr.Output
 		}
 		r.small, r.tiny = sizeOf(e.Model)
@@ -233,11 +251,14 @@ var TemplateNames = map[string]string{
 	TemplateSmart:   "Hard to strong, easy to cheap",
 	TemplateThrifty: "Cheap first",
 	TemplateSteady:  "Never stuck",
+	TemplatePlan:    "Plan first",
+	TemplateFast:    "Fastest first",
+	TemplateEven:    "Spread evenly",
 }
 
 // TemplateIDs are the ids agents pick a template's group as, before a
 // number when one is in use.
-var TemplateIDs = map[string]string{TemplateSmart: "smart-split", TemplateThrifty: "cheap-first", TemplateSteady: "never-stuck"}
+var TemplateIDs = map[string]string{TemplateSmart: "smart-split", TemplateThrifty: "cheap-first", TemplateSteady: "never-stuck", TemplatePlan: "plan-first", TemplateFast: "fastest-first", TemplateEven: "spread-evenly"}
 
 // templateOf is the template kind made of ms, its classifier a decider of
 // ds when there is one.
@@ -250,10 +271,21 @@ func templateOf(kind string, ms []rated, ds []Entry) Template {
 	}
 	best := strong[0]
 	switch kind {
-	case TemplateSteady:
-		// the strongest of each provider, up to three
+	case TemplateSteady, TemplatePlan, TemplateFast:
+		// the strongest of each provider, up to three; the plan ones
+		// first for TemplatePlan
+		pick := strong
+		if kind == TemplatePlan {
+			plan := func(m rated) bool { return m.e.Provider.BillingKind() == BillingPlan }
+			if !slices.ContainsFunc(strong, plan) {
+				t.Why, t.Need = "no provider of yours is billed by a plan: add a subscription or token plan", NeedPlan
+				return t
+			}
+			pick = slices.Clone(strong)
+			slices.SortStableFunc(pick, func(a, b rated) int { return -cmp.Compare(btoi(plan(a)), btoi(plan(b))) })
+		}
 		seen := map[string]bool{}
-		for _, m := range strong {
+		for _, m := range pick {
 			if len(t.Group.Members) == 3 {
 				break
 			}
@@ -266,6 +298,23 @@ func templateOf(kind string, ms []rated, ds []Entry) Template {
 			t.Group.Members = nil
 			t.Why, t.Need, t.Of = "it needs models from two providers: "+best.e.Provider.Name+" is the only one", NeedProviders, best.e.Provider.Name
 		}
+		if kind == TemplateFast {
+			t.Group.Routing = Fastest
+		}
+		return t
+	case TemplateEven:
+		// the one strongest model, from each provider that serves it
+		seen := map[string]bool{}
+		for _, m := range strong {
+			if len(t.Group.Members) == 4 {
+				break
+			}
+			if bareModel(m.e.Model) == bareModel(best.e.Model) && !seen[m.e.Provider.ID] {
+				seen[m.e.Provider.ID] = true
+				t.Group.Members = append(t.Group.Members, m.e.ID)
+			}
+		}
+		t.Group.Routing = Rotate
 		return t
 	}
 	cheap := cheapest(ms, best)

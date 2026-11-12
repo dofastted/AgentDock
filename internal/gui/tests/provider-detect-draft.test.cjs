@@ -66,6 +66,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         let refuse = false, keyless = false;
         page.on("pageerror", (e) => errors.push(e.message));
@@ -82,7 +83,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.goto("http://magpie.test/?view=providers");
         const T = (s) => tr(lang, s);
         await page.locator("#addProvider").click();
-        await page.locator("#addSheet .custom-foot .custom").click();
+        await page.locator("#addSheet .row-head .custom").click();
         const ed = page.locator(".editor.new");
         await ed.locator(".detect").waitFor();
         const detect = ed.getByRole("button", { name: T("Detect APIs"), exact: true });

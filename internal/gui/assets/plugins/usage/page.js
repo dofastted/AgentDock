@@ -18,6 +18,50 @@ function headersPanel(label, first, headers) {
   return panel;
 }
 
+// A call's HTTP headers both ways (usrname1833 on Discord: 查看原始请求和
+// 原始响应的http头, to debug what a capture would show), as the gateway
+// read them out, secrets taken out: the client's, then each request magpie
+// sent upstream for it and the head of its answer. Folded under the bodies
+// on the Gateway page's recent calls and on Routing; open when open is.
+// h is /api/gateway/call's headers, or the archive's upstream ones.
+function wireHeadersView(h, open, toggle) {
+  const box = el("section", "call-wire" + (open ? " open" : ""));
+  const b = el("button", "text call-wire-toggle");
+  b.setAttribute("aria-expanded", String(open));
+  const chev = el("span", "call-chev");
+  chev.append(svg(CHEV_R, 11, 1.6));
+  b.append(chev, el("span", "", t("HTTP headers")));
+  b.onclick = (ev) => { ev.stopPropagation(); toggle(); };
+  box.append(b);
+  if (!open) return box;
+  box.append(wireHeadersGrid(h, true));
+  return box;
+}
+
+// the panels: the client's request (when withClient), and each upstream
+// request with its answer
+function wireHeadersGrid(h, withClient) {
+  const grid = el("div", "call-details call-wire-grid");
+  if (withClient) {
+    const client = headersPanel(t("From the client"), "", h.request);
+    client.classList.add("call-wire-wide");
+    grid.append(client);
+  }
+  const ups = h.upstream || [];
+  if (!ups.length) grid.append(el("p", "call-wire-note", t("No request went upstream.")));
+  let plugin = false;
+  for (const u of ups) {
+    plugin ||= !!u.plugin;
+    grid.append(
+      headersPanel(u.plugin ? t("Handed to plugin {name}", { name: u.plugin }) : t("Sent upstream"), `${u.method} ${u.url}`, u.request),
+      headersPanel(t("Upstream response"), u.error ? u.error : `${u.proto || "HTTP"} ${u.status} · ${ledTook(u.ms)}`, u.response),
+    );
+  }
+  if (h.more) grid.append(el("p", "call-wire-note", t("{n} more requests upstream, not kept", { n: h.more })));
+  if (plugin) grid.append(el("p", "call-wire-note", t("A plugin sends a request on to its vendor with headers of its own, which magpie doesn't see.")));
+  return grid;
+}
+
 // The archived file, whole, however large: to the browser in magpie web,
 // to Downloads in the app (#447).
 async function downloadArchive(name, b) {
@@ -102,10 +146,17 @@ function archivePanel(name, id, redraw) {
     archiveBodyPanel("Response Body", got.response, id + "|archive"),
   );
   box.append(grid);
+  // what magpie sent upstream for it, and the heads that came back
+  if (got.upstream?.length) box.append(wireHeadersGrid({ upstream: got.upstream, more: got.upstreamMore }, false));
   return box;
 }
 
-const PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
+// "24 hours" is the day up to now rather than since midnight (mahiro233 on
+// Discord), the server's rolling window (#2075). The reader's pick of these
+// is kept for the next time the page opens; picked days are not, as they
+// go stale.
+const PERIODS = [["today", "Today"], ["last:24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
+try { const v = localStorage.getItem("magpie.usagePeriod"); if (PERIODS.some(([id]) => id === v)) period = v; } catch {}
 
 // The reader's time zone, which magpie reads the period's days, the chart's
 // hours and a picked day in: magpie web may be read from another zone than
@@ -125,17 +176,48 @@ let usageRead = 0;
 async function loadUsage(asked) {
   renderUsageTab();
   renderUsageEvery(); // the refresh's tooltip says what it reads on this tab
-  if (asked) quotasOpened();
+  // only the Overview shows the allowances: the page opened on another
+  // tab asks no vendor, nor reads their history, beside its own read and
+  // the page's way in (#4064)
+  if (asked && usageTab === "usage") quotasOpened();
   if (usageTab === "sessions") return loadSessions();
-  if (usageTab === "requests") return loadLedger();
+  if (usageTab === "requests") return loadLedger(asked && ledger && ledgerWant === ledParams({ offset: ledOffset, limit: LED_PAGE }) ? "open" : false);
   if (usageTab === "context") return window.loadContext?.();
+  // the figures on hand are this period's: opened again (its tab pressed
+  // while on it, the Overview's tab) they stay, and are read again behind
+  // them as the timer reads them, so the page neither empties nor moves
+  // (jiabubu on Discord)
+  if (asked && usage && usageFor === usageKey() && !$("#view-usage").classList.contains("loading")) return refreshUsage();
   renderUsageLoading();
   if (!asked) loadQuotas();
-  const p = period, read = ++usageRead;
+  const p = period, k = usageKey(), read = ++usageRead;
   const next = await api("usage?period=" + encodeURIComponent(p) + usageZoneQ());
   if (read !== usageRead || view !== "usage" || usageTab !== "usage" || period !== p) return;
-  usage = next;
+  usage = next; usageFor = k;
   renderUsage();
+}
+// usageFor: the period and zone the figures on hand (usage) were read for
+let usageFor = "";
+const usageKey = () => period + usageZoneQ();
+// A read past a moment shows as one: the refresh turns (on the Overview each
+// card's with it), and nothing on the page is taken out (jiabubu on Discord)
+const readingN = new WeakMap();
+function usageReading(p, box) {
+  let on = false;
+  const tm = setTimeout(() => { on = true; readingN.set(box, (readingN.get(box) || 0) + 1); box.classList.add("reading"); }, 200);
+  const done = () => {
+    clearTimeout(tm);
+    if (!on) return;
+    const n = readingN.get(box) - 1;
+    readingN.set(box, n);
+    if (!n) box.classList.remove("reading");
+  };
+  p.then(done, done);
+}
+// the allowances' whole read (loadQuotas, app.js)
+function quotaReading(p) {
+  const b = $("#subscriptionUsage");
+  if (b) usageReading(p, b);
 }
 
 // the period picker, in the page's head, for the Overview and Requests
@@ -161,10 +243,12 @@ function renderPeriod(loading) {
   if (range) b.title = t("Days picked: {days}", { days: rangeName(range) });
   b.onclick = () => {
     if (b.classList.contains("open")) return closeProtoMenu();
-    openRangeMenu(b, range, (from, to) => {
+    // on a phone the strip is hidden behind the head's menu, which opens it
+    openRangeMenu(b.offsetParent ? b : $("#usageRangeMenu"), range, (from, to) => {
+      const picked = periodDays(from + ".." + to);
       for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b);
-      b.lastChild.textContent = rangeName({ from, to });
-      b.title = t("Days picked: {days}", { days: rangeName({ from, to }) });
+      b.lastChild.textContent = rangeName(picked);
+      b.title = t("Days picked: {days}", { days: rangeName(picked) });
       b.setAttribute("aria-label", b.title);
       slide(seg, "period");
       pickPeriod(from + ".." + to);
@@ -174,23 +258,96 @@ function renderPeriod(loading) {
   slide(seg, "period");
 }
 
+// On a phone the head's period, Sessions' range and Context's days are
+// one menu, "7 days ⌄", over whichever of them the tab shows, so the tabs
+// are the head's one strip there (app.css hides the strips). It follows
+// that strip as each tab redraws its own, and a pick clicks the strip's
+// option, so every choice keeps the one handler it has.
+{
+  const b = $("#usageRangeMenu");
+  const strips = ["#period", "#sessRange", "#ctxRange"].map((q) => $(q));
+  const shown = () => {
+    const box = strips.find((x) => !x.hidden);
+    const seg = box && (box.matches(".segs") ? box : box.querySelector(".segs"));
+    return seg ? [...seg.querySelectorAll(":scope > .opt")] : [];
+  };
+  const draw = () => {
+    const opts = shown();
+    b.hidden = !opts.length;
+    if (!opts.length) return;
+    const on = opts.find((o) => o.classList.contains("on")) || opts[0];
+    b.disabled = opts.every((o) => o.disabled);
+    b.replaceChildren(el("span", "", on.textContent.trim()), svg(CHEV, 11, 1.8));
+  };
+  b.onclick = (e) => {
+    e.stopPropagation();
+    if (b.classList.contains("open")) return closeProtoMenu();
+    const opts = shown();
+    const on = opts.findIndex((o) => o.classList.contains("on"));
+    openProtoMenu(b, opts.map((o, i) => ({ v: String(i), name: o.textContent.trim(), literalName: true, note: "" })), String(on), (v) => opts[+v]?.click(), "Time range", "sess-menu");
+  };
+  const watch = new MutationObserver(draw);
+  for (const x of strips) watch.observe(x, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "disabled"] });
+  draw();
+}
+
 function pickPeriod(id) {
   period = id; ledDay = ""; ledOffset = 0;
+  if (PERIODS.some(([p]) => p === id)) try { localStorage.setItem("magpie.usagePeriod", id); } catch {}
   loadUsage().catch((e) => status(e.message, "err"));
 }
 
 const dayKeyOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 // rangeName says picked days short: "Oct 1 – Oct 7", the year only when it
-// isn't this one, one day alone as itself
-function rangeName({ from, to }) {
+// isn't this one, one day alone as itself, and the minutes an end names
+// after its day: "Oct 1 09:30 – 18:00" within one day
+function rangeName({ from, to, fromAt = "", toAt = "" }) {
   const year = new Date().getFullYear();
   const name = (k) => dayOfKey(k).toLocaleDateString(intlLang(), { month: "short", day: "numeric", ...(dayOfKey(k).getFullYear() !== year ? { year: "numeric" } : {}) });
-  return from === to ? name(from) : name(from) + " – " + name(to);
+  if (!fromAt && !toAt) return from === to ? name(from) : name(from) + " – " + name(to);
+  const end = from === to ? toAt || "24:00" : name(to) + (toAt ? " " + toAt : "");
+  return name(from) + " " + (fromAt || "00:00") + " – " + end;
 }
+// typedTime reads a time typed into the range menu, "9:30", "0930" or "09:30",
+// as "09:30"; "" when empty, null when it isn't one. The end's "24:00" is
+// its day's end, which is no minute of its own.
+function typedTime(v, end) {
+  v = v.trim();
+  if (!v || (end && /^24:?00$/.test(v))) return "";
+  const m = /^([01]?\d|2[0-3]):?([0-5]\d)$/.exec(v);
+  return m ? m[1].padStart(2, "0") + ":" + m[2] : null;
+}
+// readsNote: on an empty page, whether magpie is not yet allowed to read the
+// agents' session files, the only reason Claude Code's and Codex's own calls
+// (tokens, time, speed) are missing with no provider set up (simonzyzy on X).
+// It asks once what the Sessions page's consent knows, and says so with the
+// one button that grants it for the agents found.
+async function readsNote(host) {
+  let r;
+  try { r = await api("sessions/reads"); } catch { return; }
+  if (!r || r.asked || r.gateway || !r.found?.length || !host.isConnected) return;
+  const box = el("div", "reads-note");
+  const names = r.found.map((x) => x.name).join(t(", "));
+  box.append(el("p", "", t("magpie reads no agent's session files until you allow it, so {names} calls aren't counted here yet.", { names })));
+  const go = el("button", "text primary", t("Count {names}", { names }));
+  go.type = "button";
+  go.onclick = async () => {
+    go.disabled = true;
+    const agents = {};
+    for (const x of r.found) agents[x.agent] = true;
+    try {
+      await api("sessions/reads", { all: false, agents });
+      await loadUsage();
+    } catch (e) { status(e.message, "err"); go.disabled = false; }
+  };
+  box.append(go);
+  host.append(box);
+}
+
 // noCallsIn is what an empty page says of the period it is on
 function noCallsIn(p) {
   if (periodDays(p)) return "No calls on the days picked.";
-  return { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[p] || "No calls yet.";
+  return { today: "No calls today.", "last:24h": "No calls in the last 24 hours.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[p] || "No calls yet.";
 }
 
 // openRangeMenu is the app's own menu for picking days (#1492): a few
@@ -234,7 +391,37 @@ function openRangeMenu(anchor, current, choose) {
   nav.append(prev, month, next);
   const grid = el("div", "rm-grid");
   grid.setAttribute("role", "grid");
-  box.append(head, quick, nav, grid);
+  // the minutes the first day begins at and the last ends at, a whole day
+  // each when left empty; Enter applies them to the days already picked
+  const times = el("div", "rm-times");
+  const timeIn = (v, hint, label) => {
+    const i = el("input", "rm-time");
+    Object.assign(i, { type: "text", inputMode: "numeric", maxLength: 5, placeholder: hint, value: v || "", spellcheck: false, autocomplete: "off" });
+    i.setAttribute("aria-label", t(label));
+    i.oninput = () => i.removeAttribute("aria-invalid");
+    i.onkeydown = (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const r = start ? null : current;
+      if (r) withTimes(r.from, r.to);
+    };
+    return i;
+  };
+  const fromT = timeIn(current?.fromAt, "00:00", "Start time"), toT = timeIn(current?.toAt, "24:00", "End time");
+  times.append(svg("M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11zM8 5v3.2l2 1.3", 12, 1.4), fromT, el("span", "rm-dash", "–"), toT);
+  // the two days with the minutes typed, chosen; false when a time isn't
+  // one or the range would end before it begins
+  const withTimes = (fromDay, toDay) => {
+    const a = typedTime(fromT.value, false), z = typedTime(toT.value, true);
+    if (a == null) fromT.setAttribute("aria-invalid", "true");
+    if (z == null) toT.setAttribute("aria-invalid", "true");
+    if (a == null || z == null) return false;
+    if (fromDay === toDay && z && (a || "00:00") >= z) { toT.setAttribute("aria-invalid", "true"); return false; }
+    closeProtoMenu();
+    choose(fromDay + (a ? "T" + a : ""), toDay + (z ? "T" + z : ""));
+    return true;
+  };
+  box.append(head, quick, nav, grid, times);
   const draw = (focusDay) => {
     head.textContent = start ? t("Now the last day") : t("Pick the first day, then the last");
     month.textContent = shown.toLocaleDateString(intlLang(), { year: "numeric", month: "long" });
@@ -260,8 +447,7 @@ function openRangeMenu(anchor, current, choose) {
         e.stopPropagation();
         if (!start) { start = k; draw(k); return; }
         const [from, to] = start <= k ? [start, k] : [k, start];
-        closeProtoMenu();
-        choose(from, to);
+        if (!withTimes(from, to)) { start = null; draw(); }
       };
       cells.push(b);
     }
@@ -306,7 +492,12 @@ function renderUsageLoading() {
   view.setAttribute("aria-busy", "true");
   renderPeriod(true);
   $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
-  renderQuotas();
+  // cards drawn already stay as they are: the read of the allowances that
+  // goes with every load (loadQuotas) draws them again once it answers.
+  // Drawn here as well, every card and curve was built twice, the first
+  // time inside the click that opened the page, so its motion stuttered
+  // (_hii11 on Discord)
+  if (!quotas || !$("#subscriptionUsage").hasChildNodes()) renderQuotas();
   const stats = $("#stats");
   stats.classList.remove("empty");
   stats.replaceChildren();
@@ -321,6 +512,7 @@ function renderUsageLoading() {
   // still there while the period loads (#809, Hu9956: 用量界面红框这行会延迟几秒才会出现)
   for (const h of $$("#view-usage .row-head:not(#quotaHead, .plugin-panel > .row-head)")) h.hidden = true;
   $("#usageNote").textContent = "";
+  $("#usageClear").hidden = true;
 }
 
 // costHead is the Usage head's sum: the cost at effective prices, or, when
@@ -340,7 +532,7 @@ function costHead(c, note, title) {
 // a request magpie sent a provider by itself to test it (SourceProbe)
 const probeWhy = () => t("magpie sent this itself to test the provider (Test, Detect APIs or a model list), not for an agent. It is not counted in any total.");
 const unpricedCalls = (n) => t(n === 1 ? "{n} call unpriced" : "{n} calls unpriced", { n: ledNum(n) });
-const unpricedCallsWhy = (n) => n ? t(n === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n }) : t("Estimated using effective model prices, including custom prices");
+const unpricedCallsWhy = (n) => n ? t(n === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n }) : t("Estimated at effective model prices. A model's price at one provider is set in that provider's Model settings and counts over its list price");
 // renderCosts redraws whatever on the Usage page shows a cost, once the
 // currency changes — the numbers alone, not the page around them, so a
 // click on the setting never moves anything it isn't showing (#212)
@@ -350,6 +542,35 @@ function renderCosts() {
   if (sessions) renderSessions();
   document.dispatchEvent(new Event("magpie-costs-changed"));
 }
+// sharedBalances (keyCards): the keys magpie found to read one account's
+// balance (sharedBalance, the first one's name) as one card, the first's,
+// with the keys it stands for (sharedKeys): mimi on Discord, a site's three
+// keys each showing the account's $8.39 and its curve. Keys that read
+// their own, or another account's, stay each its own.
+function sharedBalances(list) {
+  if (!list.some((q) => q.sharedBalance)) return list;
+  const same = (a, b) => a.provider === b.provider && (a.from || "") === (b.from || "") && a.sharedBalance === b.sharedBalance;
+  const out = [];
+  for (const q of list) {
+    if (!q.sharedBalance) { out.push(q); continue; }
+    const of = list.filter((x) => x.sharedBalance && same(x, q));
+    if (of[0] !== q) continue;
+    out.push(of.length > 1 ? { ...q, sharedKeys: of.map((x) => x.user) } : q);
+  }
+  return out;
+}
+// beside such a card's key, how many more keys its balance is for, and on
+// hover which
+function sharedKeysNote(q) {
+  const n = q.sharedKeys.length - 1;
+  const s = el("span", "quota-of quota-shared", t(n === 1 ? "+1 key" : "+{n} keys", { n }));
+  s.title = t("One balance for the account these keys share: {keys}", { keys: q.sharedKeys.join(", ") });
+  return s;
+}
+// the keys' sum's tooltip: an account several keys share counted once
+function keysSumTip(subs) {
+  return subs.some((q) => q.sharedKeys) ? t("The balances added up, each account's once") : t("The {n} keys' balances added up", { n: subs.length });
+}
 // quotaWho is how an account's card names it (#1515): by the name the user
 // gave it, the account beside it, else the account; and the key plan it
 // stands in for (seat) when that isn't already its name. A team's GLM
@@ -357,7 +578,7 @@ function renderCosts() {
 function quotaWho(q) {
   const out = [];
   if (q.alias) {
-    const a = el("span", "user quota-alias", q.alias);
+    const a = el("span", "user quota-alias" + (q.named ? " own-name" : ""), q.alias);
     a.title = q.user ? q.alias + " · " + q.user : q.alias;
     out.push(a);
     if (q.user) {
@@ -375,8 +596,47 @@ function quotaWho(q) {
     s.title = t("The same seat as the key plan {name}, shown once, on this account's card", { name: q.seat });
     out.push(s);
   } else if (q.seat) out[0].title += "\n" + t("The same seat as the key plan {name}, shown once, on this account's card", { name: q.seat });
-  if (q.user || q.alias) out.push(hideAccounts.eye(q.user || q.alias));
+  if (q.sharedKeys) out.push(sharedKeysNote(q));
+  if (q.user || q.alias) out.push(hideAccounts.eye(q.user || q.alias, q.provider));
   return out;
+}
+
+// quotaWarm is Warm up on the card of a Codex or Claude account whose
+// 5-hour window isn't running (01huadalang on Discord, who looked here, not
+// in Settings): the request Settings › Usage's Warm up now sends (POST
+// /api/warm-now {agent, user}), for this account. Idle is as the
+// warm-up tells it (idle in codex_warmup.go): nothing used and its reset a
+// whole window away, or gone by; or not read at all, which a Claude account
+// never used is, while a Codex account with no 5-hour window has none to
+// start. One just warmed reads the same for warmSlack, so it waits that out.
+const quotaWarmed = new Map();
+function quotaWarm(q) {
+  const agent = q.provider, user = q.user, key = agent + "\n" + user?.toLowerCase();
+  if (!user || q.error || !(state.settings?.[agent + "Users"] || []).some((u) => u.toLowerCase() === user.toLowerCase())) return null;
+  const w = q.windows?.find((x) => x.name === "5 hours"), now = Date.now(), at = w?.resetsAt ? Date.parse(w.resetsAt) : 0;
+  if (w ? !(at && at <= now) && (w.used > 0 || at && at - now < 5 * 3600e3 - 600e3) : agent !== "claude") return null;
+  const busy = quotaWarmed.get(key);
+  if (busy && busy !== true && now - busy < 600e3) return null;
+  const b = el("button", "text acct-warm" + (busy === true ? " busy" : ""), t("Warm up"));
+  b.type = "button";
+  b.disabled = busy === true;
+  b.title = t("The 5-hour window hasn't started: one tiny request starts it now");
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    quotaWarmed.set(key, true);
+    renderQuotas();
+    try {
+      await api("warm-now", { agent, user });
+      quotaWarmed.set(key, Date.now());
+      status(t("Warmed up {who}", { who: user }), "ok");
+    } catch (err) {
+      quotaWarmed.delete(key);
+      status(t("Couldn't warm up {who}: {why}", { who: user, why: err.message }), "err");
+    }
+    renderQuotas();
+    loadQuotas(); // the window it started
+  };
+  return b;
 }
 
 function ownCalls(n) {
@@ -424,6 +684,10 @@ const USAGE_FOLD_TITLES = {
   keys: ["Show the gateway keys", "Fold the gateway keys away"],
 };
 function mountUsageFolds() {
+  // how the allowances are shown, and their alerts, are set in
+  // Settings › Allowances
+  const toSet = $("#usageToSet");
+  if (toSet) toSet.onclick = (e) => openSettingsAt(e, "usage", "#quotaLeftRow");
   for (const b of $$("#usagePane .row-head .fold[data-fold]")) {
     b.prepend(svg(CHEV_R, 11, 1.6));
     b.onclick = () => {
@@ -455,10 +719,11 @@ function usageParts(texts) {
   return out;
 }
 
-// The Overview's token totals count what went in and out; the cache's
+// The Usage pages' token totals count what went in and out; the cache's
 // tokens, read and written, can be counted in them too (#2378), as the
-// Requests tab's total always has them. Kept as the reader left it
-// (magpie.usageWithCache).
+// Requests tab's total always has them — the Overview's tiles, chart and
+// lists and, since #2591, the Sessions tab's alike. Kept as the reader
+// left it (magpie.usageWithCache).
 let usageWithCache = false;
 try { usageWithCache = localStorage.getItem("magpie.usageWithCache") === "1"; } catch {}
 const cacheOf = (x) => (x.cache_read || 0) + (x.cache_write || 0);
@@ -479,7 +744,9 @@ function usageTokensPick() {
     ], usageWithCache ? "1" : "", (v) => {
       usageWithCache = v === "1";
       try { localStorage.setItem("magpie.usageWithCache", usageWithCache ? "1" : "0"); } catch {}
-      renderUsage();
+      // the tab it was picked on follows; the pick lives on the Overview's
+      // and the Sessions tab's tokens tiles (#2591)
+      (usageTab === "sessions" ? renderSessions : renderUsage)();
     }, "Token totals", "sess-menu");
   };
   return b;
@@ -507,8 +774,10 @@ function renderUsage() {
   if (empty) {
     stats.classList.add("empty");
     const none = noCallsIn(period);
-    stats.append(el("div", "none", t(none) + " " + t("Point an agent at a catalog model and use it; every call through the gateway is counted here.")));
+    stats.append(el("div", "none", t(none) + " " + t("Calls through the gateway and the calls Claude Code's and Codex's own session files record are counted here, with no provider set up.")));
+    readsNote(stats);
     $("#usageNote").textContent = "";
+    $("#usageClear").hidden = true;
     return;
   }
   stats.classList.remove("empty");
@@ -534,10 +803,10 @@ function renderUsage() {
   // written count is secondary and only fits in the tooltip.
   // a vendor that counts no cache (cache_unknown) is left out (#3464)
   const hitRate = cacheHitOf(u);
-  const hit = u.cache_read && hitRate !== null ? t("hit rate {p}", { p: Math.round(100 * hitRate) + "%" }) : "";
+  const hit = u.cache_read && hitRate !== null ? t("hit rate {p}", { p: hitPct(hitRate) }) : "";
   tile(fmtN(u.cache_read), t("cache read"), hit, u.cache_write ? t("{n} written", { n: fmtN(u.cache_write) }) + cacheTTLs(u, fmtN) : "");
   tile(fmtN(u.reasoning), t("reasoning"), t("inside output"));
-  tile(String(u.calls), t(u.calls === 1 ? "call" : "calls"), [u.errors ? t("{n} failed", { n: u.errors }) : "", u.retried ? t("{n} answered on a retry", { n: u.retried }) : "", u.unpriced ? t("{n} unpriced", { n: u.unpriced }) : ""].filter(Boolean).join(" · "), u.unpriced ? unpricedCallsWhy(u.unpriced) : "");
+  tile(String(u.calls), t(u.calls === 1 ? "call" : "calls"), [u.credited ? ledCredits(u).textContent : "", u.errors ? t("{n} failed", { n: u.errors }) : "", u.retried ? t("{n} answered on a retry", { n: u.retried }) : "", u.canceled ? t("{n} canceled", { n: u.canceled }) : "", u.unpriced ? unpricedCalls(u.unpriced) : ""].filter(Boolean).join(" · "), u.unpriced ? unpricedCallsWhy(u.unpriced) : "");
 
   // the timeline: one bar per hour, day or week; output sits on top of input
   const chart = $("#chart");
@@ -568,6 +837,7 @@ function renderUsage() {
   const total = Math.max(1, usageTokens(u));
   const list = (id, groups, act) => {
     const box = typeof id === "string" ? $("#" + id) : id;
+    keepIcons(box); // a logo made again blinks (keepIcons)
     box.replaceChildren();
     for (const g of groups) {
       const r = el("div", "row stat");
@@ -578,6 +848,10 @@ function renderUsage() {
       const sub = [];
       if (g.sub) sub.push(g.sub);
       sub.push(t(g.calls === 1 ? "{n} call" : "{n} calls", { n: g.calls }));
+      // what the calls cost in their plan's credits, as the replies said
+      // (WorkBuddy's 积分): an account's, a model's, an agent's (lcyksp
+      // on Discord), not only their tokens
+      if (g.credited) sub.push(ledCredits(g).textContent);
       // magpie's own calls apart from the agents' (#1839): magpie's row
       // says it is, and a model's, a key's or an account's how many of
       // its calls were
@@ -608,13 +882,14 @@ function renderUsage() {
       // how much of its prompt came from the cache, counted as the cache
       // read tile counts it (#925)
       const hitRate = cacheHitOf(g);
-      const hit = g.cache_read && hitRate !== null ? " · " + t("hit rate {p}", { p: Math.round(100 * hitRate) + "%" }) : "";
+      const hit = g.cache_read && hitRate !== null ? " · " + t("hit rate {p}", { p: hitPct(hitRate) }) : "";
       num.append(el("b", "", fmtN(usageTokens(g))), el("small", "", t("{a} in · {b} out", { a: fmtN(g.input), b: fmtN(g.output) }) + (g.cache_read ? " · " + t("{n} cached", { n: fmtN(g.cache_read) }) : "") + hit));
       r.append(num);
       r.append(el("div", "cost", fmtCost(g) ? "≈" + fmtCost(g) : ""));
       if (act) act(r, g);
       box.append(r);
     }
+    keptIcons = null;
   };
   // a client hidden from the Agents list (ikunbots on X: curl,
   // Go-http-client, python-httpx beside the agents in use) is left out of
@@ -641,6 +916,7 @@ function renderUsage() {
         ...(countable(g.id) ? [{ name: "Count as an agent…", icon: COUNT_AS, run: () => pickCountAs(b, g) }] : []),
         ...counted.map((c) => ({ name: t("Count {client} on its own", { client: c }), icon: OUT, run: () => countClientAs(c, "") })),
         { name: "Hide from this list", icon: EYE_OFF, sep: countable(g.id) || counted.length > 0, run: () => hideUsageAgent(g.id, true) },
+        ...(hidden.length ? [{ name: t("Show {n} Hidden", { n: hidden.length }), literal: true, icon: EYE, sep: true, run: (e) => openHidden(e, "usageAgentsHid", () => { usageHidOpen = true; renderUsage(); }) }] : []),
       ]);
     };
     if (counted.length) {
@@ -667,13 +943,133 @@ function renderUsage() {
     b.onclick = (e) => { e.stopPropagation(); hideUsageAgent(g.id, false); };
     r.append(b);
   });
-  list("usageModels", u.models);
+  // a model's usage cleared (CrazyMouse_TT on X: a local model deployed
+  // again, its requests, speed and cache wanted from nothing)
+  list("usageModels", u.models, (r, g) => {
+    if (!g.model) return;
+    r.classList.add("acts");
+    const b = el("button", "icon us-more");
+    b.type = "button";
+    b.setAttribute("aria-haspopup", "menu");
+    b.setAttribute("aria-label", t("Actions for {name}", { name: g.name || g.model }));
+    b.append(svg(DOTS, 14, 2.2));
+    const menu = () => {
+      const again = agentMenu?.anchor === b;
+      closeAgentMenu();
+      if (again) return;
+      openRowMenu(b, [{ name: "Set price…", icon: PRICE_TAG, run: () => setModelPrice(g.model) }, { name: "Clear usage…", icon: USAGE_CLEAR, run: () => clearUsage(g) }]);
+    };
+    b.onclick = (e) => { e.stopPropagation(); menu(); };
+    r.oncontextmenu = (e) => { e.preventDefault(); menu(); };
+    r.querySelector(".share").after(b);
+  });
   list("usageAccounts", u.accounts || []);
   list("usageKeys", u.callerKeys || []);
   $("#usageNote").textContent = t("Counted from the providers' own usage reports on every call through the gateway · {path}", { path: u.path });
+  const clear = $("#usageClear");
+  clear.hidden = false;
+  clear.onclick = () => clearUsage();
   // the account cards say how many of this period's requests were
   // magpie's own (ownLine), which they could only once the summary came
   if (quotas && (u.accounts?.some((g) => g.own?.calls) || $("#subscriptionUsage .quota-own"))) renderQuotas();
+}
+
+// clearUsage clears the Usage page's figures, after the reader confirms:
+// one model's (g, from the Models list) or everything's (no g). The calls
+// up to now stop being counted on the usage pages, here and on the
+// computers this one syncs with; the request log keeps them, so a key's
+// spending limit and the allowances still count them
+// (settings.UsageCleared).
+const USAGE_CLEAR = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v3.5M9 7v3.5";
+async function clearUsage(g) {
+  const ok = await confirmAction(
+    g ? t("Clear the usage of {model}?", { model: g.name || g.model }) : t("Clear all usage?"),
+    (g
+      ? t("Every call to {model} at {provider} so far stops being counted on the Usage page: its requests, tokens, cost, speed and cache, in every period, on this computer and those it syncs with.", { model: g.name || g.model, provider: (g.sub || g.provider || "").split(" · ")[0] })
+      : t("Every call so far stops being counted on the Usage page: the requests, tokens, cost, speed and cache of every agent and model, in every period, on this computer and those it syncs with."))
+      + " " + t("Gateway keys' spending limits and the allowances still count these calls. This can't be undone."),
+    t("Clear"),
+  );
+  if (!ok) return;
+  try {
+    await api("usage/clear", g ? { provider: g.provider || "", model: g.model } : {});
+    status(g ? t("The usage of {model} is cleared", { model: g.name || g.model }) : t("All usage is cleared"), "ok");
+    ledger = null;
+    await loadUsage();
+  } catch (e) {
+    status(e.message, "err");
+  }
+}
+
+// setModelPrice: a model's price from any provider (*/model), from its row
+// on the Usage page (soilzhu80 on X): a model an agent ran is often in no
+// provider's list, so no provider's Model settings can price it. Empty
+// boxes take the maker's list price, shown greyed; Restore default takes
+// the set price away. The pages count past calls at it too.
+const PRICE_TAG = "M8.5 2.5H13.5V7.5L7.5 13.5L2.5 8.5ZM10.8 5.2h.01";
+async function setModelPrice(model) {
+  let now;
+  try { now = await api("model-price?model=" + encodeURIComponent(model)); } catch (e) { return status(e.message, "err"); }
+  const shown = (n) => String(Math.round(n * 1e6) / 1e6);
+  const ed = el("div", "editor price-ask");
+  const head = el("div", "ehead");
+  head.append(el("b", "", t("Price of {model}", { model })));
+  ed.append(head, el("p", "lib-confirm", t("What {model} costs from every provider that has no price of its own for it. The Usage and Sessions pages count its calls at it, past ones too.", { model })));
+  const box = el("div", "price-ask-parts");
+  box.append(el("span", "price-ask-unit", t("Price, $ / 1M tokens")));
+  const cells = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write", "Cache write"]].map(([k, l]) => {
+    const part = el("label", "mpart");
+    const i = input(now.price ? shown(now.price[k]) : "", now.maker ? shown(now.maker[k]) : "");
+    i.inputMode = "decimal";
+    i.dataset.part = k;
+    part.append(el("span", "", t(l)), i);
+    box.append(part);
+    return i;
+  });
+  const bad = el("p", "hint price-ask-bad");
+  bad.hidden = true;
+  ed.append(box, bad);
+  const send = async (price, said) => {
+    try {
+      await api("model-price", { model, price });
+      closeConfirmAsk();
+      status(said, "ok");
+      ledger = null;
+      loadUsage();
+    } catch (e) { bad.textContent = e.message; bad.hidden = false; }
+  };
+  const go = el("button", "text primary", t("Save"));
+  go.onclick = (e) => {
+    e.stopPropagation();
+    const typed = cells.map((i) => i.value.trim());
+    if (typed.every((v) => !v)) return now.price ? send(null, t("{model} is counted at its list price again", { model })) : closeConfirmAsk();
+    const price = {};
+    for (const [n, i] of cells.entries()) {
+      const k = i.dataset.part, v = typed[n] ? decimalOf(typed[n]) : now.maker ? now.maker[k] : n < 2 ? NaN : 0;
+      if (!(v >= 0)) {
+        bad.textContent = typed[n] || now.maker ? t("A price is a number of dollars, 0 or more") : t("{id} has no list price: give its input and output prices", { id: model });
+        bad.hidden = false;
+        return i.focus(NO_SCROLL);
+      }
+      price[k] = v;
+    }
+    send(price, t("{model} is counted at the price you set", { model }));
+  };
+  for (const i of cells) i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") go.click(); else if (e.key === "Escape") closeConfirmAsk(); };
+  const bar = el("div", "bar");
+  if (now.price) {
+    const back = el("button", "text", t("Restore default"));
+    back.onclick = (e) => { e.stopPropagation(); send(null, t("{model} is counted at its list price again", { model })); };
+    bar.append(back);
+  }
+  const cancel = el("button", "text", t("Cancel"));
+  cancel.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+  bar.append(el("span", "grow"), cancel, go);
+  ed.append(bar);
+  confirmAsk = ed;
+  openModal(ed);
+  $("#modal").classList.add("lib");
+  cells[0].focus(NO_SCROLL);
 }
 
 // countable is whether the Usage page's Agents list offers to count a
@@ -703,6 +1099,18 @@ async function countClientAs(client, as) {
   }
 }
 
+// openHidden opens a list's hidden ones from a row's menu (yuu003348 on
+// Discord: 从概览中隐藏 后 无法取消隐藏): the line under the list, opened, with
+// the keyboard on it, brought into sight when the menu's click asks
+function openHidden(e, id, open) {
+  open();
+  const line = $("#" + id + " .us-hidline");
+  if (!line || line.closest("[hidden]")) return;
+  line.focus({ preventScroll: true });
+  const box = $("#" + id), v = $("#view-usage"), r = box.getBoundingClientRect(), b = v.getBoundingClientRect();
+  if ((r.top < b.top || r.bottom > b.bottom) && scrollOnPurpose(e, 400)) box.scrollIntoView({ block: "nearest" });
+}
+
 // hideUsageAgent takes a client out of the Usage page's Agents list, or
 // puts it back: drawn at once, put back if the save fails. Its calls stay
 // in the ledger and in every total.
@@ -729,6 +1137,168 @@ async function hideUsageAgent(id, hide) {
   }
 }
 
+// ---------- allowance cards hidden from the Overview ----------
+//
+// An allowance card can be hidden from the Overview (whqtian_07012 on
+// Discord: StepFun's plan card wanted, its balance card not), from the
+// card's own menu (quotaCardMenus). Only from this page: routing, caps and
+// the counting never hear of it, the tray panel's Allowances tab has its
+// own (Arrange), and a menu bar cell asking for a hidden card shows it
+// until the page is left. Each is kept by its tray card id and its kind
+// (cardHideKey), in magpie's settings (usageCardsHidden), so every window
+// and magpie web agree; one line at the section's end says how many, and
+// has them back.
+let quotaHidOpen = false; // the hidden cards listed under their line
+let usagePeek = ""; // a card a menu bar cell asked for, shown though hidden
+new MutationObserver(() => { if ($("#view-usage").hidden) usagePeek = ""; }).observe($("#view-usage"), { attributes: true, attributeFilter: ["hidden"] });
+const cardHideKind = (q) => q.balance && !q.windows?.length && !q.plan ? "balance" : "plan";
+const cardHideKey = (q) => trayCardID(q) + "|" + cardHideKind(q);
+// the keys a card as drawn stands for: a plan's card carrying its key's
+// balance (keyCards) hides both
+const cardHideKeys = (q) => [cardHideKey(q), ...(q.balanceCard ? [q.balanceCard + "|balance"] : [])];
+const hiddenCards = () => new Set(state.settings?.usageCardsHidden || []);
+const cardPeeked = (q) => !!usagePeek && (trayCardID(q) === usagePeek || q.provider === usagePeek);
+// overviewCards: the cards the Overview draws, a provider's keys sharing
+// one balance already one card (sharedBalances), the hidden left out
+function overviewCards(list) {
+  const hid = hiddenCards();
+  list = sharedBalances(list);
+  return hid.size ? list.filter((q) => !hid.has(cardHideKey(q)) || cardPeeked(q)) : list;
+}
+// quotaCardMenus gives a card its menu: a right-click, the keyboard's menu
+// key on its handle, or on a touch screen a long press (iOS Safari sends
+// no contextmenu for one), for the account whose section it was on, or
+// the whole card from its head
+// when a long press last opened a card's menu; never, at first (from 0, a
+// menu opened in the page's first second ate every click outside it)
+let quotaPressed = -Infinity;
+// the mouse events a phone makes up once the finger lifts don't close it,
+// nor press what the finger was on
+const quotaPressing = () => !!agentMenu && performance.now() - quotaPressed < 1000;
+for (const k of ["mousedown", "click"]) addEventListener(k, (e) => { if (quotaPressing() && !e.target.closest?.(".row-menu")) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+function quotaCardMenus(card, subs) {
+  let press = null;
+  card.oncontextmenu = (e) => {
+    if (e.target.closest("input, textarea")) return;
+    e.preventDefault();
+    // Android sends one after the long press that opened it already
+    if (quotaPressing()) return;
+    quotaCardMenu(e.target, card, subs);
+  };
+  const stop = () => { clearTimeout(press?.timer); press = null; };
+  card.addEventListener("pointerdown", (e) => {
+    stop();
+    if (e.pointerType !== "touch" || usageArranging || e.target.closest(".us-handle, .us-more, input, textarea")) return;
+    const at = e.target;
+    press = { x: e.clientX, y: e.clientY, timer: setTimeout(() => { press = null; quotaPressed = performance.now(); quotaCardMenu(at, card, subs); }, 550) };
+  });
+  card.addEventListener("pointermove", (e) => { if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 8) stop(); });
+  for (const k of ["pointerup", "pointercancel", "pointerleave"]) card.addEventListener(k, stop);
+}
+// quotaCardMore: the card's ⋯ at its head's end, the same menu where it
+// is seen (jen_celeus on X: OpenCode Zen's card, with no usage to show,
+// wanted hiding, and a right-click is nowhere to be seen); shown as the
+// card is hovered, as an Agents row's is, and always where nothing hovers
+function quotaCardMore(card, subs) {
+  const b = el("button", "icon us-more");
+  b.type = "button";
+  b.setAttribute("aria-haspopup", "menu");
+  b.setAttribute("aria-label", t("Actions for {name}", { name: quotaName(subs[0]) }));
+  b.title = b.getAttribute("aria-label");
+  b.append(svg(DOTS, 14, 2.2));
+  b.onclick = (e) => { e.stopPropagation(); quotaCardMenu(b, card, subs, b); };
+  return b;
+}
+function quotaCardMenu(target, card, subs, from) {
+  let part = [...card.children].find((c) => c.contains(target));
+  while (part && !part.classList.contains("subscription-account") && !part.classList.contains("subscription-head")) part = part.previousElementSibling;
+  const who = part?.classList.contains("subscription-account") && subs.find((q) => trayCardID(q) === part.dataset.card);
+  const of = who ? [who] : subs;
+  const anchor = from || card.querySelector(".us-handle") || card.querySelector(".subscription-head");
+  const again = agentMenu?.anchor === anchor;
+  closeAgentMenu();
+  if (again) return;
+  const one = of.length === 1 && of[0];
+  // a card shown though hidden, a menu bar cell having asked for it
+  // (usagePeek): its way back, not Hide again
+  const hid = hiddenCards(), peeked = of.flatMap(cardHideKeys).filter((k) => hid.has(k));
+  const others = hiddenQuotas().length;
+  openRowMenu(anchor, [
+    ...(peeked.length ? [{ name: "Show in Overview", icon: EYE, run: () => hideQuotaCards(peeked, false) }]
+      : [{ name: who && subs.length > 1 ? "Hide this account from Overview" : "Hide from Overview", icon: EYE_OFF, run: () => hideQuotaCards(of.flatMap(cardHideKeys), true) }]),
+    // a plan's card showing its key's balance: the balance alone
+    ...(one?.balanceCard && !peeked.length ? [{ name: "Hide its balance from Overview", icon: EYE_OFF, run: () => hideQuotaCards([one.balanceCard + "|balance"], true) }] : []),
+    // the ones hidden already, from the menu that hid them
+    ...(others ? [{ name: t("Show {n} Hidden", { n: others }), literal: true, icon: EYE, sep: true, run: (e) => openHidden(e, "quotaHid", () => { quotaHidOpen = true; renderQuotaHid(); }) }] : []),
+  ]);
+}
+// hiddenQuotas: the cards the Overview leaves out, those the line lists
+function hiddenQuotas() {
+  const hid = hiddenCards();
+  return quotas && hid.size ? sharedBalances(quotas).filter((q) => hid.has(cardHideKey(q)) && !cardPeeked(q)) : [];
+}
+// renderQuotaHid: the line under the cards saying how many are hidden,
+// opening them, each with Unhide, and Show all
+function renderQuotaHid() {
+  const hb = $("#quotaHid");
+  const hidden = hiddenQuotas();
+  hb.hidden = !hidden.length;
+  if (!hidden.length) { quotaHidOpen = false; return; }
+  const line = hb.querySelector(".us-hidline"), hl = hb.querySelector(".list");
+  let all = hb.querySelector(".us-showall");
+  if (!all) {
+    all = el("button", "text us-showall", t("Show all"));
+    all.type = "button";
+    hb.append(all);
+  }
+  all.textContent = t("Show all");
+  all.hidden = !quotaHidOpen || hidden.length < 2;
+  all.onclick = () => hideQuotaCards(hidden.map(cardHideKey), false);
+  line.replaceChildren(el("span", "", t("{n} hidden", { n: hidden.length })), svg(CHEV, 11, 1.6));
+  line.title = t("Hidden from the Overview only: they are still used and counted. Click to see them.");
+  line.setAttribute("aria-expanded", String(quotaHidOpen));
+  line.onclick = () => { quotaHidOpen = !quotaHidOpen; renderQuotaHid(); };
+  hl.hidden = !quotaHidOpen;
+  hl.replaceChildren();
+  if (!quotaHidOpen) return;
+  for (const q of hidden) {
+    const r = el("div", "row stat hid acts");
+    r.dataset.id = cardHideKey(q);
+    r.append(icon(q.icon));
+    const who = el("div", "who");
+    who.append(el("div", "name", quotaName(q)), el("div", "sub", [q.alias || q.user, t(cardHideKind(q) === "balance" ? "Balance" : "Plan")].filter(Boolean).join(" · ")));
+    const b = el("button", "text us-unhide", t("Unhide"));
+    b.type = "button";
+    b.onclick = (e) => { e.stopPropagation(); hideQuotaCards([cardHideKey(q)], false); };
+    r.append(who, b);
+    hl.append(r);
+  }
+}
+// hideQuotaCards hides cards from the Overview, or has them back: drawn at
+// once, put back if the save fails
+async function hideQuotaCards(keys, hide) {
+  const prev = state.settings || {};
+  const cur = (prev.usageCardsHidden || []).filter((k) => !keys.includes(k));
+  const cardsHidden = hide ? [...cur, ...keys] : cur;
+  usagePeek = "";
+  state.settings = { ...prev, usageCardsHidden: cardsHidden };
+  const again = () => {
+    renderQuotas();
+    // the keyboard stays near: on the hidden line, or the card put back
+    const to = $("#quotaHid .us-hidline");
+    (hide && to && !to.closest("[hidden]") ? to : null)?.focus({ preventScroll: true });
+  };
+  again();
+  try {
+    const s = await api("usage/arrange", { cardsHidden });
+    state.settings = { ...state.settings, usageCardsHidden: s.usageCardsHidden || [] };
+  } catch (e) {
+    state.settings = prev;
+    again();
+    status(e.message, "err");
+  }
+}
+
 // ---------- requests ----------
 //
 // The ledger: every request of the period, one row each, newest first —
@@ -738,6 +1308,7 @@ async function hideUsageAgent(id, hide) {
 // server pages it (/api/usage/requests) and saves it whole as CSV.
 
 let ledger = null; // the page shown: { rows, offset, total, agents, …totals }
+let ledgerWant = ""; // the ledParams it was read with
 let ledOffset = 0, ledPurpose = "", ledAgent = "", ledProvider = "", ledAccount = "", ledCallerKey = "", ledFailed = false, ledRetried = false, ledQuery = "", ledModel = "", ledRoute = 0, ledComputer = "", ledDay = "", ledVia = "";
 
 const LED_PAGE = 100;
@@ -745,7 +1316,7 @@ const LED_PAGE = 100;
 let ledMetric = "tokens", ledSplit = "model";
 try {
   const m = localStorage.getItem("magpie.ledMetric");
-  if (["tokens", "cost", "calls", "speed"].includes(m)) ledMetric = m;
+  if (["tokens", "cost", "calls", "speed", "traffic"].includes(m)) ledMetric = m;
 } catch {}
 // Columns or lines (molvqingtai on Discord), kept per viewer as the metric
 // is; anything but "line", or a read that fails, is columns.
@@ -779,6 +1350,7 @@ window.openUsageRoute = (route) => {
   if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledPurpose, ledAgent, ledProvider, ledAccount, ledCallerKey, ledFailed, ledRetried, ledQuery, ledModel, ledComputer, ledDay, ledVia, lent: [...ledLent] };
   ledRoute = route.id;
   ledRouteInfo = route;
+  ledReq = null;
   ledOffset = 0; ledPurpose = ""; ledAgent = ""; ledProvider = ""; ledAccount = ""; ledCallerKey = ""; ledFailed = false; ledRetried = false; ledQuery = ""; ledModel = ""; ledComputer = ""; ledVia = "";
   ledDay = "";
   ledLent.clear();
@@ -786,6 +1358,13 @@ window.openUsageRoute = (route) => {
   period = "all";
   usageTab = "requests";
   ledger = null;
+  show("usage");
+};
+// Routing's account list sends its reader to each account's
+// allowances in full: the Overview, its tab not kept as the reader's own
+window.openUsageOverview = () => {
+  if (usageTab === "requests") ledLeave();
+  usageTab = "usage";
   show("usage");
 };
 // the one request a route from Routing listed gives way to the list as it
@@ -802,7 +1381,16 @@ function ledRouteOff() {
 }
 // ledLeave: the reader leaves the Requests; what a click lent them goes
 // (the rows drawn for them aren't shown again on the way back)
-function ledLeave() {
+function ledLeave(away) {
+  // a request's own page goes with the list it was opened from; leaving
+  // the page, the list keeps its place for the way back (Routing's View
+  // usage)
+  if (ledReq) {
+    ledReq = null;
+    $("#ledReqPane").replaceChildren();
+    ledReqShown();
+    if (away) { const v = $("#view-usage"); v.scrollTop = ledReqAt; window.arrived?.(v); }
+  }
   const routed = !!ledRoute;
   if (routed) ledRouteOff();
   if (!ledLent.size && !routed) return;
@@ -852,7 +1440,11 @@ function ledRead(kind, path, want) {
 }
 const ledAborted = (e) => e?.name === "AbortError";
 
-// quiet: a refresh while it's looked at, redrawn only on a change
+// quiet: a refresh while it's looked at, redrawn only on a change.
+// "open": the page opened again on the rows it showed (#4064, xisdumpling):
+// they stay as they are while read, are drawn again only on a change, and
+// that redraw (a hundred rows, their chart and heatmap) waits for the
+// sidebar to settle on the page, not stopping it halfway
 async function loadLedger(quiet) {
   if (!ledger && !quiet) renderLedgerLoading();
   // a pick over rows shown: they stay, dimmed, till its answer comes, so
@@ -871,8 +1463,23 @@ async function loadLedger(quiet) {
   if (want !== ledParams({ offset: ledOffset, limit: LED_PAGE })) return; // another page or filter was picked meanwhile
   ledPending(false);
   if (quiet && JSON.stringify(l) === JSON.stringify(ledger)) return;
+  if (quiet === "open") {
+    const was = ledger;
+    await navSettled();
+    if (ledger !== was || want !== ledParams({ offset: ledOffset, limit: LED_PAGE })) return; // read again or drawn meanwhile
+  }
   ledger = l;
+  ledgerWant = want;
   if (view === "usage" && usageTab === "requests") renderLedger();
+}
+// navSettled: the sidebar's move to a page opened (navTopStep's spring,
+// navSubEnter's tabs coming in) has run its course, or 700ms have passed
+function navSettled() {
+  const until = performance.now() + 700;
+  return new Promise((done) => {
+    const look = () => performance.now() < until && (window.navTop?.raf || document.querySelector("#nav .nav-sub.moving")) ? requestAnimationFrame(look) : done();
+    look();
+  });
 }
 
 function ledPending(on) {
@@ -903,7 +1510,7 @@ function renderLedgerLoading() {
 
 function ledTime(when) {
   const d = new Date(when), now = new Date();
-  const opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false };
+  const opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", ...hourClock() };
   if (d.toDateString() !== now.toDateString()) Object.assign(opts, { month: "short", day: "numeric" });
   return d.toLocaleString(intlLang(), opts);
 }
@@ -942,25 +1549,129 @@ function ledProtos(r) {
 function ledProtoBadge(r) {
   const p = ledProtos(r);
   if (!p) return null;
-  const k = el("span", "src proto proto-" + p.to.toLowerCase(), p.from !== p.to ? p.from + " → " + p.to : p.to);
+  // "· WS" for one that went over the Responses WebSocket (matrix0487)
+  const k = el("span", "src proto proto-" + p.to.toLowerCase(), (p.from !== p.to ? p.from + " → " + p.to : p.to) + (r.ws ? " · WS" : ""));
   k.title = p.from !== p.to ? t("The agent spoke {from}; sent upstream as {to}", p) : t("Sent upstream as {to}, as the agent spoke it", p);
   return k;
 }
 
 // a request that failed: told by its status, or, for one read from a
-// session file, which records none, by the error that ended it
-const ledFailed_ = (r) => r.status >= 400 || !!r.err;
+// session file, which records none, by the error that ended it. One its
+// agent canceled (r.canceled: a reply stopped, or the next message sent
+// while it came) saw no error, and is no failure
+const ledFailed_ = (r) => !r.canceled && (r.status >= 400 || !!r.err);
 const ledKey = (r) => [r.t, r.agent, r.model, r.rid, r.session, r.computer || ""].join("|");
-const ledOpen = new Set(); // the rows opened, kept across a refresh
+// the address a request came from, as the gateway's connection gave it:
+// loopback is this computer
+const ledFromHere = (ip) => /^(127\.|::1$|::ffff:127\.)/.test(ip);
+const ledSource = (ip) => ledFromHere(ip) ? t("This computer") + " · " + ip : ip;
 
-// what is known of one request beyond its row: the id its vendor gave it,
-// the path it went to, and, if it failed, what the vendor said
-function ledDetail(r, cols) {
+// One request on a page of its own (geesehowardt7 on X: a click on a
+// request took them to Routing, which wasn't what they asked; they wanted
+// that request's own record, and where it came from). A row's click or
+// Enter pushes the page over the list, as a Mac app's list pushes an
+// item's, with Requests ‹ (or Escape) back to the list where it was left.
+// Routing is a link inside it. It lasts across a refresh, and goes with
+// the Requests (ledLeave).
+let ledReq = null; // { key, r }
+let ledReqAt = 0; // where the page was scrolled in the list
+function ledReqShown() {
+  const on = usageTab === "requests" && !!ledReq;
+  $("#ledgerPane").hidden = usageTab !== "requests" || on;
+  $("#ledReqPane").hidden = !on;
+  $("#view-usage").classList.toggle("led-req-on", on);
+  if (usageTab === "requests") $("#period").hidden = on;
+  // the list's sideways scrollbar at once, not a frame later: the room
+  // it takes is in the place the list goes back to
+  if (usageTab === "requests" && !on) ledHScroll();
+}
+function ledReqOpen(r, e) {
+  const v = $("#view-usage");
+  ledReqAt = v.scrollTop;
+  ledReq = { key: ledKey(r), r };
+  renderLedReq();
+  ledReqShown();
+  // the page starts at its top, the list's place kept for the way back
+  if (window.scrollOnPurpose?.(e)) { v.scrollTop = 0; window.arrived?.(v); }
+  $("#ledReqPane .led-req-back")?.focus({ preventScroll: true });
+}
+function ledReqClose(e) {
+  if (!ledReq) return;
+  const key = ledReq.key;
+  ledReq = null;
+  $("#ledReqPane").replaceChildren();
+  ledReqShown();
+  const v = $("#view-usage");
+  if (e && window.scrollOnPurpose?.(e)) {
+    v.scrollTop = ledReqAt;
+    window.arrived?.(v);
+  }
+  // the row it was opened from has the keyboard again
+  const row = [...document.querySelectorAll("#ledWrap .led-row")].find((x) => x.dataset.key === key);
+  row?.focus({ preventScroll: true });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || e.repeat || !ledReq || $("#view-usage").hidden || $("#ledReqPane").hidden) return;
+  // a menu, a dialog or a field takes its own Escape first
+  if (document.querySelector(".proto-menu, dialog[open]") || e.target.closest?.("input, textarea, [contenteditable]")) return;
+  e.preventDefault();
+  ledReqClose(e);
+});
+function renderLedReq() {
+  const pane = $("#ledReqPane");
+  if (!pane || !ledReq) return;
+  const r = ledReq.r;
+  const bar = el("div", "led-req-bar");
+  const back = el("button", "text led-req-back");
+  back.type = "button";
+  back.append(svg("m9.5 3.5-4.5 4.5 4.5 4.5", 12, 1.7), el("span", "", t("Requests")));
+  back.onclick = (e) => ledReqClose(e);
+  bar.append(back);
+  const head = el("div", "led-req-head");
+  const title = el("h2", "led-req-title", r.served || r.model || r.req || t(r.agentName || r.agent || "—"));
+  const bad = ledFailed_(r);
+  head.classList.toggle("bad", bad);
+  head.classList.toggle("gone", !bad && !!r.canceled);
+  const st = el("span", "st");
+  st.append(el("i", "dot"), document.createTextNode(r.status ? String(r.status) : bad ? t("Failed") : t("Succeeded")));
+  head.append(title, st);
+  pane.replaceChildren(bar, head, ledDetail(r));
+}
+
+// what is known of one request: when, who sent it and from where, what
+// it asked for and what answered, what it cost and took, the id its
+// vendor gave it, the path it went to, and, if it failed, what the vendor
+// said
+function ledDetail(r) {
   const dl = el("dl", "led-dl");
   const add = (name, value, cls) => {
     if (value === "" || value == null) return;
     dl.append(el("dt", "", t(name)), el("dd", cls || "", value));
   };
+  add("Time", new Date(r.t).toLocaleString(intlLang(), { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", ...hourClock() }), "led-when");
+  {
+    const name = r.agentName || r.agent;
+    const at = r.computerName ? t("{agent} · on {computer}", { agent: name, computer: r.computerName }) : name;
+    const who = el("span", "who");
+    who.append(icon(r.icon || "generic"), el("span", "", [r.via ? t("{agent} · via {host}", { agent: at, host: r.via }) : at, r.callerKeyLabel || r.callerKeyName].filter(Boolean).join(" · ")));
+    add("Agent", who);
+  }
+  // where it came from: kept by the gateway since this version; a row from
+  // before, or one read from a session file or reported, has none
+  if (r.client_ip) add("Source IP", ledSource(r.client_ip), "led-ip");
+  else if (!r.source && !r.computer && !r.via && r.agent !== "magpie") add("Source IP", t("Not recorded"), "muted led-ip");
+  add("Requested", r.req);
+  {
+    const local = r.source === "log";
+    const where = local ? (r.session_account || r.session_provider || t("Local session"))
+      : [r.providerName && t(r.providerName), r.host].filter(Boolean).join(" · ");
+    add("Provider", where);
+  }
+  // the subscription account that answered, or the key it was sent with
+  if (r.source !== "log") add("Account", r.providerAccount || r.providerKeyName);
+  add("Sent", r.model);
+  if (r.served) add("Served", ledServed(r));
+  add("Effort", r.effort);
   if (ledFailed_(r)) {
     add("Status", r.status ? String(r.status) : "—", "bad");
     add("Error type", r.err_type, "bad");
@@ -968,11 +1679,10 @@ function ledDetail(r, cols) {
   } else {
     // how it went, here as well as in the row's last column, which a narrow
     // window leaves out of sight (#799)
-    add("Status", r.status ? String(r.status) : r.source === "log" ? t("Succeeded") : "");
+    add("Status", r.canceled ? `${r.status} · ${t("canceled")}` : r.status ? String(r.status) : r.source === "log" ? t("Succeeded") : "");
   }
   if (Number.isFinite(r.ms) && r.ms > 0) add("Duration", (r.source === "log" ? "≈" : "") + ledTook(r.ms));
-  // the way it was routed: the row's time links there too, which reads as
-  // a time rather than a link (#799)
+  // the way it was routed, the one link to Routing a request has
   // (with the Routing page switched off there is nowhere to see it)
   if (r.route_id && !featuresOff.has("routing")) {
     const go = el("button", "text led-route-link", t("View routing"));
@@ -984,15 +1694,7 @@ function ledDetail(r, cols) {
   if (r.computerName) add("Computer", r.computerName);
   // the client's own name, for one the user counts as an agent (#1958)
   add("Client", r.client);
-  // the columns a narrow window leaves out, shown only while it does (#860)
-  const opt = (name, value) => {
-    if (!value) return;
-    add(name, value);
-    dl.lastChild.classList.add("lc-opt");
-    dl.lastChild.previousSibling.classList.add("lc-opt");
-  };
-  opt("Sent", r.model);
-  opt("Effort", r.effort);
+  add("Cache hit rate", ledHitText(ledCacheHit(r)));
   // its tokens at every width, the cache's beside in and out: a prompt read
   // from the cache is told from one that missed it, whose input is the
   // whole of it, where the row's cache columns are out of sight (#1839).
@@ -1000,12 +1702,24 @@ function ledDetail(r, cols) {
   if (r.in || r.out || r.cache_read || r.cache_write || !ledFailed_(r)) {
     add("Tokens", t("{i} in · {o} out · {r} cache read · {w} cache creation", { i: ledNum(r.in || 0), o: ledNum(r.out || 0), r: ledNum(r.cache_read || 0), w: ledNum(r.cache_write || 0) }) + cacheTTLs(r, ledNum) + (r.cache_unknown ? " · " + t("The vendor doesn't count the cache") : ""), "led-tokens");
   }
+  if (r.priced) add("Cost", "≈" + fmtCost({ cost: r.cost, unpriced: 0 }));
+  if (r.credits != null) add("Credits", ledCredits({ credits: r.credits, credited: 1 }).textContent);
   if (ledRowSpeed(r)) add("Speed", t("{n} tok/s", { n: ledNum(Math.round(ledRowSpeed(r))) }));
   else if (ledFloorSpeed(r)) add("Speed", "≥" + t("{n} tok/s", { n: ledNum(Math.round(ledFloorSpeed(r))) }));
+  // what went up to the vendor and came back, its tries summed, and what
+  // DeepSeek's image files kept out of it (#5407); a row from before has
+  // none of them, and says nothing
+  if (r.up_bytes > 0) add("Sent upstream", fmtBytes(r.up_bytes));
+  if (r.down_bytes > 0) add("Received", fmtBytes(r.down_bytes));
+  // and how many images they were, for a row that kept it (matrix0487)
+  if (r.image_files_saved > 0) add("Saved by image files", r.image_files > 0 ? t(r.image_files === 1 ? "{size} ({n} image)" : "{size} ({n} images)", { size: fmtBytes(r.image_files_saved), n: ledNum(r.image_files) }) : fmtBytes(r.image_files_saved));
   add("Request ID", r.rid);
   add("Endpoint", r.ep);
   const protos = ledProtos(r);
-  if (protos) add("Protocol", protos.from !== protos.to ? protos.from + " → " + protos.to : protos.to);
+  // and the Responses WebSocket it went over, whose Sent upstream is then
+  // what the socket was sent: a kept one's new input (matrix0487)
+  const proto = protos ? (protos.from !== protos.to ? protos.from + " → " + protos.to : protos.to) : "";
+  if (proto || r.ws) add("Protocol", proto && r.ws ? proto + " · WebSocket" : proto || "WebSocket");
   // why the upstream said its reply ended, in its own words: a reply that
   // ended too soon is told apart by it (蓝猫 on Discord)
   add("Upstream stop reason", r.stop);
@@ -1025,7 +1739,10 @@ function ledDetail(r, cols) {
   // before they were kept has only the whole
   if (r.ttft_ms && r.sent_ms) {
     const split = r.own_ms != null;
-    add("In magpie", ledTook(split ? r.own_ms : r.sent_ms));
+    // of magpie's own, what went on masking it (Settings → Privacy)
+    const masking = split && r.masking_ms > 0 ? Math.min(r.masking_ms, r.own_ms) : 0;
+    if (masking) add("Masking", ledTook(masking));
+    add("In magpie", ledTook((split ? r.own_ms : r.sent_ms) - masking));
     if (split) {
       if (r.retried_ms > 0) add("Tries that failed first", ledTook(r.retried_ms));
       if (r.queued_ms > 0) add("Waiting for a slot", ledTook(r.queued_ms));
@@ -1043,9 +1760,7 @@ function ledDetail(r, cols) {
   // it was on, or not through the gateway
   if (!r.archive && !r.computer && (providers?.gateway?.archive?.on ?? state.settings?.requestArchive)) add("Request archive", t("Not archived"), "muted");
   if (r.source === "log") add("Data source", t("Read from the agent's session file. The account is shown only when local metadata identifies it; no service provider is inferred."), "muted");
-  const tr = el("tr", "led-detail");
-  const td = el("td");
-  td.colSpan = cols;
+  const detail = el("div", "led-detail");
   const box = el("div", "led-box");
   box.append(dl.childElementCount ? dl : el("span", "faint", t("Nothing more was kept of this request")));
   // the call as the request archive kept it, when it was on (#447)
@@ -1066,9 +1781,8 @@ function ledDetail(r, cols) {
     ledLoadContent(r).then((c) => { if (cx.isConnected) cx.replaceChildren(ledContentBox(c)); });
   }
   box.append(cx);
-  td.append(box);
-  tr.append(td);
-  return tr;
+  detail.append(box);
+  return detail;
 }
 
 // What was said in a request — what its agent was given, and what came back —
@@ -1131,12 +1845,19 @@ function ledContentBox(c) {
 // tab draws the same from the same answer.
 
 // the window's chart can also say how fast the replies came (#860)
-const LED_TREND = [...LED_METRICS, ["speed", "Speed"]];
+// and how many bytes went up to the vendors and came back (songlairui on
+// X: a lot of calls with base64 images weigh on the network)
+const LED_TREND = [...LED_METRICS, ["speed", "Speed"], ["traffic", "Traffic"]];
 // "modelAt" is a model at the provider it went to, so one model's speed at
 // each provider is ranked side by side (inaction on Discord); "callerKey"
 // the gateway key that made it, "none" for calls with none, offered while
 // the period has a key's calls (#2521)
 const LED_SPLITS = [["model", "Model"], ["modelAt", "Model · provider"], ["provider", "Provider"], ["agent", "Agent"], ["callerKey", "Gateway key"]];
+// a count said short (fmtN: 1.2M, 35K, 12.3 万) with its exact value for a
+// tooltip, nothing when the two read the same (skyhuang1994 on Discord:
+// "看这么长串的数字有点懵逼")
+const exactN = (n) => fmtN(n ||= 0) == String(n) ? "" : ledNum(n);
+const tipOf = (...lines) => lines.filter(Boolean).join("\n");
 // cacheTTLs: a call's cache writes split by how long they are kept, where
 // some were for an hour (Anthropic bills those at 2× input, 5 minutes'
 // at 1.25×); nothing when none were
@@ -1178,10 +1899,84 @@ function ledShowStatus(to) {
   loadLedger().catch((e) => status(e.message, "err"));
 }
 
+// ---------- model speed ranking ----------
+//
+// Each model's median speed and first-token wait over the period's
+// requests (@flying_crp on X: how slow is gpt, really), counted by the
+// ledger with the page (usage.ModelSpeed): failed, canceled and short
+// replies are left out. Sortable by any column; the fastest first.
+let ledSpeedSort = { key: "tps", dir: -1 };
+const LED_SPEED_COLS = [
+  { key: "name", label: "Model", dir: 1 },
+  { key: "tps", label: "Speed", dir: -1 },
+  { key: "ttft_ms", label: "First token", dir: 1 },
+  { key: "requests", label: "Requests", dir: -1 },
+];
+function ledSpeedOrder(list) {
+  const { key, dir } = ledSpeedSort;
+  return [...list].sort((a, b) => {
+    // a model with nothing measured goes last, whichever way it is sorted
+    if (key === "tps" || key === "ttft_ms") {
+      const x = a[key] || 0, y = b[key] || 0;
+      if (!x !== !y) return x ? -1 : 1;
+      if (x !== y) return dir * (x - y);
+    } else if (key === "name") {
+      const c = (a.name || a.model).localeCompare(b.name || b.model);
+      if (c) return dir * c;
+    } else if (a[key] !== b[key]) return dir * (a[key] - b[key]);
+    return b.requests - a.requests || (a.name || a.model).localeCompare(b.name || b.model);
+  });
+}
+function drawLedSpeed(l) {
+  const box = $("#ledSpeed");
+  const list = l.speeds || [];
+  box.hidden = !list.length;
+  box.replaceChildren();
+  if (box.hidden) return;
+  const head = el("div", "led-bar");
+  const title = el("b", "led-spd-t", t("Model speed"));
+  title.title = t("Medians of the answered requests that wrote {n} tokens or more", { n: l.speed_min || 100 });
+  head.append(title);
+  const table = el("table", "led-spd");
+  const hr = el("tr");
+  for (const c of LED_SPEED_COLS) {
+    const th = el("th", c.key === "name" ? "nm" : "n");
+    const on = ledSpeedSort.key === c.key;
+    th.setAttribute("aria-sort", on ? (ledSpeedSort.dir > 0 ? "ascending" : "descending") : "none");
+    const b = el("button", "led-spd-h" + (on ? " on" : ""), t(c.label));
+    b.type = "button";
+    b.onclick = () => {
+      ledSpeedSort = on ? { key: c.key, dir: -ledSpeedSort.dir } : { key: c.key, dir: c.dir };
+      drawLedSpeed(l);
+      $("#ledSpeed .led-spd-h.on")?.focus({ preventScroll: true });
+    };
+    th.append(b);
+    hr.append(th);
+  }
+  const thead = el("thead");
+  thead.append(hr);
+  const body = el("tbody");
+  for (const x of ledSpeedOrder(list)) {
+    const tr = el("tr");
+    const name = el("td", "nm", x.name || x.model);
+    name.title = x.name || x.model;
+    tr.append(name,
+      el("td", "n" + (x.tps ? "" : " faint"), x.tps ? t("{n} tok/s", { n: ledNum(Math.round(x.tps)) }) : "—"),
+      el("td", "n" + (x.ttft_ms ? "" : " faint"), x.ttft_ms ? ledTook(x.ttft_ms) : "—"),
+      el("td", "n", ledNum(x.requests)));
+    body.append(tr);
+  }
+  table.append(thead, body);
+  const scroll = el("div", "led-spd-scroll");
+  scroll.append(table);
+  box.append(head, scroll);
+}
+
 function renderLedgerDash(l) {
   const dash = $("#ledDash");
   dash.hidden = !l.total && !l.day;
   if (dash.hidden) return;
+  drawLedSpeed(l);
   const total = allTokens(l);
   // of the calls whose vendor counted the cache: none when no call's was (#3464)
   const rate = cacheHitOf(l);
@@ -1219,13 +2014,35 @@ function renderLedgerDash(l) {
     b.onclick = () => ledShowStatus(ledStatusOf() === to ? "" : to);
     return b;
   };
-  block("Requests", ledNum(l.calls), l.errors
-    ? jumps(jump(t("{n} failed", { n: ledNum(l.errors) }), "failed", t("Show only the failed requests")), " · " + t("{p} succeeded", { p: (100 * (1 - l.errors / l.calls)).toFixed(1) + "%" }))
-    : line(t("none failed")));
-  if (l.retried) strip.lastChild.append(jumps(jump(t("{n} answered on a retry", { n: ledNum(l.retried) }), "retried", t("Show only the requests answered on a retry"))));
+  // the share that succeeded is of the requests that ended in an answer or
+  // an error: not those their agent canceled, which are counted apart
+  const settled = l.calls - (l.canceled || 0);
+  block("Requests", fmtN(l.calls), l.errors
+    ? jumps(jump(t("{n} failed", { n: fmtN(l.errors) }), "failed", t("Show only the failed requests")), " · " + t("{p} succeeded", { p: (100 * (1 - l.errors / settled)).toFixed(1) + "%" }))
+    : line(t("none failed")), "", exactN(l.calls));
+  if (l.retried) strip.lastChild.append(jumps(jump(t("{n} answered on a retry", { n: fmtN(l.retried) }), "retried", t("Show only the requests answered on a retry"))));
+  if (l.canceled) {
+    const c = line(t("{n} canceled", { n: fmtN(l.canceled) }));
+    c.title = t("Canceled by the agent before an answer came: a reply stopped, or a message sent while it was coming. Not counted as failed.");
+    strip.lastChild.append(c);
+  }
+  // the period's traffic, of the requests that kept it: up and down, and
+  // what DeepSeek's image files saved on the way up. Its parts kept whole,
+  // the saving going under in a card too narrow for all three rather than
+  // cut (matrix0487 on Discord: "图片文件省下 44…")
+  if (l.up_bytes > 0 || l.down_bytes > 0) {
+    const io = line(...usageParts(["↑ " + fmtBytes(l.up_bytes || 0), "↓ " + fmtBytes(l.down_bytes || 0), ...(l.image_files_saved > 0 ? [t("{n} saved by image files", { n: fmtBytes(l.image_files_saved) })] : [])]));
+    io.classList.add("parts", "led-io");
+    io.title = t("Sent upstream") + ": " + ledNum(l.up_bytes || 0) + " B\n" + t("Received") + ": " + ledNum(l.down_bytes || 0) + " B";
+    strip.lastChild.append(io);
+  }
+  // and how fast it flows now, while requests are in flight (ledFlow)
+  strip.lastChild.append(ledFlowLine());
   const c = fmtCost(l);
-  block("Cost", c ? "≈" + c : "—", line(l.unpriced ? t(l.unpriced === 1 ? "{n} call had no known price and is not counted" : "{n} calls had no known price and are not counted", { n: l.unpriced }) : t("effective prices")), c ? "cost" : "");
-  const hit = block("Cache hit rate", rate === null ? "—" : (100 * rate).toFixed(1) + "%", cacheLeftOut(l) ? line(cacheLeftOut(l)) : null, "", t("The share of the prompt read from the cache"));
+  // the count in the words the quick panel uses too, the whole sentence on
+  // hover (tenacious_eagle on Discord)
+  block("Cost", c ? "≈" + c : "—", line(l.unpriced ? unpricedCalls(l.unpriced) : t("effective prices")), c ? "cost" : "", l.unpriced ? unpricedCallsWhy(l.unpriced) : "");
+  const hit = block("Cache hit rate", rate === null ? "—" : hitPct(rate, 1), cacheLeftOut(l) ? line(cacheLeftOut(l)) : null, "", t("The share of the prompt read from the cache"));
   const meter = el("div", "meter"), fill = el("i");
   fill.style.width = (100 * (rate || 0)).toFixed(1) + "%";
   meter.append(fill);
@@ -1241,6 +2058,64 @@ function renderLedgerDash(l) {
   speedCard.append(Object.assign(line(ttft), { className: "sub ttft" }));
   drawLedTrend();
 }
+
+// ---- how fast the gateway's traffic flows now
+//
+// Under the period's "↑ up · ↓ down", while requests are in flight: the
+// bytes the gateway's requests sent up and read back in the last few
+// seconds, a second apart, as "↑ 1.2 MB/s · ↓ 40 KB/s" (songlairui on X).
+// The gateway counts them as they go (/api/usage/traffic), a stream's
+// reply as it comes, so nothing waits for a request to end. Read only
+// while the Requests are looked at; nothing shown when another magpie
+// serves the gateway, or when nothing is in flight and nothing flowed.
+const LED_FLOW_EVERY = 1000, LED_FLOW_SPAN = 3000;
+const ledFlow = { samples: [], timer: 0, text: "", reading: false };
+function ledFlowLine() {
+  const s = el("span", "sub led-rate");
+  s.hidden = !ledFlow.text;
+  s.textContent = ledFlow.text;
+  ledFlowStart();
+  return s;
+}
+function ledFlowShow(text) {
+  ledFlow.text = text;
+  for (const s of document.querySelectorAll("#ledKpi .led-rate")) {
+    if (s.textContent !== text) s.textContent = text;
+    s.hidden = !text;
+  }
+}
+const ledFlowOn = () => view === "usage" && usageTab === "requests" && !document.hidden;
+function ledFlowStart() {
+  if (ledFlow.timer || !ledFlowOn()) return;
+  ledFlow.timer = setInterval(ledFlowTick, LED_FLOW_EVERY);
+  ledFlowTick();
+}
+function ledFlowStop() {
+  clearInterval(ledFlow.timer);
+  ledFlow.timer = 0;
+  ledFlow.samples = [];
+  ledFlowShow("");
+}
+async function ledFlowTick() {
+  if (!ledFlowOn()) return ledFlowStop();
+  if (ledFlow.reading) return;
+  ledFlow.reading = true;
+  let x;
+  try { x = await api("usage/traffic"); } catch { x = null; } finally { ledFlow.reading = false; }
+  if (!ledFlow.timer) return;
+  if (!(x?.up >= 0 && x?.down >= 0)) { ledFlow.samples = []; return ledFlowShow(""); }
+  const now = performance.now(), ss = ledFlow.samples;
+  // a gateway started again counts from 0: what came before is gone
+  if (ss.length && (x.up < ss.at(-1).up || x.down < ss.at(-1).down)) ss.length = 0;
+  ss.push({ at: now, up: x.up, down: x.down });
+  while (ss.length > 2 && now - ss[1].at >= LED_FLOW_SPAN) ss.shift();
+  const a = ss[0], dt = (now - a.at) / 1000;
+  const up = dt > 0 ? (x.up - a.up) / dt : 0, down = dt > 0 ? (x.down - a.down) / dt : 0;
+  if (!(x.requests > 0) && !(up > 0) && !(down > 0)) return ledFlowShow("");
+  const rate = (v) => t("{n}/s", { n: fmtBytes(Math.round(v)) });
+  ledFlowShow(dt > 0 ? "↑ " + rate(up) + " · ↓ " + rate(down) : "");
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) ledFlowStop(); else if ($("#ledKpi .led-rate")) ledFlowStart(); });
 
 // the chart's two looks, as a pair of icons beside the metrics: columns
 // (the default) or lines
@@ -1307,7 +2182,7 @@ function ledLines(g, Y, x0, slot, segs) {
   segs.length = 0;
   if (!l) return;
   const speed = metric === "speed";
-  const { top } = ledCategories(l.chartBy ? { by: l.chartBy } : l, split, metric);
+  const { top, list } = ledCategories(l.chartBy ? { by: l.chartBy } : l, split, metric, true);
   const X = (i) => x0 + slot * i, dot = slot >= 12 ? 4.5 : 3;
   const at = (i, v) => [X(i), Y(v)];
   // stacked, each one goes under those before it, so a band never covers
@@ -1340,7 +2215,8 @@ function ledLines(g, Y, x0, slot, segs) {
   };
   if (speed) {
     series("\0all", "var(--muted)", totals.map((v) => (v > 0 ? v : null)), null, true);
-    for (const c of top) series(c.id, c.color, pts.map((p) => ledSpeed(p.by?.[split]?.[c.id]) || null));
+    const rest = new Map(pts.flatMap((p) => ledOthers(p.by?.[split] || {}, top, list)).map((c) => [c.id, c]));
+    for (const c of [...top, ...rest.values()]) series(c.id, c.color, pts.map((p) => ledSpeed(p.by?.[split]?.[c.id]) || null));
     return;
   }
   // from the bottom up: each one's part on what is under it, "Other" last
@@ -1570,15 +2446,36 @@ function ledHeatShow(cell) {
   tip.style.left = left + "px";
   tip.style.top = top + "px";
 }
+// Each follows the other, and the scroll a follow sets off is its own echo,
+// never a move to pass back: WebKit tells it a frame later, and on a phone
+// the finger has moved the table on by then, so the bar's echo wrote the
+// table back a frame, every other frame of a swipe (Pluviophile on
+// Discord: 左右滑动震颤, 粘滞卡顿)
+const ledEcho = new WeakMap();
+function ledFollow(to, from) {
+  const was = to.scrollLeft;
+  if (was === from.scrollLeft) return;
+  to.scrollLeft = from.scrollLeft;
+  // one held where it was (no room yet) tells no scroll
+  if (to.scrollLeft !== was) ledEcho.set(to, to.scrollLeft);
+}
+function ledFollowed(e, other) {
+  const box = e.currentTarget, echo = ledEcho.get(box);
+  ledEcho.delete(box);
+  if (box.scrollLeft !== echo) ledFollow(other(), box);
+}
 // the table's scrollbar, kept in view at the window's foot (#799): as wide
-// as the table can go sideways, and moving it as the table moves it
+// as the table can go sideways, and moving it as the table moves it. A
+// finger moves the table itself, and a touch screen draws no bar in the
+// box, so there it stood as an empty band at the screen's foot (#4943)
+const ledTouch = matchMedia("(hover: none) and (pointer: coarse)");
 function ledHScroll() {
   const wrap = $("#ledWrap"), bar = $("#ledHScroll");
-  const over = !!wrap.querySelector("table") && wrap.scrollWidth > wrap.clientWidth + 1;
+  const over = !!wrap.querySelector("table") && wrap.scrollWidth > wrap.clientWidth + 1 && !ledTouch.matches;
   bar.hidden = !over;
   if (!over) return;
   bar.firstElementChild.style.width = wrap.scrollWidth - wrap.clientWidth + bar.clientWidth + "px";
-  bar.scrollLeft = wrap.scrollLeft;
+  ledFollow(bar, wrap);
   // a sticky box keeps clear of its scroller's padding, so at bottom 0 it
   // stood the view's bottom padding above the window's foot, the table
   // showing through the strip under it: it goes down over that padding
@@ -1586,8 +2483,8 @@ function ledHScroll() {
   const pad = view ? parseFloat(getComputedStyle(view).paddingBottom) || 0 : 0;
   bar.style.bottom = -pad + "px";
 }
-$("#ledWrap").addEventListener("scroll", () => { const bar = $("#ledHScroll"); if (bar.scrollLeft !== $("#ledWrap").scrollLeft) bar.scrollLeft = $("#ledWrap").scrollLeft; }, { passive: true });
-$("#ledHScroll").addEventListener("scroll", () => { const wrap = $("#ledWrap"); if (wrap.scrollLeft !== $("#ledHScroll").scrollLeft) wrap.scrollLeft = $("#ledHScroll").scrollLeft; }, { passive: true });
+$("#ledWrap").addEventListener("scroll", (e) => ledFollowed(e, () => $("#ledHScroll")), { passive: true });
+$("#ledHScroll").addEventListener("scroll", (e) => ledFollowed(e, () => $("#ledWrap")), { passive: true });
 // a window that changes size redraws the chart at its new width
 // a new width fits the table again, on the next frame, and so do the
 // details' width (--ledw) and the scrollbar: each changes the table's or the
@@ -1599,6 +2496,10 @@ new ResizeObserver(() => {
   ledFitFrame = requestAnimationFrame(() => {
     ledFitFrame = 0;
     const wrap = $("#ledWrap");
+    // out of sight it has no width: what was fit stays, so the page shown
+    // again at the width it had fits nothing again (#4064: each fit of a
+    // hundred rows restyles them twice and lays them out)
+    if (!wrap.clientWidth) return;
     wrap.style.setProperty("--ledw", wrap.clientWidth + "px");
     if (wrap.clientWidth !== ledFitW) { ledFitW = wrap.clientWidth; ledFit(); }
     ledHScroll();
@@ -1614,7 +2515,7 @@ const ledGrow = new ResizeObserver(() => {
   ledGrowFrame = requestAnimationFrame(() => {
     ledGrowFrame = 0;
     const wrap = $("#ledWrap"), table = wrap.querySelector("table.led");
-    if (table && !table.classList.contains("tighter") && wrap.clientWidth && wrap.scrollWidth > wrap.clientWidth + 1) ledFit();
+    if (table && !table.classList.contains("tight2") && wrap.clientWidth && wrap.scrollWidth > wrap.clientWidth + 1) ledFit();
     ledHScroll();
   });
 });
@@ -1627,25 +2528,38 @@ new ResizeObserver(() => {
 // the third: a column a narrow window leaves out, its value in the row's
 // details (#860), 2 for one left out only when that isn't enough; the
 // fourth, the header's tooltip
+// a request's cache hit rate, as the Routing page's request list says it
+// (teenux on Discord): what was read from the cache over its whole
+// prompt, writes included; null for a vendor that counts no cache
+// (#3464) or a request with no prompt counted
+const ledCacheHit = (r) => r.cache_unknown ? null : cacheHitOf({ input: r.in, cache_read: r.cache_read, cache_write: r.cache_write });
+const ledHitText = (h) => h === null ? "" : hitPct(h);
 const LED_COLS = [
   ["Time"], ["Agent"], ["Requested"], ["Provider · account"], ["Sent", "", true], ["Served"], ["Effort", "", true],
-  ["In", "n"], ["Out", "n"], ["Cache write", "n", true], ["Cache read", "n", true], ["Cost", "n"], ["TTFT", "n", 2, "Time to first token"], ["Duration", "n"], ["Speed", "n"], ["Status"],
+  ["In", "n"], ["Out", "n"], ["Cache write", "n", true], ["Cache read", "n", true], ["Cache hit rate", "n", 2, "The share of the prompt read from the cache"], ["Cost", "n"], ["TTFT", "n", 2, "Time to first token"], ["Duration", "n"], ["Speed", "n"], ["Status"],
 ];
 
+// a window under a second after a wait over four times longer: the reply came
+// whole in a moment after a long silence, and what it was written over isn't
+// seen (pluviophile714 on Discord: gpt-6.1-sol, 392 tokens 0.25 s after an
+// 8.2 s first token, read 1,539 tok/s; usage.HeldWindowMs)
+const ledHeldShort_ = (w, from) => w < 1000 && from > 4 * w;
 // the tokens a reply was seen to write and the ms it took, as
 // usage.DecodeOf and routing/client.js's decodeOf tell them: one that reasoned
 // counts its answer from its first text, its reasoning written before
 // the stream showed any (tony on Discord); null when it tells no speed.
 // A reply held back and let go in a burst at its end tells none (John on
 // Discord): its content came in under a quarter of its window (flow_ms),
-// or its answer at over 20 times the pace its reasoning came before it
+// or its answer at over 20 times the pace its reasoning came before it,
+// or it came in under a second after a wait four times longer (ledHeldShort_)
 const ledDecode = (r) => {
-  if (ledFailed_(r) || r.reasoning_hidden && !(r.first_text_ms > 0) || !(r.ttft_ms > 0)) return null;
+  if (ledFailed_(r) || r.canceled || r.reasoning_hidden && !(r.first_text_ms > 0) || !(r.ttft_ms > 0)) return null;
   const think = r.reasoning > 0, visible = think && !(r.first_text_ms > 0) && r.first_reasoning_ms >= r.ttft_ms && r.flow_ms > 0 && r.reasoning <= r.out;
   const n = think && !visible ? r.out - r.reasoning : r.out, from = visible ? r.first_reasoning_ms : think ? r.first_text_ms : r.ttft_ms;
   const w = r.ms - from;
   if (!(n > 0 && from > 0 && w >= 100 && n * 1000 <= 10000 * w)) return null;
   if (r.flow_ms > 0 && r.flow_ms * 4 < w) return null;
+  if (ledHeldShort_(w, from)) return null;
   if (think && r.first_text_ms > 0 && n * (r.first_text_ms - r.ttft_ms) > 20 * r.reasoning * w) return null;
   if (ledCodexTurn(r) && (w < LED_CODEX_WINDOW_MS || n < LED_CODEX_BODY)) return null;
   return { n, w };
@@ -1691,7 +2605,7 @@ const ledRowSpeed = (r) => { const d = ledDecode(r); return d ? d.n / (d.w / 100
 const LED_FLOOR_AGENTS = new Set(["claude", "claude-desktop", "codex"]);
 const ledWhole_ = (r) => r.out >= 1000 && r.ms >= 1000 && r.out * 1000 <= 10000 * r.ms;
 const ledFloor_ = (r) => {
-  if (ledFailed_(r) || ledRowSpeed(r)) return null;
+  if (ledFailed_(r) || r.canceled || ledRowSpeed(r)) return null;
   if (r.source !== "log") {
     const n = r.out - (r.reasoning || 0), w = r.ms - r.ttft_ms;
     if (r.ttft_ms > 0 && r.reasoning > 0 && !(r.first_text_ms > 0) && n >= LED_CODEX_BODY && w >= LED_CODEX_WINDOW_MS && n * 1000 <= 10000 * w && !(r.flow_ms > 0 && r.flow_ms * 4 < w)) return { n, w, answer: true, gateway: true };
@@ -1709,6 +2623,7 @@ const ledFloor_ = (r) => {
 // is never left unexplained: ledDecode's reasons, in its order
 const ledNoSpeed_ = (r) => {
   if (ledFailed_(r)) return t("A failed request tells no speed");
+  if (r.canceled) return t("A canceled request tells no speed");
   if (!(r.ms > 0)) return t("No duration was recorded to time a speed from");
   if (!(r.out > 0)) return t("No output tokens to time a speed from");
   if (!(r.ttft_ms > 0)) return r.source === "log" ? t("The session file has no first token to time a speed from") : t("Not streamed: no first token to time a speed from");
@@ -1718,6 +2633,7 @@ const ledNoSpeed_ = (r) => {
   const from = visible ? r.first_reasoning_ms : think && r.first_text_ms > 0 ? r.first_text_ms : r.ttft_ms, w = r.ms - from;
   const little = t("Too little came after the first token to time a speed by: {n} tokens in {ms}", { n: ledNum(n), ms: ledTook(Math.max(0, w)) });
   if (w < 100) return little;
+  if (ledHeldShort_(w, from) && !(n * 1000 > 10000 * w || r.flow_ms > 0 && r.flow_ms * 4 < w)) return t("It came in under a second after a wait of {wait}: it may have been written during the wait and let go at once, so how fast it was written isn't seen", { wait: ledTook(from) });
   if (n * 1000 > 10000 * w || r.flow_ms > 0 && r.flow_ms * 4 < w || think && r.first_text_ms > 0 && n * (r.first_text_ms - r.ttft_ms) > 20 * r.reasoning * w) return t("It came in one burst at its end, not as it was written, so how fast it was written isn't seen");
   return little;
 };
@@ -1735,18 +2651,105 @@ function ledFit() {
   table.classList.toggle("tight", tight);
   // still too wide (#860: a Windows window at 175%, its wider fonts): the
   // price reference line goes too, in the cost's tooltip and the details
-  // as well, and names are cut shorter, whole in their tooltips
-  // still too wide: the first token's column goes (#2522), and only
-  // then what follows
-  if (tight && over()) table.classList.add("tight2");
+  // as well, names are cut shorter, whole in their tooltips, and headers
+  // wrap. Only when that is still too wide does the first token's column
+  // go (#2522), its value under the duration: a column is the larger loss,
+  // and two Windows windows a little apart in width showed it on one and
+  // not the other (unscientific9 on Discord)
   if (tight && over()) table.classList.add("tighter");
+  if (tight && over()) table.classList.add("tight2");
   if (!hint) {
     hint = el("span", "led-tight");
     hint.id = "ledTight";
     $("#ledSum").after(hint);
   }
-  hint.textContent = hint.title = table.classList.contains("tight2") ? t("Sent, Effort, the first token and the cache are in each row's details") : t("Sent, Effort and the cache are in each row's details");
+  // the first token's column, left out, reads under each duration
+  hint.textContent = hint.title = t("Sent, Effort and the cache are in each row's details");
   hint.hidden = !tight;
+}
+
+// ledProviderMore is the menu beside the Provider filter while a deleted
+// provider is picked in it (CyberCaius on Discord): its requests merged
+// into a provider there is now, or shown by a name of the reader's. With
+// a provider picked that has deleted ones merged in, it parts each again.
+// Nothing in the log is rewritten (POST /api/usage/deleted), and a merged
+// request costs what it did.
+function ledProviderMore(p) {
+  const b = $("#ledProviderMore");
+  const merged = p?.merged || [];
+  b.hidden = !p || (!p.deleted && !merged.length);
+  if (b.hidden) return;
+  b.replaceChildren(svg(DOTS, 14, 2));
+  const tip = t(p.deleted ? "Merge or rename this deleted provider" : "Providers merged into this one");
+  b.title = tip;
+  b.setAttribute("aria-label", tip);
+  const reload = () => { ledOffset = 0; return loadLedger(); };
+  const send = (body) => api("usage/deleted", Object.assign({ id: p.id }, body));
+  b.onclick = (e) => {
+    e.stopPropagation();
+    if (b.classList.contains("open")) return closeProtoMenu();
+    if (!p.deleted) {
+      openProtoMenu(b, merged.map((m) => ({ v: m.id, name: t("Separate {name}", { name: m.name }), literalName: true, note: "List its requests on their own again" })), "", async (id) => {
+        const m = merged.find((x) => x.id === id);
+        try {
+          await api("usage/deleted", { id, into: "" });
+          ledProvider = id;
+          ledOwn("provider");
+          await reload();
+          status(t("{name}'s requests are listed on their own again", { name: m.name }));
+        } catch (err) { status(err.message, "err"); }
+      }, "Merged providers", "sess-menu", "right");
+      return;
+    }
+    openProtoMenu(b, [
+      { v: "merge", name: "Merge into…", note: "List its requests under a provider you have" },
+      { v: "rename", name: "Rename…", note: "The name this page shows it by" },
+    ], "", (v) => (v === "merge" ? mergeInto() : renameDeleted()), "Deleted provider", "sess-menu", "right");
+  };
+  // a provider there is now, picked from a menu of them
+  const mergeInto = async () => {
+    let into;
+    try { into = await api("usage/deleted/into"); } catch (err) { return status(err.message, "err"); }
+    const opts = into.map((x) => ({ v: x.id, name: x.name, literalName: true, note: x.name === x.id ? "" : x.id }));
+    if (!opts.length) return status(t("No provider to merge into"), "err");
+    openProtoMenu(b, opts, "", async (id) => {
+      const to = opts.find((o) => o.v === id);
+      try {
+        await send({ into: id });
+        ledProvider = id;
+        ledOwn("provider");
+        await reload();
+        status(t("{from}'s requests are listed under {to} now", { from: p.name, to: to.name }));
+      } catch (err) { status(err.message, "err"); }
+    }, "Merge into", "sess-menu", "right", false, opts.length > 8 ? "Search providers…" : "");
+  };
+  // the filter's own button takes the name, as a key's row does
+  const renameDeleted = () => {
+    const pick = $("#ledProvider");
+    const i = input(p.name, t("Name"));
+    i.className = "rename-in led-rename";
+    i.setAttribute("aria-label", t("Rename"));
+    let over = false;
+    const done = async (save) => {
+      if (over) return;
+      over = true;
+      i.remove();
+      pick.hidden = false;
+      b.hidden = false;
+      if (!save || i.value.trim() === p.name) return;
+      try {
+        await send({ name: i.value });
+        await reload();
+      } catch (err) { status(err.message, "err"); }
+    };
+    i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); else if (e.key === "Escape") done(false); };
+    i.onblur = () => done(true);
+    pick.hidden = true;
+    b.hidden = true;
+    pick.after(i);
+    i.focus();
+    i.select();
+  };
 }
 
 function renderLedger() {
@@ -1786,8 +2789,12 @@ function renderLedger() {
   sessPick($("#ledPurpose"), "All purposes", ledPurpose, purposeOptions(l.purposes || [], ledPurpose), "Purpose", (v) => { ledPurpose = v; ledOwn("purpose"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   $("#ledPurpose").title = t("Purpose");
   sessPick($("#ledComputer"), "All computers", ledComputer, computers, "Computer", (v) => { ledComputer = v; ledOwn("computer"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
-  sessPick($("#ledAgent"), "All agents", ledAgent, l.agents.map((a) => ({ v: a.id, name: a.name, note: "" })), "Agent", (v) => { ledAgent = v; ledOwn("agent"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
-  sessPick($("#ledProvider"), "All providers", ledProvider, providers.map((p) => ({ v: p.id, name: t(p.name), note: "" })), "Provider", (v) => { ledProvider = v; ledOwn("provider"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
+  sessPick($("#ledAgent"), "All agents", ledAgent, l.agents.map((a) => ({ v: a.id, name: a.name, note: "", icon: a.icon || "generic" })), "Agent", (v) => { ledAgent = v; ledOwn("agent"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
+  sessPick($("#ledProvider"), "All providers", ledProvider, providers.map((p) => ({ v: p.id, name: t(p.name), note: p.deleted ? t("Deleted {date}", { date: new Date(p.deleted).toLocaleDateString(intlLang(), { year: "numeric", month: "short", day: "numeric" }) }) : "" })), "Provider", (v) => { ledProvider = v; ledOwn("provider"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
+  ledProviderMore(providers.find((p) => p.id === ledProvider));
+  // a model beside the provider (OHHHHHH05 on X): the models the other filters keep, by tokens;
+  // the page's totals, cells and chart are then that model's, gateway and session-log calls alike
+  sessPick($("#ledModel"), "All models", ledModel, (l.by?.model || []).filter((s) => s.id).map((s) => ({ v: s.id, name: s.id, note: t("{n} tokens", { n: fmtN(allTokens(s)) }) })), "Model", (v) => { ledModel = v; ledQuery = ""; $("#ledQ").value = ""; ledOwn("model"); ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledAccount"), "All accounts", ledAccount, accounts.map((a) => ({ v: a.id, name: a.name || a.id, note: [a.name && a.id, ...(a.providers || []).map((p) => t(p))].filter(Boolean).join(" · ") })), "Account", (v) => { ledAccount = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledKey"), "All gateway keys", ledCallerKey, callers.map((k) => ({
     v: k.id, name: k.name, note: "",
@@ -1811,13 +2818,25 @@ function renderLedger() {
   slide(seg, "ledStatus");
   $("#ledExport").disabled = !l.total;
 
-  const sum = [t(l.total === 1 ? "{n} request" : "{n} requests", { n: ledNum(l.total) })];
+  // each count short, and exact in the line's tooltip
+  const sum = [], exact = [];
+  const say = (k, n) => { sum.push(t(k, { n: fmtN(n || 0) })); exact.push(t(k, { n: ledNum(n) })); };
+  say(l.total === 1 ? "{n} request" : "{n} requests", l.total);
   if (l.total) {
-    sum.push(t("{n} in", { n: fmtN(l.input) }), t("{n} out", { n: fmtN(l.output) }), t("{n} cache write", { n: fmtN(l.cache_write) }), t("{n} cache read", { n: fmtN(l.cache_read) }));
-    if (l.errors) sum.push(t("{n} failed", { n: l.errors }));
-    if (l.retried) sum.push(t("{n} answered on a retry", { n: l.retried }));
+    say("{n} in", l.input); say("{n} out", l.output); say("{n} cache write", l.cache_write); say("{n} cache read", l.cache_read);
+    if (l.errors) say("{n} failed", l.errors);
+    if (l.retried) say("{n} answered on a retry", l.retried);
+    if (l.canceled) say("{n} canceled", l.canceled);
   }
   $("#ledSum").textContent = sum.join(" · ");
+  // the request that wrote the most to the cache, one click from its detail (recih on X, #6199)
+  const big = l.big_write;
+  if (l.total && big?.route) {
+    const jump = el("button", "text", t("{n} largest write", { n: fmtN(big.n) }));
+    jump.onclick = () => window.openUsageRoute({ id: big.route, time: big.at, model: big.model });
+    $("#ledSum").append(" · ", jump);
+  }
+  $("#ledSum").title = sum.join() == exact.join() ? "" : exact.join(" · ");
   // the two sources and their total, in the same block of cells as the totals
   // above them: what magpie carried, what it only read about in the agents'
   // own session files, and the two together. Each is a filter: picking one
@@ -1840,7 +2859,8 @@ function renderLedger() {
       b.type = "button";
       b.setAttribute("aria-pressed", on ? "true" : "false");
       b.title = pick ? t("Show only these requests") : t("Show every request again");
-      const v = el("span", "v", ledNum(calls));
+      const v = el("span", "v", fmtN(calls));
+      if (exactN(calls)) v.title = exactN(calls);
       // the unit, so a bare number isn't read as the tokens below it
       v.append(el("em", "", t(calls === 1 ? "request" : "requests")));
       b.replaceChildren(el("span", "k", t(label)), v,
@@ -1895,6 +2915,7 @@ function renderLedger() {
     const filtered = ledPurpose || ledDay || ledRoute || ledAgent || ledProvider || ledAccount || ledComputer || ledCallerKey || ledModel || ledVia || ledFailed || ledRetried || ledQuery.trim();
     const none = noCallsIn(period);
     wrap.replaceChildren(el("div", "led-none", filtered ? t("No requests match these filters.") : t(none)));
+    if (!filtered) readsNote(wrap.firstChild);
     ledFit();
     ledHScroll();
     pager.hidden = true;
@@ -1915,9 +2936,10 @@ function renderLedger() {
   for (const r of l.rows) {
     const bad = ledFailed_(r);
     const key = ledKey(r);
-    const tr = el("tr", "led-row" + (bad ? " bad" : "") + (ledOpen.has(key) ? " open" : ""));
+    // one its agent canceled is neither: muted, not the answered green
+    const tr = el("tr", "led-row" + (bad ? " bad" : r.canceled ? " gone" : ""));
     tr.tabIndex = 0;
-    tr.setAttribute("aria-expanded", ledOpen.has(key) ? "true" : "false");
+    tr.dataset.key = key;
     const td = (child, cls, title) => {
       const c = el("td", (cls || "") + optCls(LED_COLS[tr.childElementCount]?.[2]));
       if (typeof child === "string") c.textContent = child; else c.append(child);
@@ -1925,14 +2947,9 @@ function renderLedger() {
       tr.append(c);
       return c;
     };
-    const routed = r.route_id && !featuresOff.has("routing"); // the Routing page there to open it on
-    const when = routed ? el("button", "text led-route-link", ledTime(r.t)) : ledTime(r.t);
-    if (routed) {
-      when.title = t("View routing");
-      // the link opens the route, not the row's details as well
-      when.onclick = (e) => { e.stopPropagation(); window.openRoute(r.route_id, r.t).catch((err) => status(err.message, "err")); };
-    }
-    td(when, "when", new Date(r.t).toLocaleString(intlLang()));
+    // the time is the row's like every cell: a click opens the request
+    // (it opened Routing, which the reader hadn't asked for: geesehowardt7)
+    td(ledTime(r.t), "when", new Date(r.t).toLocaleString(intlLang()));
     const who = el("span", "who");
     // an agent on another computer, whose magpie passed the request on
     const name = r.agentName || r.agent;
@@ -1943,6 +2960,10 @@ function renderLedger() {
     // one that tested the provider (the editor's Test, Detect APIs, a model
     // list) is counted nowhere, and says so (neiko on Discord)
     const probe = r.source === "probe";
+    // an agent's call to a tool of magpie's MCP servers (ferock on Discord)
+    const mcp = r.source === "mcp";
+    // magpie's ask of a search API, for a search an agent's model made (cybercaius on Discord)
+    const search = r.source === "search";
     if (r.agent === "magpie") {
       const own = ownBadge();
       if (probe) own.title = probeWhy();
@@ -1958,8 +2979,16 @@ function renderLedger() {
     // resolved to a provider's name, which would promote an unknown request
     // to an official provider — and the row keeps saying it is a local
     // session. A row whose file names none says only that.
-    const where = local ? (r.session_account || r.session_provider || t("Local session")) : t(r.providerName) + (r.host ? " · " + r.host : "");
-    const wc = td(el("div", "where-name", where), "where", where);
+    const where = local ? (r.session_account || r.session_provider || t("Local session"))
+      : mcp ? [r.providerName && t(r.providerName), r.host].filter(Boolean).join(" · ") || "—"
+      : search ? [r.providerName && t(r.providerName), r.host, r.providerKeyName].filter(Boolean).join(" · ") || "—"
+      : t(r.providerName) + (r.host ? " · " + r.host : "");
+    // the provider's logo before its name, as on the Routing page (Jiabubu
+    // on Discord); a session file's record names none for sure
+    const face = !local && providers.find((p) => p.id === r.provider);
+    const line = el("div", "where-line");
+    line.append(...(face ? [icon(face.icon || "generic")] : []), el("div", "where-name", where));
+    const wc = td(line, "where", where);
     const badges = el("div", "source-badges");
     if (local && r.session_account && r.session_official_login) {
       const badge = el("span", "src official", t("OFFICIAL"));
@@ -1996,25 +3025,48 @@ function renderLedger() {
       k.title = probeWhy();
       badges.append(k);
     }
+    if (mcp) {
+      const k = el("span", "src mcp", "MCP");
+      k.title = t("{agent} called the tool {tool} of magpie's MCP server {server}. Its arguments are not kept, and it is not counted in any total: the model requests it made are rows of their own.", { agent: name, tool: r.req || "—", server: r.host || "magpie" });
+      badges.append(k);
+    }
+    if (search) {
+      // a search API's, or a plan's own search service's (r.provider)
+      const k = el("span", "src search", t(r.provider ? "Web search" : "Search API"));
+      k.title = t("magpie asked {api} to search the web for {agent}. The query is not kept, and it is not counted in any total.", { api: r.req || "—", agent: name });
+      badges.append(k);
+    }
     if (badges.childElementCount) wc.append(badges);
     // the model sent is what the gateway sent the vendor: a session file has none
     // The log names a model, but does not capture the outbound HTTP request.
     td(r.model || "—", "model " + (r.model ? "model-value" : "faint"), r.source === "log" && r.model ? t("Model recorded in the local session log; the outbound HTTP request was not captured.") : r.model);
     td(ledServed(r), "model");
     td(r.effort || "—", r.effort ? "" : "faint");
-    td(ledNum(r.in), "n");
-    td(ledNum(r.out), "n", r.reasoning ? t("{n} reasoning, inside output", { n: ledNum(r.reasoning) }) : "");
+    td(fmtN(r.in || 0), "n", exactN(r.in));
+    td(fmtN(r.out || 0), "n", tipOf(exactN(r.out), r.reasoning ? t("{n} reasoning, inside output", { n: ledNum(r.reasoning) }) : ""));
     // a vendor that counts no cache wrote and read none we know of, not 0 (#3464)
     if (r.cache_unknown) for (let i = 0; i < 2; i++) td("—", "n faint", t("The vendor doesn't count the cache"));
     else {
-      td(ledNum(r.cache_write), "n" + (r.cache_write ? "" : " faint"), cacheTTLs(r, ledNum).replace(/^ · /, ""));
-      td(ledNum(r.cache_read), "n" + (r.cache_read ? "" : " faint"));
+      td(fmtN(r.cache_write || 0), "n" + (r.cache_write ? "" : " faint"), tipOf(exactN(r.cache_write), cacheTTLs(r, ledNum).replace(/^ · /, "")));
+      td(fmtN(r.cache_read || 0), "n" + (r.cache_read ? "" : " faint"), exactN(r.cache_read));
     }
-    const cost = td(r.priced ? "≈" + fmtCost({ cost: r.cost, unpriced: 0 }) : "—", "n cost" + (r.priced ? "" : " faint"), r.priced ? (r.pricing_model ? t("API price reference") + ": " + r.pricing_model : "") : t("No known price for this model"));
+    const hit = ledHitText(ledCacheHit(r));
+    td(hit || "—", "n cache-hit" + (hit ? "" : " faint"), r.cache_unknown ? t("The vendor doesn't count the cache") : t("Cache hit rate") + ": " + t("The share of the prompt read from the cache"));
+    // what the reply said it cost in its plan's credits (WorkBuddy's
+    // usage.credit, #2512), on its own row as on the ranking's line
+    // (jiabubu on Discord): in place of the dash a plan's model has for a
+    // price, or under the price; a reply that said none says nothing
+    const credits = r.credits != null ? ledCredits({ credits: r.credits, credited: 1 }).textContent : "";
+    const cost = td(r.priced ? "≈" + fmtCost({ cost: r.cost, unpriced: 0 }) : credits || "—", "n cost" + (r.priced || credits ? "" : " faint"), r.priced ? (r.pricing_model ? t("API price reference") + ": " + r.pricing_model : "") : credits ? t("What it cost in its plan's credits, as the reply said") : t("No known price for this model"));
     if (r.priced && r.pricing_model) {
       const reference = el("div", "price-reference", t("Price reference: {model}", { model: r.pricing_model }));
       reference.title = t("Model used for the API price estimate; this is not an observed model forwarding event.");
       cost.append(reference);
+    }
+    if (r.priced && credits) {
+      const said = el("div", "row-credits", credits);
+      said.title = t("What it cost in its plan's credits, as the reply said");
+      cost.append(said);
     }
     // a session file has the times of its lines: a call took about from the line that
     // asked for it to its last; some have none, and are dashes, not 0 ms
@@ -2026,8 +3078,13 @@ function renderLedger() {
     td(r.ttft_ms > 0 ? (timed ? "≈" : "") + ledTook(r.ttft_ms) : "—", "n ttft" + (r.ttft_ms > 0 ? "" : " faint"),
       r.ttft_ms > 0 ? [t("{n} ms", { n: ledNum(r.ttft_ms) }), timed ? t("About: told from the session file's times, a little more or less than it took") : ""].filter(Boolean).join(" · ") : "");
     const durationBand = untimed ? "" : r.ms <= 10000 ? "fast" : r.ms <= 30000 ? "slow" : "long";
-    td(untimed ? "—" : (timed ? "≈" : "") + ledTook(r.ms), "n duration " + (untimed ? "faint" : "duration-" + durationBand),
+    const dur = td(untimed ? "—" : (timed ? "≈" : "") + ledTook(r.ms), "n duration " + (untimed ? "faint" : "duration-" + durationBand),
       [!untimed ? t("{n} ms", { n: ledNum(r.ms) }) : "", !untimed ? t("Duration colors: ≤10 s green · 10–30 s amber · >30 s red") : "", timed && !untimed ? t("About: told from the session file's times, a little more or less than it took") : "", r.ttft_ms ? t("TTFT {ms}", { ms: ledTook(r.ttft_ms) }) : ""].filter(Boolean).join(" · "));
+    // where a narrow window leaves the first token's column out, it reads
+    // under the duration it is part of, small, rather than only in the
+    // details (unscientific9 on Discord); a row with none has no line.
+    // Drawn by app.css from the attribute, out of the cell's text
+    if (r.ttft_ms > 0) dur.dataset.ttft = t("TTFT {ms}", { ms: (timed ? "≈" : "") + ledTook(r.ttft_ms) });
     // how fast it wrote once it began, as CC Switch's log has it (#860)
     const v = ledRowSpeed(r), floor = ledFloorSpeed(r), f = ledFloor_(r);
     const ttft = r.ttft_ms > 0 ? " · " + t("TTFT {ms}", { ms: ledTook(r.ttft_ms) }) : "";
@@ -2043,26 +3100,19 @@ function renderLedger() {
     const st = el("span", "st");
     // a status when the gateway logged the call; a session file has none,
     // and says only whether it went well
-    let word = r.status ? String(r.status) : r.source === "log" ? (bad ? r.err_type || t("Failed") : t("Succeeded")) : "—";
+    let word = r.status ? String(r.status) : r.source === "log" || mcp || search ? (bad ? r.err_type || t("Failed") : t("Succeeded")) : "—";
     if (r.status && bad && r.err_type) word += " · " + r.err_type;
+    if (r.canceled) word += " · " + t("canceled");
     if (r.handed_on) word += " · " + t("handed on");
     else if (r.tries > 1) word += " · " + t("{n} tries", { n: r.tries });
     st.append(el("i", "dot"), document.createTextNode(word));
     td(st, "", [r.handed_on && t("This try failed and the request was handed on to the next: the request is counted by how it ended, not by this try"),
+      r.canceled && t("Canceled by the agent before an answer came: a reply stopped, or a message sent while it was coming. Not counted as failed."),
       bad ? (r.err || t("Failed: the agent was answered {status}", { status: r.status })) : ""].filter(Boolean).join("\n"));
-    const detail = ledOpen.has(key) ? ledDetail(r, LED_COLS.length) : null;
-    const toggle = () => {
-      if (ledOpen.delete(key)) { tr.classList.remove("open"); tr.setAttribute("aria-expanded", "false"); tr.nextElementSibling?.classList.contains("led-detail") && tr.nextElementSibling.remove(); return; }
-      ledOpen.add(key);
-      tr.classList.add("open");
-      tr.setAttribute("aria-expanded", "true");
-      tr.after(ledDetail(r, LED_COLS.length));
-    };
     // a click that ends a text selection is the reader copying, not asking
-    tr.onclick = () => { if (!String(getSelection() || "")) toggle(); };
-    tr.onkeydown = (e) => { if (e.target === tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggle(); } };
+    tr.onclick = (e) => { if (!String(getSelection() || "")) ledReqOpen(r, e); };
+    tr.onkeydown = (e) => { if (e.target === tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); ledReqOpen(r, e); } };
     table.tBodies[0].append(tr);
-    if (detail) table.tBodies[0].append(detail);
   }
   wrap.replaceChildren(table);
   wrap.style.setProperty("--ledw", wrap.clientWidth + "px");
@@ -2149,6 +3199,44 @@ function sessModelsText(s) {
   return sessModelNames(s.models.slice(0, 2).map((m) => m.model)) + (s.models.length > 2 ? " +" + (s.models.length - 2) : "") + (via ? " " + via : "");
 }
 
+// A session's line in its details, on the Sessions page and in the Usage
+// page's Sessions list (liang_yongxiang on Discord: Routing tells how full
+// one request's window was, the Sessions page told it of no turn): its
+// prompts request by request against its window, drawn as the Context tab
+// draws its sessions (context.js), and the fullest one's share. A point
+// opens its request in Routing, with its card. Asked of the server for a
+// session the gateway sent calls of (s.via) when its details are drawn,
+// kept a while so a redraw draws it at once; shown(false) when the gateway
+// kept none of its prompts.
+const sessCtxLines = new Map(); // agent/id -> { at, c, wait }
+const SESS_CTX_AGAIN = 30000;
+function sessCtxLine(s, shown) {
+  const box = el("span", "ctx-line");
+  const k = s.agent + "/" + s.id;
+  const draw = (c) => {
+    if (!c?.points?.length) { shown(false); return; }
+    const fmtK = window.ctxFmt, fill = c.window ? c.peak / c.window : 0;
+    const [tone] = window.ctxHealth(fill);
+    const peak = el("span", "ctx-sess-peak " + tone, c.window ? Math.round(fill * 100) + "%" : fmtK(c.peak));
+    peak.dataset.tt = t("Its largest prompt: {tokens} of {window}", { tokens: fmtK(c.peak), window: fmtK(c.window) });
+    box.replaceChildren(window.ctxSpark(c.points, c.latestId, c.window, (pt) => {
+      if (!featuresOff.has("routing")) window.openRoute(pt.id, pt.time, { context: true }).catch(statusErr);
+    }), peak);
+    shown(true);
+  };
+  let got = sessCtxLines.get(k);
+  if (got?.c !== undefined) draw(got.c);
+  else shown(false);
+  if (!got || (!got.wait && Date.now() - got.at > SESS_CTX_AGAIN)) {
+    got = { at: Date.now(), c: got?.c, wait: null };
+    const q = new URLSearchParams({ agent: s.agent, id: s.id, from: s.start || s.last || "", to: s.last || "" });
+    got.wait = api("context/session?" + q).then((d) => { got.c = d?.session || null; }, () => {}).finally(() => { got.wait = null; got.at = Date.now(); });
+    sessCtxLines.set(k, got);
+  }
+  got.wait?.then(() => { if (box.isConnected) draw(got.c); });
+  return box;
+}
+
 // sessUsageDetail adds to a session's details what it spent by model, and
 // what the gateway sent its calls to, at what reasoning; line(label, value)
 // adds a line of the details
@@ -2163,6 +3251,12 @@ function sessUsageDetail(d, s, line) {
     d.append(m);
   }
   (s.via || []).forEach((v, i) => line(i ? "" : t("Routed"), viaText(v) + " · " + t("{n} tokens", { n: fmtN(v.tokens) }) + (v.credited ? " · " + ledCredits(v).textContent : "")));
+  // how full its context was, request by request
+  if (s.via?.length && window.ctxSpark) {
+    const l = el("div", "sess-line sess-ctx");
+    l.append(el("span", "k", t("Context")), sessCtxLine(s, (on) => { l.hidden = !on; }));
+    d.append(l);
+  }
 }
 
 // one place a session's calls went through magpie, in words
@@ -2269,6 +3363,7 @@ function renderUsageTab() {
   seg.replaceChildren();
   for (const [id, name] of USAGE_TABS) {
     const b = el("button", "opt" + (id === usageTab ? " on" : ""), t(name));
+    b.dataset.seg = id;
     b.onclick = () => {
       if (id === usageTab) return;
       if (usageTab === "requests") ledLeave();
@@ -2289,10 +3384,14 @@ function renderUsageTab() {
   $("#usagePane").hidden = usageTab !== "usage";
   $("#ledgerPane").hidden = usageTab !== "requests";
   $("#sessionsPane").hidden = !on;
+  ledReqShown();
   $("#contextPane").hidden = usageTab !== "context";
 }
 
 const sessDays = () => SESS_RANGES.find(([id]) => id === sessRange)[2];
+// two answers are the same: with the tags api read them under (readTags in
+// app.js), only when they are one object
+const sameRead = (a, b) => a === b || !(readTags.has(a) && readTags.has(b)) && JSON.stringify(a) === JSON.stringify(b);
 async function loadSessions() {
   const first = !sessions || !sessStats;
   if (first) renderSessionsLoading();
@@ -2304,7 +3403,8 @@ async function loadSessions() {
   } finally { stop(); }
   if (range !== sessRange) return; // another range was picked meanwhile; its load draws
   const fresh = q === sessOverQ(); // no filter changed meanwhile
-  if (sessions && sessStats && JSON.stringify(s) === JSON.stringify(sessions) && JSON.stringify(st) === JSON.stringify(sessStats) &&
+  // an answer the same as the last is the object read then (api's sameReads)
+  if (sessions && sessStats && sameRead(s, sessions) && sameRead(st, sessStats) &&
     (!fresh || JSON.stringify(o) === JSON.stringify(sessOver))) return;
   sessions = s;
   sessStats = st;
@@ -2349,8 +3449,7 @@ function renderSessionsLoading() {
   view.setAttribute("aria-busy", "true");
   $("#usageCost").replaceChildren(el("span", "skeleton sk-cost"));
   renderSessRange(true);
-  $("#sessAgent").replaceChildren();
-  $("#sessModel").hidden = $("#sessFolder").hidden = true;
+  $("#sessAgent").hidden = $("#sessModel").hidden = $("#sessFolder").hidden = true;
   $("#sessChart").hidden = true;
   $("#sessGrid").hidden = true;
   $("#sessListHead").hidden = true;
@@ -2447,7 +3546,7 @@ function sessIndexHero() {
   bar.append(fill);
   hero.append(words, field, bar);
 
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduced = calm();
   let frac = 0, shown = 0, known = false, tipAt = Date.now(), tipI = 0, rate = 0, last = null;
   let done = false;
   hero.update = (p) => {
@@ -2581,7 +3680,9 @@ function hexA(hex, a) {
   return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
 }
 const sessKey = (s) => s.agent + ":" + s.id;
-const sessTokens = (s) => s.input + s.output;
+// counted the way the tokens tiles count, cache and all when the reader
+// asked for it (#2591); both lists' rows spend it (sessSpent)
+const sessTokens = (s) => usageTokens(s);
 // a session's cost: "—" when none of its models has a known price
 function sessCost(s) {
   if (!s.models.some((m) => m.priced && (m.input || m.output || m.cache_read || m.cache_write))) return "—";
@@ -2629,47 +3730,30 @@ function renderSessions() {
   const rows = st.days.flatMap((d) => d.usage.map((u) => ({ ...u, date: d.date })));
   const acts = st.days.flatMap((d) => d.active.map((a) => ({ ...a, date: d.date })));
 
-  // one segment per agent that has sessions, or usage in the range
-  const agents = [...new Map([...all.map((s) => [s.agent, s.name]), ...Object.entries(st.agents || {})]).entries()];
+  // the agent filter is a menu, as the model and folder ones beside it: a
+  // strip of a segment per agent ran past the window with a dozen of them
+  // in range, and scrolled sideways to reach the last
+  // a session is under the agent it ran in: s.app, when its files are
+  // another's (Claude Desktop's Code tab's, in Claude Code's folder)
+  const agents = [...new Map([...all.map((s) => [s.app || s.agent, s.name]), ...Object.entries(st.agents || {})]).entries()];
   if (sessAgent !== "all" && !agents.some(([id]) => id === sessAgent)) sessAgent = "all";
-  const seg = $("#sessAgent");
-  seg.hidden = agents.length < 2;
-  const opts = [["all", t("All")], ...agents];
-  // the same agents keep their buttons: drawn anew, a strip with more than
-  // fit (#929) would lose where it was scrolled to (WebKit)
-  const was = [...seg.querySelectorAll(":scope > .opt")];
-  if (was.length !== opts.length || was.some((b, i) => b.dataset.agent !== opts[i][0] || b.textContent !== opts[i][1])) {
-    seg.replaceChildren();
-    for (const [id, name] of opts) {
-      const b = el("button", "opt", name);
-      b.dataset.agent = id;
-      b.onclick = () => { sessAgent = id; renderSessions(); };
-      seg.append(b);
-    }
-  }
-  for (const b of seg.querySelectorAll(":scope > .opt")) {
-    b.classList.toggle("on", b.dataset.agent === sessAgent);
-    b.setAttribute("aria-pressed", String(b.dataset.agent === sessAgent));
-  }
-  // and the agent picked is brought into the strip, the page left where it is
-  const picked = seg.querySelector(":scope > .on");
-  if (picked && seg.scrollWidth > seg.clientWidth) {
-    if (picked.offsetLeft < seg.scrollLeft) seg.scrollLeft = picked.offsetLeft;
-    else if (picked.offsetLeft + picked.offsetWidth > seg.scrollLeft + seg.clientWidth) seg.scrollLeft = picked.offsetLeft + picked.offsetWidth - seg.clientWidth;
-  }
-  slide(seg, "sessAgent");
 
   // the model and folder filters offer what the range has, under the other filters
-  const byAgent = (x) => sessAgent === "all" || x.agent === sessAgent;
+  const byAgent = (x) => sessAgent === "all" || (x.app || x.agent) === sessAgent;
   const byModel = (x) => !sessModel || x.model === sessModel;
   const byFolder = (x) => !sessFolder || x.cwd === sessFolder;
   const spent = (list, key) => {
     const m = new Map();
-    for (const r of list) if (r[key]) m.set(r[key], (m.get(r[key]) || 0) + r.input + r.output);
+    for (const r of list) if (r[key]) m.set(r[key], (m.get(r[key]) || 0) + usageTokens(r));
     return [...m.entries()].sort((a, b) => b[1] - a[1]);
   };
   const models = spent(rows.filter((r) => byAgent(r) && byFolder(r)), "model").map(([v, n]) => ({ v, name: v, note: t("{n} tokens", { n: fmtN(n) }) }));
   const folders = spent(rows.filter((r) => byAgent(r) && byModel(r)), "cwd").map(([v, n]) => ({ v, name: baseName(v), note: v + " · " + t("{n} tokens", { n: fmtN(n) }) }));
+  const agentSpent = new Map(spent(rows.filter((r) => byModel(r) && byFolder(r)), "agent"));
+  const agentIcons = new Map(all.map((s) => [s.app || s.agent, s.icon]));
+  const agentOpts = agents.map(([v, name]) => ({ v, name: name || v, note: agentSpent.has(v) ? t("{n} tokens", { n: fmtN(agentSpent.get(v)) }) : "", icon: agentIcons.get(v) || (state.agents || []).find((a) => a.id === v)?.icon || "generic" }))
+    .sort((a, b) => (agentSpent.get(b.v) || 0) - (agentSpent.get(a.v) || 0));
+  sessPick($("#sessAgent"), "All agents", sessAgent === "all" ? "" : sessAgent, agentOpts, "Agent", (v) => { sessAgent = v || "all"; renderSessions(); });
   sessPick($("#sessModel"), "All models", sessModel, models, "Model", (v) => { sessModel = v; renderSessions(); });
   sessPick($("#sessFolder"), "All folders", sessFolder, folders, "Folder", (v) => { sessFolder = v; renderSessions(); });
 
@@ -2700,7 +3784,7 @@ function renderSessions() {
   const active = sessModel ? null : acts.filter((a) => byAgent(a) && byFolder(a)).reduce((n, a) => n + a.seconds, 0);
 
   const c = tot.cost ? fmtCost(tot) : "";
-  const unpricedNote = tot.unpriced ? t("Not counted: {models}, with no known price", { models: sessModelNames([...unpriced]) }) : t("Estimated using effective model prices, including custom prices");
+  const unpricedNote = tot.unpriced ? t("Not counted: {models}, with no known price", { models: sessModelNames([...unpriced]) }) : t("Estimated at effective model prices. A model's price at one provider is set in that provider's Model settings and counts over its list price");
   // a session's models are counted, not its calls: the agents' files price by model
   const unpricedModels = tot.unpriced ? t(tot.unpriced === 1 ? "{n} model unpriced" : "{n} models unpriced", { n: tot.unpriced }) : "";
   costHead(c, unpricedModels, unpricedNote);
@@ -2755,19 +3839,26 @@ function renderSessions() {
       if (cls?.includes("dur")) for (const part of n.split(/(\d+)/)) part && b.append(/^\d+$/.test(part) ? part : el("i", "u", part.trim()));
       else b.textContent = n;
       b.title = n;
-      e.append(b, el("span", "", label));
-      if (sub) e.append(el("small", "", sub));
+      e.append(b, typeof label === "string" ? el("span", "", label) : label);
+      // a line in parts keeps each whole, wrapping between them rather
+      // than cutting the last off, as the Overview's tiles do
+      if (Array.isArray(sub)) {
+        const s = el("small", "parts");
+        s.append(...usageParts(sub));
+        e.append(s);
+      } else if (sub) e.append(el("small", "", sub));
       stats.append(e);
     };
     const days = new Set(used.map((r) => r.date)).size;
     // how many sessions, and what the middle one and the one in ten spent
     tile(ov.count == null ? "—" : fmtN(ov.count), t("sessions"), ov.count ? t("median {m} · p90 {p}", { m: fmtN(ov.median), p: fmtN(ov.p90) }) : "",
       t("Tokens in and out per session: the middle session's, and what nine in ten stay under"), stale ? "stale" : "");
-    tile(fmtN(tot.input + tot.output), t("tokens"), t("{a} in · {b} out", { a: fmtN(tot.input), b: fmtN(tot.output) }));
+    // counted as the Overview's tokens tile is, by the same pick (#2591)
+    tile(fmtN(usageTokens(tot)), usageTokensPick(), [t("{a} in · {b} out", { a: fmtN(tot.input), b: fmtN(tot.output) }), ...(usageWithCache && cacheOf(tot) ? [t("{a} cache", { a: fmtN(cacheOf(tot)) })] : [])]);
     tile(c ? "≈" + c : "—", t("cost"), unpricedModels || t("at effective prices"), unpricedNote);
     // input leaves out what was read from the cache and written to it
     const prompt = tot.input + tot.cache_read + tot.cache_write;
-    tile(fmtN(tot.cache_read), t("cache read"), tot.cache_read && prompt ? t("hit rate {p}", { p: Math.round(100 * tot.cache_read / prompt) + "%" }) : "", tot.cache_write ? t("{n} written", { n: fmtN(tot.cache_write) }) : "");
+    tile(fmtN(tot.cache_read), t("cache read"), tot.cache_read && prompt ? t("hit rate {p}", { p: hitPct(tot.cache_read / prompt) }) : "", tot.cache_write ? t("{n} written", { n: fmtN(tot.cache_write) }) : "");
     tile(active == null ? "—" : fmtDur(active), t("active"), active == null ? t("not kept by model") : t(days === 1 ? "on {n} day" : "on {n} days", { n: days }),
       t("The time the sessions were at work: the pauses between one message and the next, each under five minutes"), "dur");
     // how many folders, and how much of it the first took
@@ -2780,7 +3871,7 @@ function renderSessions() {
     grid.hidden = false;
     // the folders and models to pick from, as the pickers offer them
     sessBars($("#sessProjects"), "Projects", sessSums(rows.filter((r) => byAgent(r) && byModel(r)), "cwd"), sessFolder, (v) => { sessFolder = v; renderSessions(); }, baseName);
-    sessBars($("#sessModels"), "Models", sessSums(rows.filter((r) => byAgent(r) && byFolder(r)), "model"), sessModel, (v) => { sessModel = v; renderSessions(); }, (v) => v);
+    sessBars($("#sessModels"), "Models", sessSums(rows.filter((r) => byAgent(r) && byFolder(r)), "model"), sessModel, (v) => { sessModel = v; renderSessions(); }, (v) => v, (r, v) => openRowMenu(r, [{ name: "Set price…", icon: PRICE_TAG, run: () => setModelPrice(v.slice(v.lastIndexOf("/") + 1)) }]));
     renderSessHours($("#sessHours"), actsIn);
     renderSessTop();
     renderSessShape();
@@ -2827,7 +3918,7 @@ function sessSums(list, key) {
   for (const r of list) {
     if (!r[key]) continue;
     const s = m.get(r[key]) || { v: r[key], n: 0, cost: 0, unpriced: 0 };
-    s.n += r.input + r.output;
+    s.n += usageTokens(r);
     s.cost += r.cost;
     if (!r.priced) s.unpriced++;
     m.set(r[key], s);
@@ -2891,7 +3982,7 @@ function renderSessChart(chart, st, used, ov, acts) {
   if (chart.hidden) { chart.dataset.drawn = ""; return; }
   const days = [], at = new Map();
   for (let i = 0, d = new Date(first); i < n; i++, d.setDate(d.getDate() + 1)) {
-    const x = { day: new Date(d), input: 0, output: 0, cost: 0, unpriced: 0, sessions: perDay?.length === n ? perDay[i] : 0,
+    const x = { day: new Date(d), input: 0, output: 0, cache_read: 0, cache_write: 0, cost: 0, unpriced: 0, sessions: perDay?.length === n ? perDay[i] : 0,
       messages: msgs?.length === n ? msgs[i] : 0, active: 0 };
     days.push(x);
     at.set(sessISO(d), x);
@@ -2900,16 +3991,17 @@ function renderSessChart(chart, st, used, ov, acts) {
     const x = at.get(r.date);
     if (!x) continue;
     x.input += r.input; x.output += r.output; x.cost += r.cost;
+    x.cache_read += r.cache_read || 0; x.cache_write += r.cache_write || 0;
     if (!r.priced) x.unpriced++;
   }
   for (const a of acts || []) { const x = at.get(a.date); if (x) x.active += a.seconds; }
   const off = { sessions: perDay?.length === n ? "" : t("Still counting"), messages: msgs?.length === n ? "" : t("Still counting"), active: acts ? "" : t("not kept by model") };
   const metric = off[sessMetric] ? "tokens" : sessMetric;
   const value = (x) => metric === "cost" ? x.cost : metric === "sessions" ? x.sessions : metric === "messages" ? x.messages :
-    metric === "active" ? x.active : metric === "output" ? x.output : x.input + x.output;
+    metric === "active" ? x.active : metric === "output" ? x.output : usageTokens(x);
   const show = (v) => metric === "cost" ? "≈" + fmtCost({ cost: v }) : metric === "active" ? fmtDur(v) : fmtN(v);
   const tip = (x, when) => {
-    const parts = [x.input + x.output ? t("{n} tokens", { n: fmtN(x.input + x.output) }) : "", x.cost && fmtCost(x) ? "≈" + fmtCost(x) : "",
+    const parts = [usageTokens(x) ? t("{n} tokens", { n: fmtN(usageTokens(x)) }) : "", x.cost && fmtCost(x) ? "≈" + fmtCost(x) : "",
       x.messages ? t(x.messages === 1 ? "{n} message" : "{n} messages", { n: fmtN(x.messages) }) : "",
       x.sessions ? t(x.sessions === 1 ? "{n} session" : "{n} sessions", { n: x.sessions }) : "", x.active ? t("{d} active", { d: fmtDur(x.active) }) : ""].filter(Boolean);
     return parts.length ? when + " · " + parts.join(" · ") : t("{when} · nothing", { when });
@@ -2953,8 +4045,8 @@ function renderSessChart(chart, st, used, ov, acts) {
   const step = shape === "week" ? 7 : 1;
   const buckets = [];
   for (let i = 0; i < n; i += step) {
-    const b = { day: days[i].day, input: 0, output: 0, cost: 0, unpriced: 0, sessions: 0, messages: 0, active: 0 };
-    for (const x of days.slice(i, i + step)) for (const k of ["input", "output", "cost", "unpriced", "sessions", "messages", "active"]) b[k] += x[k];
+    const b = { day: days[i].day, input: 0, output: 0, cache_read: 0, cache_write: 0, cost: 0, unpriced: 0, sessions: 0, messages: 0, active: 0 };
+    for (const x of days.slice(i, i + step)) for (const k of ["input", "output", "cache_read", "cache_write", "cost", "unpriced", "sessions", "messages", "active"]) b[k] += x[k];
     buckets.push(b);
   }
   const peak = Math.max(metric === "cost" ? 0.001 : 1, ...buckets.map(value));
@@ -2962,7 +4054,9 @@ function renderSessChart(chart, st, used, ov, acts) {
     const [top, low] = bar.children;
     if (metric === "tokens") {
       top.style.height = (100 * b.output / peak).toFixed(1) + "%";
-      low.style.height = (100 * b.input / peak).toFixed(1) + "%";
+      // the input's bar carries the cache's tokens too, as the Overview's
+      // chart does (#2591)
+      low.style.height = (100 * (usageTokens(b) - b.output) / peak).toFixed(1) + "%";
     } else top.style.height = (100 * value(b) / peak).toFixed(1) + "%";
     const label = sessDay(b.day);
     bar.title = tip(b, step === 7 ? t("week of {label}", { label }) : label);
@@ -3089,7 +4183,7 @@ function sessCalSide(days, value, show) {
     if (sub) f.append(el("small", "", sub));
     side.append(f);
   };
-  const busy = (x) => x.input + x.output || x.active || x.sessions;
+  const busy = (x) => usageTokens(x) || x.active || x.sessions;
   let run = 0, streak = 0, best = null;
   for (const x of days) {
     run = busy(x) ? run + 1 : 0;
@@ -3157,10 +4251,13 @@ function renderSessTop() {
   head.append(el("span", "grow"), seg);
   box.append(head);
   slide(seg, "sessTop");
-  const list = ov.top?.[sessTopBy] || [];
+  let list = ov.top?.[sessTopBy] || [];
+  // ranked without the cache, shown with it: ranked again by the count the
+  // reader sees, so the numbers still run down (#2591)
+  if (sessTopBy === "tokens" && usageWithCache) list = [...list].sort((a, b) => usageTokens(b) - usageTokens(a));
   const body = el("div", "sess-tops");
   if (!list.length) body.append(el("div", "sess-none", ov.top ? t("Nothing in this range.") : "…"));
-  const icons = new Map((sessions?.sessions || []).map((s) => [s.agent, s.icon]));
+  const icons = new Map((sessions?.sessions || []).map((s) => [s.app || s.agent, s.icon]));
   const names = sessStats?.agents || {};
   for (const s of list) {
     const open = sessTopOpen === s.key;
@@ -3177,7 +4274,7 @@ function renderSessTop() {
     who.append(sub);
     r.append(who);
     const fc = fmtCost({ cost: s.cost, unpriced: !s.priced });
-    const v = sessTopBy === "cost" ? (fc ? "≈" + fc : "—") : sessTopBy === "active" ? fmtDur(s.active) : fmtN(s.input + s.output);
+    const v = sessTopBy === "cost" ? (fc ? "≈" + fc : "—") : sessTopBy === "active" ? fmtDur(s.active) : fmtN(usageTokens(s));
     r.append(el("div", "v", v));
     r.onclick = () => {
       if (window.getSelection()?.toString()) return;
@@ -3298,6 +4395,7 @@ function renderSessTools() {
     top.append(r);
   }
   cols.append(top);
+  queueMicrotask(() => sessLineUp(top));
 
   const side = el("div", "sess-tools-side");
   // by kind: one bar of every call, and each kind's count
@@ -3381,12 +4479,31 @@ function renderSessSkills() {
   }
   if (su.count > su.top.length) body.append(el("div", "sess-more", t("+{n} more", { n: su.count - su.top.length })));
   box.append(body);
+  sessLineUp(body);
+}
+
+// sessLineUp gives every row of a card of bars the columns of the widest:
+// each row is a grid of its own (#3955), so each column's width is read
+// with the rows at their natural width and set on the card as --sb<i>. The
+// widths don't change with the window's, so a card is measured once, when
+// it is first shown
+const sessSeen = new ResizeObserver((es) => es.forEach((e) => { if (e.contentRect.width) { sessSeen.unobserve(e.target); sessLineUp(e.target); } }));
+function sessLineUp(box) {
+  if (!box.isConnected) return;
+  if (!box.offsetWidth) return sessSeen.observe(box);
+  const rows = [...box.querySelectorAll(box.classList.contains("sess-skills") ? ":scope > .sess-skill > .line" : ":scope > .sess-bar")];
+  for (const p of [...box.style]) if (p.startsWith("--sb")) box.style.removeProperty(p);
+  box.classList.add("fit");
+  const w = [];
+  for (const r of rows) [...r.children].forEach((c, i) => { w[i] = Math.max(w[i] || 0, c.getBoundingClientRect().width); });
+  box.classList.remove("fit");
+  w.forEach((x, i) => box.style.setProperty("--sb" + i, Math.ceil(x) + "px"));
 }
 
 // sessBars is a card of folders or models as bars of the tokens each took;
 // a click shows that one alone, and a click on it again every one
 const SESS_BARS = 6;
-function sessBars(box, title, items, cur, choose, name) {
+function sessBars(box, title, items, cur, choose, name, menu) {
   box.replaceChildren();
   box.append(sessCardHead(title));
   const body = el("div", "sess-bars");
@@ -3405,11 +4522,14 @@ function sessBars(box, title, items, cur, choose, name) {
     const fc = x.cost ? fmtCost(x) : "";
     r.append(el("span", "n", name(x.v)), track, el("span", "v", fmtN(x.n)), el("span", "c", fc ? "≈" + fc : ""));
     r.onclick = () => choose(x.v === cur ? "" : x.v);
+    // a model's bar: its price, on a right-click
+    if (menu) r.oncontextmenu = (e) => { e.preventDefault(); menu(r, x.v); };
     body.append(r);
   }
   if (!items.length) body.append(el("div", "sess-none", t("Nothing in this range.")));
   if (items.length > shown.length) body.append(el("div", "sess-more", t("+{n} more", { n: items.length - shown.length })));
   box.append(body);
+  sessLineUp(body);
 }
 
 // sessSpent is a session's tokens and cost, as the two right-hand columns
@@ -3518,11 +4638,12 @@ $("#sessQ").onkeydown = (e) => { if (e.key === "Escape" && e.target.value) { e.s
 // the version, where magpie keeps its files, the gateway's address.
 
 // The Usage page reads its numbers again while it is looked at, as often as
-// the reader says — off, or every 5 s to a minute (a request through the gateway
-// shows within that; the subscriptions' windows each minute at most, the vendors'
-// answers being cached behind them, and the sessions each 15 s) — redrawn only
-// on a change. The button beside it reads them now.
-const USAGE_EVERY = [[0, "Off"], [5, "5 s"], [10, "10 s"], [30, "30 s"], [60, "1 min"]];
+// the reader says — off, or every 5 s to half an hour (a request through the
+// gateway shows within that; the subscriptions' windows each minute at most, the
+// vendors' answers being cached behind them, and the sessions each 15 s) —
+// redrawn only on a change. The button beside it reads them now. The longer
+// ones are for a page left open all day (114514 on Discord).
+const USAGE_EVERY = [[0, "Off"], [5, "5 s"], [10, "10 s"], [30, "30 s"], [60, "1 min"], [300, "5 min"], [900, "15 min"], [1800, "30 min"]];
 let usageEvery = 5; // seconds; 0 is off
 try {
   const v = localStorage.getItem("magpie.usageEvery");
@@ -3534,6 +4655,7 @@ function renderUsageEvery() {
   const cur = USAGE_EVERY.find(([n]) => n === usageEvery);
   const b = $("#usageEvery");
   b.replaceChildren(el("span", "", t(cur[1])), svg(CHEV, 11, 1.6));
+  b.classList.toggle("live", usageEvery > 0); // a phone's dot: it reads again by itself
   b.title = t("Refresh every");
   b.onclick = (e) => {
     e.stopPropagation();
@@ -3549,7 +4671,7 @@ function renderUsageEvery() {
   // on the Overview it reads the allowances again too (#486: they had a
   // Refresh of their own beside it)
   const what = usageTab === "usage" ? t("Refresh now, the allowances too; a Claude account's is read by running Claude Code's own /usage") : t("Refresh now");
-  r.title = usageReadAt ? what + " · " + t("Updated {time}", { time: new Date(usageReadAt).toLocaleTimeString(intlLang(), { hour12: false }) }) : what;
+  r.title = usageReadAt ? what + " · " + t("Updated {time}", { time: new Date(usageReadAt).toLocaleTimeString(intlLang(), { ...hourClock() }) }) : what;
   r.setAttribute("aria-label", t("Refresh now"));
   r.onclick = async () => {
     r.classList.add("busy");
@@ -3593,12 +4715,13 @@ function refreshUsage(now = false) {
         // the reader asking reads the allowances afresh, a Claude account's by
         // running Claude Code's own /usage (the backend runs it at most once in 30s)
         let q = null;
-        if (want) { quotasAsked = performance.now(); q = loadQuotas(true); }
+        if (want) { quotasAsked = performance.now(); q = loadQuotas("all"); }
         else if (usage && performance.now() - quotasAsked > 60e3) { quotasAsked = performance.now(); loadQuotas(); }
         if (usage) {
-          const p = period, read = ++usageRead;
+          const p = period, k = usageKey(), read = ++usageRead;
           const u = await api("usage?period=" + encodeURIComponent(p) + usageZoneQ());
           if (read === usageRead && view === "usage" && usageTab === "usage" && p === period) {
+            usageFor = k;
             if (JSON.stringify(u) !== JSON.stringify(usage)) { usage = u; renderUsage(); }
             // this read claimed the newest one: a pick it superseded had put the
             // skeleton up, and the figures on hand are what ends it
@@ -3621,6 +4744,7 @@ function refreshUsage(now = false) {
     return refreshUsage(want);
   });
   usageFlight = flight;
+  usageReading(flight, $("#usageReload"));
   return flight;
 }
 renderUsageEvery();
@@ -3649,6 +4773,7 @@ if (mode === "window" && params.get("view") === "usage") {
   const per = params.get("period");
   if (PERIODS.some(([id]) => id === per)) period = per;
   quotaFocus = usageTab === "usage" ? (params.get("card") || params.get("provider") || "") : "";
+  usagePeek = quotaFocus;
   quotaFocusUntil = performance.now() + 5000;
   ledProvider = params.get("provider") || "";
   ledAgent = params.get("agent") || "";

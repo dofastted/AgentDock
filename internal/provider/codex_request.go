@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexcat"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -39,12 +39,11 @@ func codexSign(token func(context.Context) (tok, accountID string, err error)) f
 			req.Header.Set("chatgpt-account-id", accountID)
 		}
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
-		req.Header.Set("originator", "codex_cli_rs")
 		// the version and the User-Agent name one Codex, never older than
 		// the client whose request this is (its version header, relayed)
 		ver := newerVersion(codexVersion(), req.Header.Get("version"))
 		req.Header.Set("version", ver)
-		req.Header.Set("User-Agent", codexUserAgent(ver))
+		codexClientHeaders(req.Header, ver)
 		if body == nil {
 			return nil
 		}
@@ -52,6 +51,31 @@ func codexSign(token func(context.Context) (tok, accountID string, err error)) f
 		sessionHeaders(req.Header, body)
 		return nil
 	}
+}
+
+// codexClientHeaders are what every request Codex CLI makes carries,
+// whatever it is for: its originator and its User-Agent, naming Codex of
+// version ver (codex-rs login/src/auth/default_client.rs default_headers,
+// which its token refresh, its /wham reads and its model requests are all
+// sent with). The ChatGPT account's own calls that aren't a model's
+// (/wham/usage, the reset credits, the token refresh) went with Go's
+// User-Agent and no originator, unlike any request Codex makes.
+func codexClientHeaders(h http.Header, ver string) {
+	h.Set("originator", "codex_cli_rs")
+	h.Set("User-Agent", codexUserAgent(ver))
+}
+
+// codexAccountHeaders are the headers of a call Codex makes about the
+// ChatGPT account (its /wham reads): the account it is about and
+// codexClientHeaders. Codex sends no version header with them.
+func codexAccountHeaders(accountID string) map[string]string {
+	h := http.Header{}
+	codexClientHeaders(h, codexVersion())
+	m := map[string]string{"chatgpt-account-id": accountID}
+	for k := range h {
+		m[k] = h.Get(k)
+	}
+	return m
 }
 
 // sessionHeaders names the conversation body belongs to (its
@@ -95,7 +119,7 @@ func codexUserAgent(v string) string {
 	return "codex_cli_rs/" + v + " (" + codexUA.os + "; " + arch + ") " + term
 }
 
-var versionRE = regexp.MustCompile(`\d+(\.\d+)+`)
+var versionRE = lazyre.New(`\d+(\.\d+)+`)
 
 // codexOS names the system as Codex CLI does: "Mac OS 26.6.0",
 // "Windows 10.0.26100", "Linux 6.8.0".
@@ -229,7 +253,8 @@ var savedPrompts, codexCLIPrompts promptFile
 
 // codexInstructions is what Codex CLI would send as a model's
 // instructions: the account's model list's, Codex CLI's own copy of it
-// when magpie hasn't asked yet, else Codex's generic prompt.
+// when magpie hasn't asked yet, else its bundled catalog's for the model,
+// or Codex's prompt for a model it doesn't know (codexcat.Official).
 func codexInstructions(model string) string {
 	if s, ok := savedPrompts.get(codexPromptsPath(), model, func(b []byte) map[string]string {
 		var m map[string]string
@@ -241,7 +266,7 @@ func codexInstructions(model string) string {
 	if s, ok := codexCLIPrompts.get(catalog.CodexModelsCache(), model, codexPrompts); ok {
 		return s
 	}
-	return codexcat.Prompt
+	return codexcat.Official(model)
 }
 
 // codexBody makes a Responses request the one Codex CLI would send: it
@@ -305,6 +330,9 @@ func codexBody(body []byte) []byte {
 	m["stream"] = true
 	m["tool_choice"] = "auto"
 	declareSearch(m, false)
+	// a call's name the backend refuses, in a history another provider's
+	// model wrote, turned the whole request away (codex_names.go)
+	codexToolNames(m)
 	if _, ok := m["parallel_tool_calls"]; !ok {
 		m["parallel_tool_calls"] = true
 	}

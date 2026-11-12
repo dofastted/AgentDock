@@ -96,6 +96,14 @@ func searchFor(ctx context.Context) *CallFor {
 	return f
 }
 
+// magpieSearches is whether magpie answers a client's web search for p
+// though p searches the web by itself: Settings' SearchAll, while magpie
+// can search for it. Never for magpie's own searcher request, which is
+// the provider's search.
+func magpieSearches(ctx context.Context, p provider.Provider) bool {
+	return !searching(ctx) && settings.Load().SearchAll && canSearchFor(p)
+}
+
 // searchesItself says whether the provider searches the web by itself when
 // asked on this API.
 func searchesItself(p provider.Provider, proto provider.Protocol) bool {
@@ -139,6 +147,17 @@ func codeAssistSearches(p provider.Provider, proto provider.Protocol, model stri
 	return proto == provider.CodeAssist && googleAccount(p) && searchModel(model)
 }
 
+// geminiKeySearches is a provider asked with a key at Google AI Studio's
+// Gemini API, the Google Gemini preset's beside its OpenAI-compatible one
+// (provider.AIStudioGemini; cocoasoda on Discord): Gemini runs googleSearch
+// there for a request that declares no function, as on Code Assist. One
+// that does — Codex's every turn, Claude Code's — is given magpie's search,
+// which the provider answers itself (searchesOwn), so the searches spend
+// the user's own Gemini API credit. No other vendor's API is read as one.
+func geminiKeySearches(p provider.Provider) bool {
+	return p.Account == nil && !p.IsPlugin() && !p.IsVertex() && searchesItself(p, provider.Gemini)
+}
+
 // searchModel is a model Code Assist runs googleSearch for: Gemini's, not
 // Claude's or GPT-OSS's on Antigravity, nor an image model.
 func searchModel(model string) bool {
@@ -149,6 +168,9 @@ func searchModel(model string) bool {
 // searchesFor is searchesItself for one request: a Google sign-in's Gemini
 // searches by itself only for a request without function tools.
 func searchesFor(p provider.Provider, proto provider.Protocol, model string, req *Request) bool {
+	if proto == provider.Gemini && geminiKeySearches(p) {
+		return searchModel(model) && (len(req.Tools) == 0 || req.ToolChoice == "none")
+	}
 	if searchesModel(p, proto, model) {
 		return true
 	}
@@ -245,13 +267,14 @@ func partSearcher(p provider.Provider) bool {
 }
 
 // searchHosts are the APIs that search by themselves: OpenAI's, xAI's,
-// DeepSeek's, Zhipu's and Z.ai's web_search tool (Zhipu's on its Responses
-// API only, DeepSeek's on its Responses and Anthropic APIs: their Chat APIs
-// have no such tool), Anthropic's web_search_20250305 (DeepSeek's Anthropic
+// DeepSeek's, Zhipu's, Z.ai's and Volcengine Ark's web_search tool
+// (Zhipu's and Ark's on their Responses APIs only, DeepSeek's on its
+// Responses and Anthropic APIs: their Chat APIs have no such tool; Ark's
+// in the shape forArkSearch gives it), Anthropic's web_search_20250305 (DeepSeek's Anthropic
 // API runs it too, answering web_search_tool_result blocks, #669),
 // OpenRouter's web plugin, Gemini's googleSearch.
 var searchHosts = map[provider.Protocol][]string{
-	provider.Responses: {"api.openai.com", "api.x.ai", "api.deepseek.com", "open.bigmodel.cn", "api.z.ai"},
+	provider.Responses: {"api.openai.com", "api.x.ai", "api.deepseek.com", "open.bigmodel.cn", "api.z.ai", arkHost},
 	provider.Anthropic: {"api.anthropic.com", "api.deepseek.com"},
 	provider.Chat:      {"openrouter.ai"},
 	provider.Gemini:    {"generativelanguage.googleapis.com"},
@@ -274,8 +297,8 @@ func searchAsked(proto provider.Protocol, body []byte) bool {
 // that doesn't search by itself. What is known of the provider is asked
 // first: Codex offers web_search on every turn, and each relayed turn was
 // parsed whole to learn it, for a provider that searches by itself.
-func searchedForIt(p provider.Provider, from provider.Protocol, model string, body []byte) bool {
-	return (from == provider.Chat && !p.IsRemoteMagpie() || !searchesModel(p, from, model)) && searchAsked(from, body)
+func searchedForIt(ctx context.Context, p provider.Provider, from provider.Protocol, model string, body []byte) bool {
+	return (from == provider.Chat && !p.IsRemoteMagpie() || !searchesModel(p, from, model) || magpieSearches(ctx, p)) && searchAsked(from, body)
 }
 
 // searcher is the model magpie searches with: the one Settings names, while
@@ -316,8 +339,9 @@ func searchRank(p provider.Provider) int {
 		return 4
 	case partSearcher(p) && slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return searchesAlone(p, m.ID) }):
 		return 4
-	case googleAccount(p):
-		// Gemini on a Google sign-in, by googleSearch (#757)
+	case googleAccount(p), geminiKeySearches(p):
+		// Gemini on a Google sign-in (#757) or an AI Studio key
+		// (cocoasoda on Discord), by googleSearch
 		return 5
 	case remoteSearchesAny(p):
 		// another magpie, with the models it searches natively for
@@ -371,6 +395,10 @@ func autoSearcherReady() (provider.Provider, string, bool, bool) {
 		if m == "" || top >= 0 && (bestReady && !ready || ready == bestReady && r >= top) {
 			continue
 		}
+		if codexSearches(p) {
+			// by the backend's search, which spends no model's tokens
+			m = codexSearchModel
+		}
 		best, model, top, bestReady = p, m, r, ready
 	}
 	return best, model, bestReady, top >= 0
@@ -390,7 +418,12 @@ const (
 // its small model, as when none is named. Nil when none is named or
 // provider search is explicitly off.
 func chosenSearcher() (*provider.Provider, string, string) {
-	v := strings.TrimSpace(settings.Load().Searcher)
+	return namedSearcher(settings.Load().Searcher)
+}
+
+// namedSearcher is chosenSearcher of v, a searcher as Settings writes it.
+func namedSearcher(v string) (*provider.Provider, string, string) {
+	v = strings.TrimSpace(v)
 	if v == "" || v == "off" {
 		return nil, "", ""
 	}
@@ -409,8 +442,11 @@ func chosenSearcher() (*provider.Provider, string, string) {
 	case provider.KimiCodeSearch(p) != "":
 		// it searches with no model
 		return &p, "", ""
+	case model == codexSearchModel && codexSearches(p):
+		// by the ChatGPT backend's search
+		return &p, codexSearchModel, ""
 	}
-	if model != "" && slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return m.ID == model }) && searchableModel(p, model) {
+	if model != "" && slices.ContainsFunc(searcherModels(p), func(m catalog.Model) bool { return m.ID == model }) && searchableModel(p, model) {
 		return &p, model, ""
 	}
 	if m := searcherModel(p); m != "" {
@@ -437,7 +473,7 @@ func Searchers() []SearcherChoice {
 			continue
 		}
 		var ms []catalog.Model
-		for _, m := range p.Available() {
+		for _, m := range searcherModels(p) {
 			if !provider.IsGroupRef(m.ID) && searchableModel(p, m.ID) {
 				ms = append(ms, m)
 			}
@@ -445,9 +481,28 @@ func Searchers() []SearcherChoice {
 		if len(ms) == 0 {
 			continue
 		}
-		out = append(out, SearcherChoice{Provider: p, Small: searcherModel(p), Models: ms, rank: r, ManualOnly: manualOnly, Own: googleAccount(p)})
+		out = append(out, SearcherChoice{Provider: p, Small: searcherModel(p), Models: ms, rank: r, ManualOnly: manualOnly, Own: googleAccount(p) || geminiKeySearches(p), Search: codexSearches(p)})
 	}
 	slices.SortStableFunc(out, func(a, b SearcherChoice) int { return cmp.Compare(a.rank, b.rank) })
+	return out
+}
+
+// searcherModels are the models a searcher may be named with: those its
+// list gives, then those typed in by hand that it doesn't list. A relay
+// with no model list (its models typed in by hand) has none listed, and
+// was left out of the picker while the row named it a relay to pick
+// (axelburks on Discord).
+func searcherModels(p provider.Provider) []catalog.Model {
+	avail := p.Available()
+	out := avail
+	for _, m := range p.ExposedOf(avail) {
+		if !slices.ContainsFunc(avail, func(a catalog.Model) bool { return a.ID == m.ID }) {
+			if len(out) == len(avail) {
+				out = slices.Clone(avail)
+			}
+			out = append(out, m)
+		}
+	}
 	return out
 }
 
@@ -461,9 +516,13 @@ type SearcherChoice struct {
 	// Service is a Kimi Code plan, which searches by its search service,
 	// with no model (and no Small or Models)
 	Service bool
-	// Own is a Google sign-in, whose Gemini searches for the provider's
-	// own models first, whoever is named (ownSearcher)
+	// Own is a Google sign-in or an AI Studio key, whose Gemini searches
+	// for the provider's own models first, whoever is named (ownSearcher)
 	Own bool
+	// Search is a ChatGPT account, which searches by the ChatGPT backend's
+	// search besides its models ("<provider>/@search", codexSearchModel):
+	// magpie's own pick, and what it asks when another fails
+	Search bool
 }
 
 // RelaysSaidToSearch are the providers on that are said to search by
@@ -527,18 +586,47 @@ type smallCand struct {
 }
 
 // smallCands is the provider's models smallModel picks among, of those
-// keep holds, in the order it picks them (rankSmall).
+// keep holds, in the order it picks them (rankSmall). What the user said
+// of a model named in full (ImageOverride) is their word that the ID is
+// the vendor's own, not one of the shapes guessed at below: their model
+// stays in the pool though its ID carries a namespace colon (a relay's
+// cn:deepseek-v4.1-flash, #4359) or one of the words, and keep has said
+// whether it sees. Only their "it sees" lifts the guess: a "takes no
+// images" says nothing of whether the ID is a vendor's model, and keeps
+// the guess as it was. An ID that starts a group, a found group or, on a
+// subscription, what magpie wrote into its agent, is magpie's own shape
+// whatever the user said of it, and stays out.
 func smallCands(p provider.Provider, keep func(catalog.Model) bool) []smallCand {
 	var ms []catalog.Model
+	s := settings.Shared()
 	for _, m := range p.Exposed() {
 		if keep != nil && !keep(m) {
 			continue
 		}
-		l := strings.ToLower(m.ID)
 		// a subscription's list can have what magpie wrote into its agent
-		if strings.HasPrefix(m.ID, provider.GroupPrefix) || strings.HasPrefix(m.ID, provider.AutoPrefix) || (p.Account != nil && strings.Contains(m.ID, "/")) ||
-			strings.ContainsAny(l, ":~") || slices.ContainsFunc([]string{"nano", "lite", "image", "audio", "tts", "embed", "free"}, func(w string) bool { return strings.Contains(l, w) }) {
+		if strings.HasPrefix(m.ID, provider.GroupPrefix) || strings.HasPrefix(m.ID, provider.AutoPrefix) || (p.Account != nil && strings.Contains(m.ID, "/")) {
 			continue
+		}
+		if sees, said := provider.ImageOverrideIn(s, p.ID, m.ID); !said || !sees {
+			l := strings.ToLower(m.ID)
+			if strings.ContainsAny(l, ":~") || slices.ContainsFunc([]string{"nano", "lite", "image", "audio", "tts", "embed", "free"}, func(w string) bool { return strings.Contains(l, w) }) {
+				continue
+			}
+		}
+		if m.ID == provider.CodexAutoReview {
+			// Codex's reviewer, priced free for the reviews it runs, not
+			// a model to ask anything else of
+			continue
+		}
+		if m.Price == nil {
+			// a subscription's list carries no prices: Codex's starts
+			// with its flagship, gpt-6.1-sol, which every search and
+			// every image was asked of while gpt-6-luna sat below it
+			// (lucy_85908 on Discord). Its list price, as the Usage
+			// page counts it, says which is the cheap one
+			if pr, ok := p.ListPrice(m.ID); ok {
+				m.Price = &pr
+			}
 		}
 		ms = append(ms, m)
 	}
@@ -566,6 +654,10 @@ func keptSmallCands(p provider.Provider, kind string, keep func(catalog.Model) b
 	return smallKept.get(k, func() []smallCand { return smallCands(p, keep) })
 }
 
+// smallWords name a vendor's small tier: GPT-6's is Luna, the list has
+// no mini (#604).
+var smallWords = []string{"haiku", "mini", "flash", "luna"}
+
 // rankSmall is ms in the order smallModel picks them, each one's pick of
 // those after it: on a router, a model of the big vendors first; then a
 // small one; then the cheaper; then the one listed first.
@@ -586,7 +678,7 @@ func rankSmall(ms []catalog.Model) []smallCand {
 		}
 		rs[i] = ranked{smallCand{m.ID, cost},
 			ok && !slices.Contains([]string{"anthropic", "openai", "google", "x-ai"}, v),
-			!strings.Contains(l, "haiku") && !strings.Contains(l, "mini") && !strings.Contains(l, "flash")}
+			!slices.ContainsFunc(smallWords, func(w string) bool { return strings.Contains(l, w) })}
 	}
 	slices.SortStableFunc(rs, func(a, b ranked) int {
 		if c := falseFirst(a.router, b.router); c != 0 {
@@ -628,7 +720,7 @@ func searcherReady(p provider.Provider) (string, bool) {
 	// what searchableModel says of a model is the model's and the
 	// provider's list's, which keptSmallCands is kept by
 	var keep func(catalog.Model) bool
-	if googleAccount(p) || p.IsRemoteMagpie() || partSearcher(p) {
+	if googleAccount(p) || geminiKeySearches(p) || p.IsRemoteMagpie() || partSearcher(p) {
 		keep = func(m catalog.Model) bool { return searchableModel(p, m.ID) }
 	}
 	c, ready := smallReadyOf(p, keptSmallCands(p, "search", keep), provider.Anthropic)
@@ -724,10 +816,16 @@ const searchersInTurn = 3
 // modelSearch searches the web with the searcher's model; one magpie
 // picked that fails or finds nothing gives way to the next searcher magpie
 // would pick, all of them within searchWaitMost. One Settings names gives
-// way to none: the search APIs, when set up, search in its place
-// (webSearch), and Settings says it didn't search (SearcherFailed). Handed
-// on, a search for Grok, picked, went to Codex's gpt-6-astra, a pricier
-// model the user hadn't picked, on every search (Gearclickist on Discord).
+// way to those named after it (SearcherThen), and, when it can't serve at
+// all — out of its allowance, refused for its quota, credit or rate
+// (errCantServe) — to the searchers magpie would pick in turn: a Codex
+// account named to search for Cursor's models, used up, broke every
+// search of the turns Cursor took over from it (pedestrianz, plugins#635).
+// One that answered without searching or found nothing gives way to no
+// other: the search APIs, when set up, search in its place (webSearch),
+// and Settings says it didn't search (SearcherFailed). Handed on, a search
+// for Grok, picked, went to Codex's gpt-6-astra, a pricier model the user
+// hadn't picked, on every search (Gearclickist on Discord).
 func (s *Server) modelSearch(ctx context.Context, query string) (string, []Hit, error) {
 	p, model, ok := searcher()
 	if !ok {
@@ -735,12 +833,12 @@ func (s *Server) modelSearch(ctx context.Context, query string) (string, []Hit, 
 	}
 	ctx, cancel := sideDeadline(context.WithValue(ctx, searchingKey{}, true), "search", searchTimeout, searchWaitMost)
 	defer cancel()
-	type pick struct{ id, model string }
-	tried := []pick{{p.ID, model}}
+	tried := []searchPick{{p.ID, model}}
 	var said string
 	var hits []Hit
 	// one magpie picked that is out of its allowance isn't asked: it
-	// would only be refused again (#1801); one the Settings name is
+	// would only be refused again (#1801); one the Settings name is, and
+	// its refusal, as one out of its allowance, hands it on (errCantServe)
 	err := searcherSpent(p, model)
 	cp, _, why := chosenSearcher()
 	named := why == "" && cp != nil && cp.ID == p.ID
@@ -751,50 +849,132 @@ func (s *Server) modelSearch(ctx context.Context, query string) (string, []Hit, 
 		said, hits, err = s.searchBy(ctx, p, model, query, searchEffort(p, model))
 	}
 	if named {
-		// a search the agent stopped waiting for is no failure of its
+		// those Settings names after it, in their order (SearcherThen),
+		// then, when it can't serve, those magpie would pick
+		instead, first := "", err
+		if err != nil && ctx.Err() == nil {
+			for _, v := range settings.Load().SearcherThen {
+				q, m, why := namedSearcher(v)
+				if why != "" || q == nil || q.ID == p.ID && m == model || ctx.Err() != nil {
+					continue
+				}
+				if instead == "" {
+					ctx = searchingInstead(ctx, p, model, first)
+				}
+				instead = searcherOf(*q, m)
+				tried = append(tried, searchPick{q.ID, m})
+				var next error
+				if said, hits, next = s.searchBy(ctx, *q, m, query, searchEffort(*q, m)); next == nil {
+					err = nil
+					break
+				}
+				err = errors.Join(err, next)
+			}
+			if err != nil && errors.Is(first, errCantServe) && ctx.Err() == nil {
+				if instead == "" {
+					ctx = searchingInstead(ctx, p, model, first)
+				}
+				var by string
+				said, hits, by, err = s.searchInTurn(ctx, query, tried, err, len(tried)+searchersInTurn-1)
+				if err == nil {
+					instead = by
+				}
+			}
+			if err == nil {
+				// what Settings says is the first's failure, and who
+				// searched in its place
+				if !errors.Is(ctx.Err(), context.Canceled) {
+					namedFailed(p, model, first, instead)
+				}
+				return said, hits, nil
+			}
+		}
+		// a search the agent stopped waiting for is no failure of its.
+		// Settings says the first's own failure, those after it having
+		// failed too
 		if !errors.Is(ctx.Err(), context.Canceled) {
-			namedFailed(p, model, err)
+			namedFailed(p, model, first, "")
 		}
 		if err != nil {
+			switch {
+			case errors.Is(first, errCantServe):
+				return "", nil, fmt.Errorf("%w (no other provider could search in its place)", err)
+			case len(settings.Load().SearcherThen) > 0:
+				return "", nil, fmt.Errorf("%w (the searchers picked in Settings › Web search, in their order: no other provider searches in their place)", err)
+			}
 			return "", nil, fmt.Errorf("%w (the searcher picked in Settings › Web search: no other provider searches in its place)", err)
 		}
 		return said, hits, nil
 	}
-	// the others in turn, those with allowance left first
+	if err != nil && ctx.Err() == nil {
+		ctx = searchingInstead(ctx, p, model, err)
+		said, hits, _, err = s.searchInTurn(ctx, query, tried, err, searchersInTurn)
+	}
+	return said, hits, err
+}
+
+// turnModel is what c searches with when magpie picks it: a ChatGPT
+// account by the backend's search, another by its small model.
+func turnModel(c SearcherChoice) string {
+	if c.Search {
+		return codexSearchModel
+	}
+	return c.Small
+}
+
+// searchPick is a searcher a search was asked of.
+type searchPick struct{ id, model string }
+
+// searchInTurn asks the searchers magpie would pick (Searchers), those
+// with allowance left first, of a provider not tried yet, until one
+// searches or most have been tried in all: what it found, and which
+// searched (searcherOf). err is the failures so far, which the new ones
+// join.
+func (s *Server) searchInTurn(ctx context.Context, query string, tried []searchPick, err error, most int) (string, []Hit, string, error) {
 	var turn, spent []SearcherChoice
 	for _, c := range Searchers() {
 		if c.ManualOnly || c.Small == "" {
 			continue
 		}
-		if searcherSpent(c.Provider, c.Small) != nil {
+		if searcherSpent(c.Provider, turnModel(c)) != nil {
 			spent = append(spent, c)
 		} else {
 			turn = append(turn, c)
 		}
 	}
 	for _, c := range append(turn, spent...) {
-		if err == nil || ctx.Err() != nil || len(tried) >= searchersInTurn {
+		if ctx.Err() != nil || len(tried) >= most {
 			break
 		}
-		if slices.ContainsFunc(tried, func(t pick) bool { return t.id == c.Provider.ID }) {
+		if slices.ContainsFunc(tried, func(t searchPick) bool { return t.id == c.Provider.ID }) {
 			continue
 		}
-		if len(tried) == 1 {
-			ctx = searchingInstead(ctx, p, model, err)
-		}
-		tried = append(tried, pick{c.Provider.ID, c.Small})
-		next := searcherSpent(c.Provider, c.Small)
+		m := turnModel(c)
+		tried = append(tried, searchPick{c.Provider.ID, m})
+		next := searcherSpent(c.Provider, m)
 		if next == nil {
-			said, hits, next = s.searchWith(ctx, c.Provider, c.Small, query, searchEffort(c.Provider, c.Small))
+			var said string
+			var hits []Hit
+			if said, hits, next = s.searchBy(ctx, c.Provider, m, query, searchEffort(c.Provider, m)); next == nil {
+				return said, hits, searcherOf(c.Provider, m), nil
+			}
 		}
-		if next != nil {
-			err = errors.Join(err, next)
-		} else {
-			err = nil
-		}
+		err = errors.Join(err, next)
 	}
-	return said, hits, err
+	return "", nil, "", err
 }
+
+// errCantServe is a searcher that can't serve a search now: every account
+// or key of it out of its allowance (searcherSpent), or the search refused
+// for its quota, credit or rate (searchWith). It is the provider's state,
+// not what it does with a search, so another searches in its place.
+var errCantServe = errors.New("can't search now")
+
+// cantServe is err, a searcher's own error, said to be errCantServe
+// without changing what it says.
+type cantServe struct{ error }
+
+func (c cantServe) Unwrap() []error { return []error{c.error, errCantServe} }
 
 // lastNamedFail is the last search the searcher Settings names didn't
 // make, for Settings to say (SearcherFailed); cleared when it searches.
@@ -810,14 +990,23 @@ type SearchFailure struct {
 	Why          string // the error, when it neither found nothing nor didn't search
 	NothingFound bool   // it searched and named no page
 	NotSearched  bool   // it answered without searching (errNotSearched)
-	At           time.Time
+	// Instead is the searcher Settings names after it (SearcherThen) that
+	// searched in its place, "" when none did
+	Instead string
+	At      time.Time
 }
 
-func namedFailed(p provider.Provider, model string, err error) {
-	name := p.ID
-	if model != "" {
-		name += "/" + model
+// searcherOf is a searcher as Settings writes it: "<provider>/<model>",
+// or "<provider>" for one that searches with no model.
+func searcherOf(p provider.Provider, model string) string {
+	if model == "" {
+		return p.ID
 	}
+	return p.ID + "/" + model
+}
+
+func namedFailed(p provider.Provider, model string, err error, instead string) {
+	name := searcherOf(p, model)
 	lastNamedFail.Lock()
 	defer lastNamedFail.Unlock()
 	if err == nil {
@@ -826,7 +1015,7 @@ func namedFailed(p provider.Provider, model string, err error) {
 		}
 		return
 	}
-	f := SearchFailure{Searcher: name, At: time.Now(), NotSearched: errors.Is(err, errNotSearched)}
+	f := SearchFailure{Searcher: name, At: time.Now(), NotSearched: errors.Is(err, errNotSearched), Instead: instead}
 	f.NothingFound = !f.NotSearched && errors.Is(err, errFoundNothing)
 	if !f.NothingFound && !f.NotSearched {
 		f.Why = strings.TrimPrefix(err.Error(), name+": ")
@@ -853,9 +1042,10 @@ func SearcherFailed() (SearchFailure, bool) {
 
 // searcherSpent is why a searcher's model isn't asked: every account or
 // key of it is out of its allowance (spentModel). nil when it has
-// allowance, or searches with no model (a Kimi Code plan's service).
+// allowance, or searches with no model (a Kimi Code plan's service, a
+// ChatGPT account by the backend's search).
 func searcherSpent(p provider.Provider, model string) error {
-	if model == "" || provider.KimiCodeSearch(p) != "" {
+	if model == "" || model == codexSearchModel || provider.KimiCodeSearch(p) != "" {
 		return nil
 	}
 	back, spent := spentModel(p, model, provider.Anthropic, time.Now())
@@ -866,7 +1056,7 @@ func searcherSpent(p provider.Provider, model string) error {
 	if !back.IsZero() {
 		when = " until " + heldClock(back, time.Now())
 	}
-	return fmt.Errorf("%s/%s: out of its allowance%s, not asked", p.ID, model, when)
+	return cantServe{fmt.Errorf("%s/%s: out of its allowance%s, not asked", p.ID, model, when)}
 }
 
 // searchingInstead is ctx with its web search's CallFor saying that the
@@ -916,7 +1106,7 @@ var errNotSearched = fmt.Errorf("answered without searching the web: %w", errFou
 // searching for its own models is sent none.
 func (s *Server) searchWith(ctx context.Context, p provider.Provider, model, query, effort string) (string, []Hit, error) {
 	body, _ := json.Marshal(searchBody(p, model, query, effort))
-	r, err := http.NewRequestWithContext(magpieChose(ctx), http.MethodPost, "http://magpie/v1/messages", nil)
+	r, err := http.NewRequestWithContext(ownAsk(magpieChose(ctx)), http.MethodPost, "http://magpie/v1/messages", nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -946,7 +1136,12 @@ func (s *Server) searchWith(ctx context.Context, p provider.Provider, model, que
 		if t, ok := sideTimeout(ctx); ok {
 			msg = t.Error()
 		}
-		return "", nil, fmt.Errorf("%s/%s: %s", p.ID, model, msg)
+		err := fmt.Errorf("%s/%s: %s", p.ID, model, msg)
+		switch failure(w.Code, w.Body.Bytes()) {
+		case failQuota, failCredit, failRate:
+			err = cantServe{err}
+		}
+		return "", nil, err
 	}
 	var text strings.Builder
 	var sources []string
@@ -1044,18 +1239,60 @@ const SearchAgent = "magpie-search/1"
 // and message of a failure.
 type round func(ctx context.Context, req *Request) (<-chan Event, int, string)
 
+// textCallRound is a round whose reply has the calls written into its
+// text made calls (textCallSee), as the replies of the routes without a
+// search have them (streamTranslated, forwardTranslated): every search
+// route's every round passes here, whatever protocol the client asked
+// on, and a model that writes its calls out had them reach the client
+// as the text they were (#4562).
+func textCallRound(tools []Tool, ask round) round {
+	names := textCallNames(tools)
+	if names == nil {
+		return ask
+	}
+	return func(ctx context.Context, req *Request) (<-chan Event, int, string) {
+		in, status, msg := ask(ctx, req)
+		if in == nil {
+			return in, status, msg
+		}
+		out := make(chan Event, 16)
+		t := &textCallSee{names: names, see: func(ev Event) {
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+			}
+		}}
+		go func() {
+			defer close(out)
+			for ev := range in {
+				select {
+				case <-ctx.Done():
+				default:
+					t.event(ev)
+				}
+			}
+			// a round that ended without its stop still hands on the
+			// text held from a mark begun, as the routes without a
+			// search do at their reply's end
+			t.release()
+		}()
+		return out, status, msg
+	}
+}
+
 // searchReply answers req through ask, running the searches its model
 // asks for and asking it again with what they found; the client sees one
 // reply. The first round's failure is a status, as another provider may
 // take over.
 func (s *Server) searchReply(w http.ResponseWriter, r *http.Request, from provider.Protocol, name string, req *Request, usage *Usage, ask round) (int, string) {
-	ctx, cancel := context.WithCancel(context.WithValue(r.Context(), searchForKey{}, &CallFor{Agent: callerOf(r).agent, Model: unprefixed(req.Model)}))
+	ctx, cancel := context.WithCancel(withWebAccess(context.WithValue(r.Context(), searchForKey{}, &CallFor{Agent: callerOf(r).agent, Model: unprefixed(req.Model)}), req.WebAccess))
 	defer cancel()
 	q := *req
 	q.WebSearch = false
 	tool := searchTool(q.Tools)
 	q.Tools = append(slices.Clone(q.Tools), tool)
 	q.Messages = slices.Clone(q.Messages)
+	ask = textCallRound(q.Tools, ask)
 	first, status, msg := ask(ctx, &q)
 	if first == nil {
 		return writeError(w, from, status, msg), msg
@@ -1094,8 +1331,11 @@ func (s *Server) searchRounds(ctx context.Context, q *Request, tool string, in <
 			col.add(ev)
 			switch ev.Kind {
 			case KStart:
+				// a round's prompt is told, the rounds before billed as
+				// the reply's Deferred (after)
 				this = ev.Usage
-				ev.Usage = ev.Usage.plus(before, false)
+				ev.Usage = ev.Usage.after(before, false)
+				ev.Usage.restart = started
 				if started {
 					ev = Event{Kind: KUsage, Usage: ev.Usage}
 				}
@@ -1228,10 +1468,13 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			return nil, 502, p.Name + " " + didNotStream + ": " + provider.APIError(b, "unexpected reply")
 		}
 		events := make(chan Event, 16)
+		// read here, on the request's goroutine: the reader below can
+		// outlive the request (#5973)
+		every, gap := keepaliveEvery, keepaliveGap
 		go func() {
 			defer close(events)
 			defer res.Body.Close()
-			dec := decoderFor(p, actual)
+			dec := decoderFor(p, actual, q.Tools)
 			send := func(ev Event) error {
 				select {
 				case events <- ev:
@@ -1242,7 +1485,20 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			}
 			var failed error
 			told := time.Now() // when the reader was last sent anything
+			// the reader hears that the reply goes on while the
+			// provider says nothing at all, as streamTranslated's client
+			// does (keepThroughSilence)
+			var mu sync.Mutex
+			heard, stopKeep := keepThroughSilence(every, &mu, func() {
+				if failed == nil && time.Since(told) >= every/2 {
+					failed = send(Event{Kind: KAlive})
+					told = time.Now()
+				}
+			})
 			err := readSSEAlive(rd, func(_, data string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				heard()
 				if err := dec(data, func(ev Event) {
 					if failed == nil {
 						failed = send(ev)
@@ -1253,14 +1509,18 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				}
 				return failed
 			}, func() {
+				mu.Lock()
+				defer mu.Unlock()
+				heard()
 				// a provider still queued or thinking — keepalives,
 				// response.in_progress — is heard from with nothing to
 				// translate: the reader hears that it goes on (#2316)
-				if failed == nil && time.Since(told) >= keepaliveGap {
+				if failed == nil && time.Since(told) >= gap {
 					failed = send(Event{Kind: KAlive})
 					told = time.Now()
 				}
 			})
+			stopKeep()
 			if err != nil && failed == nil && ctx.Err() == nil {
 				send(Event{Kind: KError, Text: p.Name + ": " + err.Error()})
 			}

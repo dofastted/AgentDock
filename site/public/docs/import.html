@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Add to magpie · magpie docs</title>
+<title>Add to magpie: one link puts your models in every coding agent · magpie</title>
 <meta name="description" content="Import links: give your users one link, and your models land in every agent they use. Link format, parameters, a link builder and the Add to magpie button.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/import">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/import">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/import">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/import">
+<link rel="canonical" href="https://usemagpie.ai/docs/import">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Add to magpie">
 <meta property="og:description" content="One link puts your models in every agent your users run.">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/import">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Add to magpie",
+   "description": "Import links: give your users one link, and your models land in every agent they use. Link format, parameters, a link builder and the Add to magpie button.",
+   "inLanguage": "en",
+   "url": "https://usemagpie.ai/docs/import",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Add to magpie",
+     "item": "https://usemagpie.ai/docs/import"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/docker">Docker</a>
     <a class="toc-only" href="/docs/privacy">Privacy</a>
     <a class="toc-only" href="/docs/masking">Privacy masking</a>
+    <a class="toc-only" href="/docs/mcp-router">MCP router</a>
+    <a class="toc-only" href="/docs/library">Library</a>
+    <a class="toc-only" href="/docs/claude-code-models">Models in Claude Code</a>
+    <a class="toc-only" href="/docs/codex-models">Models in Codex</a>
+    <a class="toc-only" href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a class="toc-only" href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a class="toc-only" href="/docs/local-models">Local models</a>
+    <a class="toc-only" href="/docs/opencode-models">Models in OpenCode</a>
+    <a class="toc-only" href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -133,15 +193,19 @@
       <tr><td><code>website</code></td><td>Your site (https). Shown on the provider’s page.</td></tr>
       <tr><td><code>keys</code></td><td>The page where users make keys (https). The dialog links to it when the link has no key.</td></tr>
       <tr><td><code>icon</code></td><td>A picture of your own (https): PNG, JPEG, GIF, WebP, ICO or SVG, at most 1&nbsp;MB. magpie downloads it once, after the user confirms the import, and keeps it beside the provider. Without one, magpie shows the <code>catalog</code> vendor’s logo or a plain mark.</td></tr>
+      <tr><td><code>balance</code></td><td>Where the key’s balance is read (https), on the host of one of your base URLs: magpie asks it with the key, as a chat request sends it. <code>{key}</code> in it stands for the key. Without it, magpie reads the vendors it knows, and asks a relay where new-api and sub2api tell a key its balance (<code>/api/usage/token</code>, <code>/v1/usage</code>); give one when yours answers elsewhere.</td></tr>
+      <tr><td><code>balance_path</code></td><td>Where the amount is in the JSON reply: a dotted path, list items by index (<code>data.balance</code>, <code>balance_infos.0.total_balance</code>), or a sum of them in your own units (<code>$ data.quota / 500000</code>). <code>$</code> or <code>¥</code> before it is the currency, <code>%</code> after it a percent of 1; several amounts go apart by <code>;</code>, each with a <code>label:</code> if wanted. Needs <code>balance</code>.</td></tr>
+      <tr><td><code>balance_method</code></td><td><code>GET</code>, the default, or <code>POST</code> with no body. Needs <code>balance</code>.</td></tr>
       <tr><td><code>preset</code><span class="req">or name</span></td><td>A preset id; its endpoints, catalog and pages are used, and <code>name</code> may rename it.</td></tr>
       <tr><td><code>region</code></td><td>With a preset that has regions, which one.</td></tr>
     </table></div>
     <p>At least one of <code>chat</code>, <code>responses</code>, <code>anthropic</code> and <code>gemini</code> is required without a preset; give every API you speak, and each agent uses the one it speaks natively. Base URLs must be <b>https</b>, except plain http to <code>localhost</code>, loopback, private addresses and <code>*.local</code>, where model servers usually run without TLS. They can’t carry a query, a fragment or credentials.</p>
+    <p>A link sets no other header or token for the balance: an account-wide access token is worth more than one key, and a URL stays in browser history. A balance that needs one is set up in the provider’s editor.</p>
 
     <h3 id="presets">Presets</h3>
     <p>Vendors magpie already knows. <code>magpie presets</code> prints the current list.</p>
     <div class="chips">
-      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
+      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>longcat</code></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>qwencloud</code><span>ap-southeast-1 · us-east-1 · eu-central-1 · ap-northeast-1 · cn-hongkong · cn-beijing</span></span><span class="chip"><code>qwencloud-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>voyage</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>vercel</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
     </div>
     <p>A vendor with a preset only needs to add the key: <code>magpie://import?preset=deepseek&amp;key=sk-…</code>. Want yours on the list? <a href="https://github.com/yetone/magpie/issues">Open an issue</a>.</p>
 
@@ -164,6 +228,9 @@
         <label class="m-custom">Website <i>optional</i><input name="website" placeholder="https://acme.example"></label>
         <label class="m-custom">Key page <i>optional</i><input name="keys" placeholder="https://acme.example/keys"></label>
         <label class="m-custom">Icon <i>optional, https</i><input name="icon" placeholder="https://acme.example/logo.svg"></label>
+        <label class="m-custom">Balance URL <i>optional, a base URL’s host</i><input name="balance" class="mono" placeholder="https://api.acme.example/v1/dashboard/balance"></label>
+        <label class="m-custom">Balance field <i>optional</i><input name="balance_path" class="mono" placeholder="data.balance"></label>
+        <label class="m-custom">Balance method<select name="balance_method"><option value="">GET</option><option value="POST">POST</option></select></label>
       </form>
       <div class="out">
         <div class="row"><span>Web link</span><code id="o-web"></code><button class="copy" data-copy="o-web">Copy</button></div>
@@ -238,6 +305,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
       <li><b>https only.</b> Plain http is refused except to this machine or the local network; <code>file:</code>, credentials in URLs and other schemes are refused outright.</li>
       <li><b>Read once.</b> Inside the app, the link’s contents are handed to the window a single time; a reload doesn’t bring the dialog back.</li>
       <li><b>Icons are fetched, not embedded.</b> An <code>icon=</code> URL is downloaded by magpie, only after the user confirms the import, only over https, and only into its own icons folder — at most 1&nbsp;MB, and the type is checked. magpie asks for it through usemagpie.ai’s icon proxy, so your host sees Cloudflare’s address and never the user’s, and the fetch is made from Cloudflare, where nothing on the user’s own machine or network can be reached. A loopback or local-network name is refused before anything is asked. The page and the dialog never load a remote picture directly.</li>
+      <li><b>The balance stays on your hosts.</b> A <code>balance=</code> URL on any host but one of the link’s base URLs is refused, so the key goes nowhere its requests don’t already go. It is asked only after the user adds the provider.</li>
       <li><b>Keys stay out of servers.</b> The web link keeps parameters in the fragment. The key ends up only in <code>~/.config/magpie/providers.json</code>, readable by the user alone.</li>
     </ul>
     <div class="note"><b>Keys in links are secrets.</b> Put a key in a link only on a page that user alone sees, and prefer a key minted for magpie that they can revoke. Never put a shared key in a public link.</div>
@@ -265,8 +333,18 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     <a href="/docs/docker">Docker</a>
     <a href="/docs/privacy">Privacy</a>
     <a href="/docs/masking">Privacy masking</a>
+    <a href="/docs/mcp-router">MCP router</a>
+    <a href="/docs/library">Library</a>
+    <a href="/docs/claude-code-models">Models in Claude Code</a>
+    <a href="/docs/codex-models">Models in Codex</a>
+    <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a href="/docs/local-models">Local models</a>
+    <a href="/docs/opencode-models">Models in OpenCode</a>
+    <a href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/contributors">Contributors</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
 </div></footer>
@@ -294,9 +372,9 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     ["anthropic", "Anthropic"], ["openai", "OpenAI"], ["google", "Google Gemini"], ["deepseek", "DeepSeek"], ["xai", "xAI"],
     ["moonshot", "Kimi"], ["moonshot-cn", "Kimi (China)"], ["kimi-code", "Kimi Code"], ["kimi-code-cn", "Kimi Code (China)"], ["zhipu", "Zhipu GLM"],
     ["zai", "Z.ai"], ["minimax", "MiniMax"], ["minimax-cn", "MiniMax (China)"], ["stepfun", "StepFun"], ["stepfun-cn", "StepFun (China)"],
-    ["xiaomi", "Xiaomi MiMo"], ["baidu-qianfan", "Baidu Qianfan"], ["tencent-cloud", "Tencent Cloud"],
-    ["huaweicloud", "Huawei Cloud MaaS"], ["volcengine", "Volcengine Ark"], ["qwen", "Qwen"], ["qwen-cn", "Qwen (China)"], ["qwen-token-plan", "Qwen Token Plan"], ["bailian-token-plan", "Bailian Token Plan"],
-    ["mistral", "Mistral"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"],
+    ["xiaomi", "Xiaomi MiMo"], ["longcat", "LongCat"], ["baidu-qianfan", "Baidu Qianfan"], ["tencent-cloud", "Tencent Cloud"],
+    ["huaweicloud", "Huawei Cloud MaaS"], ["volcengine", "Volcengine Ark"], ["qwen", "Qwen"], ["qwen-cn", "Qwen (China)"], ["qwen-token-plan", "Qwen Token Plan"], ["bailian-token-plan", "Bailian Token Plan"], ["qwencloud", "Qwen Cloud"], ["qwencloud-token-plan", "Qwen Cloud Token Plan"],
+    ["mistral", "Mistral"], ["voyage", "Voyage AI"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"], ["vercel", "Vercel AI Gateway"],
     ["opencode-go", "OpenCode Go"], ["clinepass", "ClinePass"], ["opencode-zen", "OpenCode Zen"], ["kilo", "Kilo Gateway"], ["commandcode", "Command Code"],
     ["together", "Together AI"], ["fireworks", "Fireworks"], ["siliconflow", "SiliconFlow"], ["nvidia", "NVIDIA NIM"], ["modelscope", "ModelScope"],
     ["aihubmix", "AiHubMix"], ["pipellm", "PipeLLM"], ["302ai", "302.AI"], ["cherryin", "CherryIN"], ["yylx", "鱼鱼连线"],
@@ -312,6 +390,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     "tencent-cloud": [["", "Plan · China"], ["cn", "Pay as you go · China"], ["intl", "Pay as you go · Global"], ["enterprise", "Enterprise plan · China"], ["enterprise-intl", "Enterprise plan · Global"]],
     "huaweicloud": [["", "Token Plan"], ["api", "Pay as you go"]],
     "volcengine": [["", "Coding Plan"], ["agent", "Agent Plan"], ["api", "Pay as you go"]],
+    "qwencloud": [["", "ap-southeast-1"], ["us-east-1", "us-east-1"], ["eu-central-1", "eu-central-1"], ["ap-northeast-1", "ap-northeast-1"], ["cn-hongkong", "cn-hongkong"], ["cn-beijing", "cn-beijing"]],
     "bedrock": [["", "us-east-1"], ["us-east-2", "us-east-2"], ["us-west-2", "us-west-2"], ["eu-central-1", "eu-central-1"], ["eu-west-1", "eu-west-1"], ["eu-west-3", "eu-west-3"], ["ap-northeast-1", "ap-northeast-1"], ["ap-southeast-1", "ap-southeast-1"], ["ap-southeast-2", "ap-southeast-2"], ["ap-south-1", "ap-south-1"]],
     "siliconflow": [["", "China"], ["intl", "Global"]],
     "yylx": [["", "Auto"], ["global", "Global"], ["cn", "China Mainland"]],
@@ -371,6 +450,18 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
           el("icon").classList.add("bad");
           errs.push("icon= must be an https picture URL; magpie drops it otherwise.");
         }
+      }
+      {
+        const v = put("balance");
+        let ok = !v;
+        if (v) try {
+          const u = new URL(v);
+          ok = u.protocol === "https:" && !u.username && !u.password && !u.hash
+            && ["chat", "responses", "anthropic", "gemini"].some((k) => { try { return new URL(el(k).value.trim()).host.toLowerCase() === u.host.toLowerCase(); } catch { return false; } });
+        } catch {}
+        el("balance").classList.toggle("bad", !ok);
+        if (!ok) errs.push("balance= must be an https URL on the host of one of the base URLs; magpie refuses the link otherwise.");
+        if (v) { put("balance_path"); put("balance_method"); }
       }
     }
     put("key");

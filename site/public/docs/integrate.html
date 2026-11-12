@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Integrate your app · magpie docs</title>
+<title>Integrate your app with a local OpenAI, Anthropic and Gemini gateway · magpie</title>
 <meta name="description" content="How an AI app, agent or client works with magpie: the local gateway, its endpoints and models, being counted as your app, a row on the Agents page, and plugins.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -29,12 +29,63 @@
 <link rel="apple-touch-icon" href="/img/icon-256.png">
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/integrate">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/integrate">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/integrate">
+<link rel="canonical" href="https://usemagpie.ai/docs/integrate">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Integrate your app">
 <meta property="og:description" content="Use magpie's gateway from your app, or get a row on its Agents page.">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/integrate">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Integrate your app",
+   "description": "How an AI app, agent or client works with magpie: the local gateway, its endpoints and models, being counted as your app, a row on the Agents page, and plugins.",
+   "inLanguage": "en",
+   "url": "https://usemagpie.ai/docs/integrate",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Integrate your app",
+     "item": "https://usemagpie.ai/docs/integrate"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -49,6 +100,15 @@
     <a class="toc-only" href="/docs/docker">Docker</a>
     <a class="toc-only" href="/docs/privacy">Privacy</a>
     <a class="toc-only" href="/docs/masking">Privacy masking</a>
+    <a class="toc-only" href="/docs/mcp-router">MCP router</a>
+    <a class="toc-only" href="/docs/library">Library</a>
+    <a class="toc-only" href="/docs/claude-code-models">Models in Claude Code</a>
+    <a class="toc-only" href="/docs/codex-models">Models in Codex</a>
+    <a class="toc-only" href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a class="toc-only" href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a class="toc-only" href="/docs/local-models">Local models</a>
+    <a class="toc-only" href="/docs/opencode-models">Models in OpenCode</a>
+    <a class="toc-only" href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -116,7 +176,9 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <p>On this machine the gateway takes any key. Send <code>magpie-&lt;your-app-id&gt;</code> (<code>Authorization: Bearer magpie-acme</code>, or <code>x-api-key</code>) and every call is counted as <code>acme</code> in Usage, the Requests log and the routing rules that match on agents. Without it, magpie counts the call by the first word of your <code>User-Agent</code> (<code>Acme/1.4 (darwin)</code> is <code>Acme</code>); an SDK’s own User-Agent (<code>OpenAI/JS …</code>, <code>ai-sdk/…</code>) would count it as that SDK. From another computer (<span class="ui">Settings</span> → <span class="ui">Share on local network</span>) the key must be one of the user’s gateway keys, and the User-Agent names your app.</p>
 
     <h3>Models</h3>
-    <p><code>GET /v1/models</code> lists what the user has turned on: <code>id</code> (<code>provider/model</code>, or a routing group’s name, sent as it is), <code>display_name</code>, <code>owned_by</code> (the provider), <code>reasoning</code> and <code>supported_reasoning_levels</code> (<code>[{"effort":"low"},…]</code>, and the same as plain names in <code>reasoning_levels</code>), <code>context_window</code> and <code>max_output_tokens</code> when known, and <code>modalities</code> when magpie knows whether it takes images. List them from there rather than shipping a list: the user adds and removes providers in magpie. Reasoning is asked in your API’s own field (<code>reasoning_effort</code>, <code>reasoning.effort</code>, Anthropic’s <code>thinking</code> or <code>output_config.effort</code>). <code>?format=text</code> gives the ids one a line.</p>
+    <p><code>GET /v1/models</code> lists what the user has turned on: <code>id</code> (<code>provider/model</code>, or a routing group’s name, sent as it is), <code>display_name</code>, <code>owned_by</code> (the provider), <code>reasoning</code> and <code>supported_reasoning_levels</code> (<code>[{"effort":"low"},…]</code>, and the same as plain names in <code>reasoning_levels</code>), <code>context_window</code> and <code>max_output_tokens</code> when known, and <code>modalities</code> when magpie knows whether it takes images. List them from there rather than shipping a list: the user adds and removes providers in magpie. Reasoning is asked in your API’s own field (<code>reasoning_effort</code>, <code>reasoning.effort</code>, Anthropic’s <code>thinking</code> or <code>output_config.effort</code>). <code>?format=text</code> gives the ids one a line. The list holds chat models alone: ask for image and video models with <code>?kind=image,video</code> (or <code>?kind=all</code>). Each is marked <code>"kind": "image"</code> or <code>"video"</code> and is made on <code>/v1/images/generations</code> or <code>/v1/videos</code>, not a chat route.</p>
+
+    <p>A vendor’s own fields: <code>/v1/images/generations</code> and <code>/v1/videos</code> take OpenAI’s fields and pass the others on to a vendor that takes them, such as Volcengine Ark’s <code>content</code> (reference video and audio, <code>draft_task</code>), <code>ratio</code>, <code>resolution</code>, <code>duration: -1</code>, <code>tools</code>, <code>watermark</code> and <code>sequential_image_generation</code>, and a video’s answer carries Ark’s own fields (<code>content.last_frame_url</code>, <code>usage</code>). For the rest of a vendor’s API use <code>/v1/magpie/native/&lt;provider&gt;/&lt;path&gt;</code>: <code>GET</code>, <code>POST</code>, <code>PUT</code>, <code>PATCH</code> or <code>DELETE</code>, with <code>&lt;path&gt;</code> joined to the provider’s host (not its base URL), in the vendor’s own shape on the user’s key for that provider, a stream as it comes; Ark’s task list is <code>GET /v1/magpie/native/ark/api/v3/contents/generations/tasks</code>. It serves a provider added with an API key, not a subscription or sign-in, and Ark’s short paths (<code>images/generations</code>, <code>contents/generations/tasks</code>) still work under the key’s base. It takes the same gateway key as every route, and a key held to models, accounts or a budget is refused it.</p>
 
     <h3>Optional</h3>
     <p>Send <code>X-Magpie-Session: &lt;id&gt;</code> with a conversation’s requests and <code>GET /v1/magpie/route?session=&lt;id&gt;</code> says which model a routing group picked for the turn and the fallbacks it tried, before the first token (long-poll with <code>after=&lt;seq&gt;&amp;wait=&lt;s&gt;</code>). <code>GET /v1/magpie/quotas</code> lists the user’s subscription allowances, and <code>GET /v1/magpie/usage</code> and <code>/v1/magpie/usage/requests</code> the Usage page’s numbers and its requests (with <code>session</code>, and <code>subagent</code>/<code>parent_agent</code> for a Claude Code subagent’s call). They answer only this machine, or another with a gateway key; a key held to a budget, models or accounts sees its own calls and routes alone, and is refused the quotas unless its owner lets it see those of what it may use (<code>magpie gateway-key quotas &lt;id&gt; on</code>; its own limit is <code>GET /v1/magpie/limit</code>). Calls your app makes to its vendor itself can be reported with <code>POST /v1/magpie/usage/requests</code> (one record or up to 5000 a post, in <code>usage.jsonl</code>’s shape, each with a <code>rid</code>; past times are kept, so a history can be backfilled). They show on the Usage page as reported, and never count against a key’s limit. The <a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#connecting-anything-else">reference</a> has the details.</p>
@@ -129,7 +191,7 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <ul>
       <li><b>magpie edits your config file</b> (most adapters; <a href="https://github.com/yetone/magpie/blob/main/internal/agent/fx.go"><code>fx.go</code></a>, <a href="https://github.com/yetone/magpie/blob/main/internal/agent/empryo.go"><code>empryo.go</code></a>). <code>Dir</code>, <code>Path</code> and <code>Bin</code> find the app; each <code>Field</code> (<code>model</code>, <code>effort</code>…) has <code>Get</code>, <code>Set</code> and <code>Options</code>. Connecting adds a <code>magpie</code> provider at the gateway, keyed <code>magpie-&lt;id&gt;</code>, and sets your model to one of magpie’s; the agent’s default or <code>Unwire</code> takes magpie’s entries out and restores what was there. Only the keys magpie sets are touched. <code>Notice</code> says when your app must be restarted; <code>Sync</code> rewrites a model list your app keeps in a file.</li>
       <li><b>Your app takes a provider only through its own import link, confirmed in your app</b> (<a href="https://github.com/yetone/magpie/blob/main/internal/agent/cindy.go"><code>cindy.go</code></a>). <code>Import</code> returns the link (<code>yourapp://provider/import?…</code> with the gateway’s URL, the key <code>magpie-&lt;id&gt;</code> and the endpoints), the row’s button opens it, and the user says yes once, in your app. <code>Added</code> reads, read-only, whether your app has magpie already. magpie writes nothing of yours. This suits an app that keeps its providers in a database or encrypted.</li>
-      <li><b>Your app has a local API while it runs</b> (Alma): magpie adds itself as a provider and sets the default model through it.</li>
+      <li><b>Your app has a local API while it runs</b> (Alma, Shelley): magpie adds itself as a provider and sets the default model through it.</li>
     </ul>
     <p>A pull request needs the adapter and its entry in <code>agents.go</code>, <code>UA</code> (what your User-Agent begins with, lower-case) so Usage knows your calls, an icon in <code>internal/gui/assets/icons</code>, tests that run under a temporary <code>HOME</code> (connect, switch, disconnect restoring the original file), and a row in the reference’s Agents table. What helps most is a stable, documented config format or import link, and where your app keeps it on each system.</p>
 
@@ -156,10 +218,20 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <a href="/docs/docker">Docker</a>
     <a href="/docs/privacy">Privacy</a>
     <a href="/docs/masking">Privacy masking</a>
+    <a href="/docs/mcp-router">MCP router</a>
+    <a href="/docs/library">Library</a>
+    <a href="/docs/claude-code-models">Models in Claude Code</a>
+    <a href="/docs/codex-models">Models in Codex</a>
+    <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a href="/docs/local-models">Local models</a>
+    <a href="/docs/opencode-models">Models in OpenCode</a>
+    <a href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/contributors">Contributors</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
 </div></footer>

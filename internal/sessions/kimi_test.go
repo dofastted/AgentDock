@@ -188,15 +188,15 @@ func TestKimiCodeSessionCounts(t *testing.T) {
 	sum := func(id string) (prompts, replies, tools int, custom, named string) {
 		for _, f := range byKey["kimi:"+id] {
 			s := parseKimi(f, nil)
-			for _, d := range s.Days {
+			for _, d := range s.Days.all() {
 				prompts += d.Prompts
 				replies += d.Replies
-				for _, n := range d.Tools {
+				for _, n := range d.Tools.all() {
 					tools += n
 				}
 			}
 			if f.main {
-				custom, named = s.Custom, s.Named
+				custom, named = s.more().Custom, s.more().Named
 			}
 		}
 		return

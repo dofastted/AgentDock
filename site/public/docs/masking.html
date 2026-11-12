@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Privacy masking · magpie docs</title>
+<title>Privacy masking: keep API keys and personal data out of LLM requests · magpie</title>
 <meta name="description" content="How to turn on magpie's local privacy masking: what it masks before a request leaves your computer, how values come back in replies, how to check it worked, and its limits.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/masking">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/masking">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/masking">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/masking">
+<link rel="canonical" href="https://usemagpie.ai/docs/masking">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Privacy masking">
 <meta property="og:description" content="Keep keys, passwords and personal data on your computer: masked before a request leaves it, restored in the reply.">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/masking">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Privacy masking",
+   "description": "How to turn on magpie's local privacy masking: what it masks before a request leaves your computer, how values come back in replies, how to check it worked, and its limits.",
+   "inLanguage": "en",
+   "url": "https://usemagpie.ai/docs/masking",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Privacy masking",
+     "item": "https://usemagpie.ai/docs/masking"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/docker">Docker</a>
     <a class="toc-only" href="/docs/privacy">Privacy</a>
     <a class="toc-only" href="/docs/masking">Privacy masking</a>
+    <a class="toc-only" href="/docs/mcp-router">MCP router</a>
+    <a class="toc-only" href="/docs/library">Library</a>
+    <a class="toc-only" href="/docs/claude-code-models">Models in Claude Code</a>
+    <a class="toc-only" href="/docs/codex-models">Models in Codex</a>
+    <a class="toc-only" href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a class="toc-only" href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a class="toc-only" href="/docs/local-models">Local models</a>
+    <a class="toc-only" href="/docs/opencode-models">Models in OpenCode</a>
+    <a class="toc-only" href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -92,7 +152,7 @@
       <li><b>Open the page</b>Go to <span class="ui">Settings</span> → <span class="ui">Privacy</span>.</li>
       <li><b>Mask secrets</b>Under <span class="ui">What to mask</span>, set <span class="ui">Mask secrets</span> to <span class="ui">On</span>: API keys, private keys, tokens and passwords.</li>
       <li><b>Personal data, if you want it</b>Set <span class="ui">Mask personal data</span> to <span class="ui">On</span> for emails, phone numbers, ID and bank card numbers. Each further kind of personal data then gets its own switch below it.</li>
-      <li><b>Your own words</b>In <span class="ui">Masked words</span>, list names, codenames or hosts to keep from vendors, separated by commas. <span class="ui">Masked words in any case</span> makes <em>Nightjar</em> mask <em>NIGHTJAR</em> too. A secret magpie doesn’t know, such as your gateway’s own keys, goes under <span class="ui">Masking rules</span>: what it starts with, or a regular expression.</li>
+      <li><b>Your own words</b>In <span class="ui">Masked words</span>, list names, codenames or hosts to keep from vendors, one on each row (several pasted with commas between become a row each). <span class="ui">Masked words in any case</span> makes <em>Nightjar</em> mask <em>NIGHTJAR</em> too. A secret magpie doesn’t know, such as your gateway’s own keys, goes under <span class="ui">Masking rules</span>: what it starts with, or a regular expression.</li>
       <li><b>Try it</b>Paste a text into <span class="ui">Try it</span> to see exactly what the vendor would get. What you paste there isn’t kept.</li>
     </ol>
     <p>It applies from the next request, with no restart and nothing to change in your agent. The work is done by the built-in plugin <span class="ui">Privacy masking</span> (<code>redact</code>, in <span class="ui">Settings</span> → <span class="ui">Plugins</span>), which is on whenever any masking is asked for.</p>
@@ -110,10 +170,10 @@
     <h2 id="what"><a class="anchor" href="#what">What is masked</a></h2>
     <div class="table-wrap"><table>
       <tr><th>Switch</th><th>What it finds</th></tr>
-      <tr><td><span class="ui">Mask secrets</span></td><td>Private key blocks (<code>-----BEGIN … PRIVATE KEY-----</code>). API keys by their shape: <code>sk-…</code> (OpenAI, Anthropic, OpenRouter), <code>ghp_</code>/<code>github_pat_</code>, <code>glpat-</code>, <code>AIza…</code>, <code>xox…-</code>, <code>sk_live_</code>, <code>AKIA</code>/<code>ASIA</code>, <code>hf_</code>, <code>gsk_</code>, <code>xai-</code>, <code>npm_</code>, <code>pypi-</code>, <code>dop_v1_</code>, <code>SG.</code>, and relay keys like <code>oc_sk_…</code>. JWTs. The password in <code>user:password@host</code>. The value of a field named for a secret, as <code>.env</code> files and configs have them: <code>DB_PASSWORD=…</code>, <code>api_key: …</code>, <code>client_secret</code>, <code>token</code>, <code>credential</code>. Your own <span class="ui">Masking rules</span>.</td></tr>
-      <tr><td><span class="ui">Mask personal data</span></td><td>Emails, mainland China mobile numbers, Chinese ID numbers and bank card numbers whose checksum adds up. Also on by default: US Social Security numbers, passport numbers (after <em>passport</em>, 护照 or パスポート), IBANs, birthdays (next to <em>birthday</em>, <em>DOB</em> or 生日, and over a year ago, so today&rsquo;s date stays), MAC addresses and serial numbers (after <em>S/N</em>). Off until you turn them on, since agents send them in nearly every request: the user name in home folders, user and computer names (<code>user@host</code>), public IP addresses and cloud storage buckets.</td></tr>
-      <tr><td><span class="ui">Masked words</span></td><td>Each word you listed, exactly, as <code>{{TERM_…}}</code>.</td></tr>
-      <tr><td><span class="ui">Find with a local model</span></td><td>Under <span class="ui">How it’s found</span>. A model on this computer finds what no rule can: a name or an address in free text. It needs <span class="ui">Mask secrets</span> or <span class="ui">Mask personal data</span> on, and finds under the same switches. The menu beside it picks the model: AstrLink Guard (Chinese and English, a 39 MB download, few false alarms in code; the default) or OpenAI’s Privacy Filter (1.6 GB, uses the GPU, masks more ordinary values in code).</td></tr>
+      <tr><td><span class="ui">Mask secrets</span></td><td>Private key blocks (<code>-----BEGIN … PRIVATE KEY-----</code>). API keys by their shape: <code>sk-…</code> (OpenAI, Anthropic, OpenRouter), <code>ghp_</code>/<code>github_pat_</code>, <code>glpat-</code>, <code>AIza…</code>, <code>xox…-</code>, <code>sk_live_</code>, <code>AKIA</code>/<code>ASIA</code>, <code>hf_</code>, <code>gsk_</code>, <code>xai-</code>, <code>npm_</code>, <code>pypi-</code>, <code>dop_v1_</code>, <code>SG.</code>, and relay keys like <code>oc_sk_…</code>. JWTs. The password in <code>user:password@host</code>. The value of a field named for a secret, as <code>.env</code> files and configs have them: <code>DB_PASSWORD=…</code>, <code>api_key: …</code>, <code>client_secret</code>, <code>token</code>, <code>credential</code>. Your own <span class="ui">Masking rules</span>. Wallet private keys by the shape their wallets export: a Bitcoin WIF, a BIP32 <code>xprv</code>, an Ethereum or TRON <code>0x</code> key, a Solana key or <code>id.json</code> keypair, a Sui <code>suiprivkey1…</code>, an Aptos <code>ed25519-priv-0x…</code>, a Stellar seed, a NEAR <code>ed25519:…</code> key, a Nostr <code>nsec1…</code>, an age identity, a Zcash extended spending key, and a 12 to 25 word seed phrase after <em>seed</em> or <em>mnemonic</em> whose every word is in the BIP39 list. A key with no prefix of its own is masked only when it checks out: a WIF or <code>xprv</code> by its checksum, a Solana key by its public half, a Stellar seed by its CRC, so a Solana transaction signature goes as written. A <code>0x</code> key has the shape of a transaction hash, so it is masked only after a key&rsquo;s name (<code>PRIVATE_KEY=</code>, <code>--private-key</code>, <code>new Wallet(…)</code>, 私钥); a hash, a storage slot or a sha256 sum goes as written. An exchange&rsquo;s API key, secret and <code>passphrase</code> go by their fields&rsquo; names.</td></tr>
+      <tr><td><span class="ui">Mask personal data</span></td><td>Emails, mainland China mobile numbers (not an 11-digit id: one under <code>order_id</code> or after 订单号 goes as written), Chinese ID numbers and bank card numbers whose checksum adds up. Also on by default: US Social Security numbers, passport numbers (after <em>passport</em>, 护照 or パスポート), IBANs, birthdays (next to <em>birthday</em>, <em>DOB</em> or 生日, and over a year ago, so today&rsquo;s date stays), MAC addresses and serial numbers (after <em>S/N</em>). Off until you turn them on, since agents send them in nearly every request: the user name in home folders (sent as a made-up name, the same every turn, so the model reads a real folder rather than a placeholder), user and computer names (<code>user@host</code>), public IP addresses (sent as a name such as <code>public-ip-kvxqmrtz</code>, so the model still knows the address is public and connects with it, and the real address goes back into its commands) and cloud storage buckets. A wallet or contract address (<code>0x</code> and 40 hex digits) is public and goes as written; a private key is still masked.</td></tr>
+      <tr><td><span class="ui">Masked words</span></td><td>Each word you listed, exactly, as <code>{{TERM_…}}</code>. A date, such as <em>1990-05-12</em>, matches that day however it is written: <em>1990/5/12</em>, <em>1990.05.12</em>, <em>1990年5月12日</em>, <em>19900512</em>, <em>May 12, 1990</em>, and <em>13/05/1990</em> style only where the day can’t be read as a month. Never another date or a version like <em>1990.5.12.1</em>.</td></tr>
+      <tr><td><span class="ui">Find with a local model</span></td><td>Under <span class="ui">How it’s found</span>. A model on this computer finds what no rule can: a name or an address in free text. It is on unless you turned it off, and AstrLink Guard downloads with the first masked request; until it is on disk, the rules mask alone. It needs <span class="ui">Mask secrets</span> or <span class="ui">Mask personal data</span> on, and finds under the same switches. The menu beside it picks the model: AstrLink Guard (Chinese and English, a 39 MB download, few false alarms in code, on a Mac it runs on the Neural Engine; the default) or OpenAI’s Privacy Filter (1.6 GB, uses the GPU, masks more ordinary values in code). <span class="ui">Confidence threshold</span> under it is how sure the model must be before a value is masked: Privacy Filter’s default is 0.5, AstrLink Guard’s 0.8, its publisher’s. Higher masks fewer ordinary values, and lets more real names and addresses through: the rules after the model drop most false alarms already, so the default is where we measured the fewest real values lost.</td></tr>
     </table></div>
     <p>A placeholder is the kind plus eight characters of a keyed hash. The same value gets the same placeholder every time, so the conversation reads the same turn after turn and the vendor’s prompt cache stays valid. The values are held in memory only.</p>
 
@@ -151,8 +211,9 @@
       <li><b>Thinking stays as the vendor wrote it.</b> A thinking block with its signature, Gemini’s thoughts and Responses’ encrypted reasoning are sealed by the vendor and go back unchanged, so the signature still matches. Only values already masked elsewhere in the request are swapped in them.</li>
       <li><b>Ids and tool definitions go as written:</b> model ids, message and call ids, UUIDs, tool names, MCP server names, and tool schemas (their descriptions are masked), so a vendor or a tool can still check them.</li>
       <li><b>Images and file data are sent as they are.</b> Text inside a screenshot is not masked.</li>
-      <li><b>It fails closed.</b> If masking is on and can’t run (the <span class="ui">Privacy masking</span> plugin turned off by hand, or the local model is on and can’t answer), the request gets a 503 that says nothing was sent. It is never sent unmasked instead.</li>
-      <li><b>Local models can skip it.</b> <span class="ui">Send requests unmasked</span> on a provider whose every address is on this computer or your local network (Ollama, LM Studio) sends its requests as written; <code>magpie provider set ollama unmasked=yes</code> does the same. The logs keep the masked body.</li>
+      <li><b>It fails closed.</b> If masking is on and can’t run (the <span class="ui">Privacy masking</span> plugin turned off by hand, or the local model you turned on can’t answer), the request gets a 503 that says nothing was sent. It is never sent unmasked instead. The model on by default that can’t answer leaves the rules to mask alone.</li>
+      <li><b>A provider can skip it.</b> <span class="ui">Send requests unmasked</span> on a provider sends its requests as written: a model on this computer or your local network (Ollama, LM Studio), and, if you choose, any other provider, a subscription or a plugin’s provider too. Turned on for one that isn’t local, the editor says its vendor gets your requests unmasked. A request that can fall back to a provider still masked is masked. <code>magpie provider set ollama unmasked=yes</code> does the same.</li>
+      <li><b>Or send what masking would change to one of them.</b> In <span class="ui">Settings › Privacy</span>, <span class="ui">Instead of masking, send to</span> picks such a model. An agent’s request that masking would change then goes to it as written, so it can answer about the real names, and a request with nothing to mask goes where it was going. If that model fails, the request fails: it is never masked and sent to a vendor instead. Off by default.</li>
       <li><b>The model sees placeholders.</b> It can’t read or reason about a masked value; it can only pass it on. Put a value it must read under <span class="ui">Never mask</span>.</li>
       <li><b>Rules find shapes.</b> A phone number in another country’s format or a name in free text needs <span class="ui">Find with a local model</span>, or your own <span class="ui">Masked words</span> and <span class="ui">Masking rules</span>. Try your own text in <span class="ui">Try it</span> first.</li>
     </ul>
@@ -171,10 +232,20 @@
     <a href="/docs/docker">Docker</a>
     <a href="/docs/privacy">Privacy</a>
     <a href="/docs/masking">Privacy masking</a>
+    <a href="/docs/mcp-router">MCP router</a>
+    <a href="/docs/library">Library</a>
+    <a href="/docs/claude-code-models">Models in Claude Code</a>
+    <a href="/docs/codex-models">Models in Codex</a>
+    <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a href="/docs/local-models">Local models</a>
+    <a href="/docs/opencode-models">Models in OpenCode</a>
+    <a href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/contributors">Contributors</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
 </div></footer>

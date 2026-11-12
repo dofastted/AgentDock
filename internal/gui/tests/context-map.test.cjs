@@ -17,7 +17,7 @@ const assets = path.resolve(__dirname, "../assets");
 const now = Date.now();
 const ago = (m) => new Date(now - m * 60000).toISOString();
 
-const latest = {
+const LATEST = {
   window: 272000, tokens: 21400, counted: true, turns: 3,
   parts: [
     { kind: "system", tokens: 5200, items: [{ name: "prompt", tokens: 4900 }, { name: "environment_context", tokens: 300 }] },
@@ -29,7 +29,7 @@ const latest = {
     { kind: "chat", tokens: 800, items: [{ name: "turn", tag: "turn", n: 3, tokens: 800 }] },
   ],
 };
-const context = (days) => ({
+const context = (days, latest = LATEST) => ({
   days,
   agents: [
     { agent: "codex", requests: 9, sessions: 1, errors: 0, calls: 9, median: 17700, p90: 21400, baseline: 13300, window: 272000, cache: 0.74, growth: 228, peakFill: 0.08, compacts: 0,
@@ -47,7 +47,7 @@ const context = (days) => ({
     { agent: "codex", key: "01a117b1-aecd-76e2-9b2f-3c1d", title: "Port the parser", model: "live/codex/gpt-5.6-luna", first: ago(12), last: ago(4), requests: 3, peak: 21400, window: 272000,
       latest, latestId: 19, points: [{ id: 17, time: ago(12), tokens: 13000, cache: 0 }, { id: 18, time: ago(8), tokens: 17700, cache: 12000 }, { id: 19, time: ago(4), tokens: 21400, cache: 20900 }] },
     { agent: "claude", key: "ce0c93f6-1111-2222-3333-444444444444", model: "claude-sonnet-5", first: ago(30), last: ago(9), requests: 1, peak: 180000, window: 200000,
-      latest: { ...latest, window: 200000, tokens: 180000 }, latestId: 30, points: [{ id: 30, time: ago(9), tokens: 180000 }] },
+      latest: { ...LATEST, window: 200000, tokens: 180000 }, latestId: 30, points: [{ id: 30, time: ago(9), tokens: 180000 }] },
   ],
 });
 
@@ -74,7 +74,7 @@ function text(url, r) {
   return r.fulfill({ json: { id: 19, kind, items, kept: 10 } });
 }
 
-function serve(lang, asked) {
+function serve(lang, asked, latest) {
   const state = { agents: [{ id: "claude", name: "Claude Code", path: "/test/claude", fields: [] }, { id: "codex", name: "Codex", path: "/test/codex", fields: [] }], profiles: [], settings: { lang, theme: "light" } };
   return async (r) => {
     const url = new URL(r.request().url());
@@ -84,7 +84,7 @@ function serve(lang, asked) {
     if (url.pathname === "/api/state") return json(state);
     if (url.pathname === "/api/context") {
       asked.push(url.searchParams.get("days"));
-      return json(context(+url.searchParams.get("days")));
+      return json(context(+url.searchParams.get("days"), latest));
     }
     // the text comes a moment after it is asked, as it does under load:
     // the dialog says "Reading…" first, and the test waits past it
@@ -138,10 +138,10 @@ const words = {
 };
 
 
-async function open(page, lang, width, still) {
+async function open(page, lang, width, latest) {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.route("**/*", serve(lang, []));
+  await page.route("**/*", serve(lang, [], latest));
   await page.addInitScript(() => { try { if (!sessionStorage.getItem("set")) { localStorage.clear(); localStorage.setItem("magpie.usageTab", "context"); sessionStorage.setItem("set", "1"); } } catch {} });
   await page.goto("http://magpie.test/?view=usage");
   const card = await openSession(page);
@@ -166,6 +166,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 900 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         let { errors, card } = await open(page, lang, width);
 
         // the map is the default: tiles and the free space, the grid hidden
@@ -229,7 +230,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // an image the request sent inline is shown in its turn; one it
         // didn't send that way is named
-        await page.evaluate(() => window.openCtxText(19, "chat"));
+        await page.evaluate(() => window.openCtxText({ id: 19 }, "chat"));
         await view.locator(".ctx-vi-head").nth(1).click();
         const pic = view.locator(".ctx-vi.open .ctx-pic");
         await pic.locator("img").waitFor();
@@ -264,12 +265,93 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     }
   }
 
+  // a part of a few tokens beside parts of thousands is still a tile one
+  // sees and points at: the memory's 49 tokens beside 72K, the window not
+  // known, were laid as a strip thinner than the gap between tiles and
+  // hidden (AIGCFREE on Discord)
+  for (const width of [1100, 420]) {
+    test(`${engine} ${width}px: a part of a few tokens is a tile one can point at`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      t.after(() => browser.close());
+      const page = await (await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" })).newPage();
+      page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
+      const files = Array.from({ length: 16 }, (_, i) => ({ name: `/work/app/f${i}.rs`, tag: "shell", tokens: [2000, 1400, 1300, 830][i] || 530 }));
+      const { errors, card } = await open(page, "en", width, {
+        window: 0, tokens: 72100, counted: true, turns: 1,
+        parts: [
+          { kind: "system", tokens: 3100, items: [{ name: "prompt", tokens: 3100 }] },
+          { kind: "tools", tokens: 3900, items: [{ name: "bash", tokens: 2400 }, { name: "read", tokens: 1500 }] },
+          { kind: "memory", tokens: 49, items: [{ name: "system-reminder", tokens: 49 }] },
+          { kind: "files", tokens: 11900, items: files },
+          { kind: "results", tokens: 21600, items: [{ name: "bash", tag: "result", n: 21, tokens: 19400 }, { name: "read", tag: "result", tokens: 2200 }] },
+          { kind: "chat", tokens: 31600, items: [{ name: "1", tag: "turn", tokens: 31600 }] },
+        ],
+      });
+      const memory = card.locator(".ctx-map .ctx-tile.k-memory");
+      await memory.waitFor();
+      const box = await memory.boundingBox();
+      assert.ok(box.width >= 12 && box.height >= 12, `the memory is a sliver: ${box.width}×${box.height}`);
+      await wheelTo(page, memory);
+      await memory.hover();
+      await card.locator(".ctx-tip").waitFor({ state: "visible" });
+      assert.match(await card.locator(".ctx-tip").innerText(), /Memory/);
+      assert.deepEqual(errors, []);
+    });
+  }
+
+  // two small parts beside a large one are laid as slim tiles, and every
+  // tile keeps the map's gap to its neighbours at every width: a tile's
+  // padding made one too slim for it wider than its place, so it touched
+  // or ran over the next (noahhrreion on Discord, 11-06: the system
+  // prompt and tools leaning on "N more" beside them)
+  for (const lang of Object.keys(words)) {
+    test(`${engine} ${lang}: slim tiles keep their gap at every width`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      t.after(() => browser.close());
+      const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 }, reducedMotion: "reduce" })).newPage();
+      page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
+      const turns = Array.from({ length: 110 }, (_, i) => ({ name: String(i + 1), tag: "turn", tokens: 1300 + (i % 7) * 40 }));
+      const chat = turns.reduce((s, it) => s + it.tokens, 0);
+      const { errors, card } = await open(page, lang, 1100, {
+        window: 200000, tokens: 2300 + 2800 + chat, counted: true, turns: turns.length,
+        parts: [
+          { kind: "system", tokens: 2300, items: [{ name: "prompt", tokens: 2300 }] },
+          { kind: "tools", tokens: 2800, items: [{ name: "bash", tokens: 1500 }, { name: "read", tokens: 1300 }] },
+          { kind: "chat", tokens: chat, items: turns },
+        ],
+      });
+      const map = card.locator(".ctx-map");
+      await map.locator(".ctx-tile.k-system").waitFor();
+      let slim = 0;
+      for (const width of [1100, 980, 860, 760, 680, 600, 560, 520, 480, 440, 420, 390, 360]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.waitForFunction(() => { const m = document.querySelector(".ctx-sess.open .ctx-map"); return m && m.dataset.size === m.clientWidth + "x" + m.clientHeight; });
+        const rects = await map.evaluate((m) => [...m.querySelectorAll(".ctx-tile:not(.gone)")].map((n) => {
+          const r = n.getBoundingClientRect();
+          return { k: n.className, l: r.left, t: r.top, r: r.right, b: r.bottom };
+        }));
+        for (const [i, a] of rects.entries()) {
+          if (a.r - a.l < 24) slim++;
+          for (const b of rects.slice(i + 1)) {
+            const gap = Math.max(b.l - a.r, a.l - b.r, b.t - a.b, a.t - b.b);
+            assert.ok(gap >= 2.5, `${width}px: "${a.k}" and "${b.k}" are ${gap.toFixed(2)}px apart: ${JSON.stringify([a, b])}`);
+          }
+        }
+      }
+      assert.ok(slim > 0, "no width laid a slim tile, so the gap beside one was never looked at");
+      assert.deepEqual(errors, []);
+    });
+  }
+
   // with motion reduced the tiles are simply there
   test(`${engine}: the map holds still with motion reduced`, async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());
     const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 }, reducedMotion: "reduce" })).newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const { errors, card } = await open(page, "en", 1100);
     await card.locator(".ctx-map .ctx-tile.free").waitFor();
     const moving = () => page.evaluate(() => document.getAnimations().filter((a) => a.effect?.target?.closest?.(".ctx-viz")).length);

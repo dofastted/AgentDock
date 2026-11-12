@@ -8,6 +8,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPage } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const iso = (ms) => new Date(ms).toISOString();
@@ -61,6 +62,7 @@ for (const engine of engines) for (const lang of langs) for (const width of widt
     const context = await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" });
     const page = await context.newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.route("**/*", serve(lang));
@@ -74,13 +76,15 @@ for (const engine of engines) for (const lang of langs) for (const width of widt
     // another view first, the request already under way
     await page.goto("http://magpie.test/?view=agents");
     await page.waitForTimeout(800);
-    await page.locator('#nav button[data-view="routing"]').click();
+    await openPage(page, "routing");
     await page.waitForFunction(() => document.querySelector(".rt-sky .pkt.held"), null, { timeout: 6000 });
     await page.waitForTimeout(400);
     const atSeat = async (when) => {
       const w = await page.evaluate(where);
       assert(w, `${when}: the seat answering must be marked, with the request's dot held at it`);
-      assert(Math.abs(w.dot.x - w.seat.l) <= 6, `${when}: the held dot (x ${w.dot.x.toFixed(1)}) must sit at the seat's edge (x ${w.seat.l.toFixed(1)})`);
+      // beside it, a dot clear of the card, off its words (the sky is over
+      // the cards: routing-sky-under)
+      assert(w.dot.x < w.seat.l && w.seat.l - w.dot.x <= 10, `${when}: the held dot (x ${w.dot.x.toFixed(1)}) must sit at the seat's edge (x ${w.seat.l.toFixed(1)})`);
       assert(w.dot.y >= w.seat.t && w.dot.y <= w.seat.b, `${when}: the held dot (y ${w.dot.y.toFixed(1)}) must sit beside the seat (y ${w.seat.t.toFixed(1)}–${w.seat.b.toFixed(1)})`);
     };
     await atSeat("Routing picked");

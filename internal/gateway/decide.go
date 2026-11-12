@@ -29,10 +29,11 @@ import (
 	"github.com/yetone/magpie/internal/usage"
 )
 
-// jevSure is how confident Jev must be of an intent for it to count.
-// Confidence runs from 0, every option as likely, to 1, one certain, as
-// System One gives it (provider.Confidence), read from the answer's
-// probabilities wherever it has them (sureOf).
+// jevSure is how confident Jev must be of an intent for it to count, a
+// group setting its own (provider.Group.IntentSure). Confidence runs from
+// 0, every option as likely, to 1, one certain, as System One gives it
+// (provider.Confidence), read from the answer's probabilities wherever it
+// has them (sureOf).
 const jevSure = 0.4
 
 // sureOf is how sure an answer is of its choice on jevSure's scale: from
@@ -234,7 +235,13 @@ func effortAsk(prev before) string {
 }
 
 // readJev is the verdict in a System One reply to jevBody, the answer
-// without "none of these" counting when the intents are levels.
+// without "none of these" counting when the intents are levels. The sure
+// an intent needs is the group's own (rulesOf applies it): Jev's likeliest
+// intent is kept as it said it (Said), and the intents' own answer as Said
+// with Topic marking it a topic — a message may be none of those — rather
+// than a level every message is at, whose torn pick holds (the level half
+// below). Whether an intent came of it is decided where the group's own
+// sure is known, so the answer still tells why it went as it did.
 func readJev(b []byte, intents []string, levels bool, prev before) (verdict, error) {
 	var out struct {
 		Model   string `json:"model"`
@@ -255,7 +262,9 @@ func readJev(b []byte, intents []string, levels bool, prev before) (verdict, err
 	var v verdict
 	if a, ok := out.Answers["intent"]; ok && len(intents) > 0 && !levels {
 		v.Sure = sureOf(a.Confidence, a.Probabilities)
-		if a.Choice != noIntent && v.Sure >= jevSure {
+		v.Said = a.Choice // as it said it, no intent come of it or not (#4598)
+		v.Topic = true
+		if a.Choice != noIntent {
 			v.Intent = intentNamed(intents, a.Choice)
 		}
 	}
@@ -265,6 +274,7 @@ func readJev(b []byte, intents []string, levels bool, prev before) (verdict, err
 		// (继续，再加一个基准测试 after a 复杂任务 came out 0.54 to 0.46),
 		// and a turn with none before takes the likelier
 		v.Sure = sureOf(a.Confidence, a.Probabilities)
+		v.Said = a.Choice
 		v.Intent = intentNamed(intents, a.Choice)
 		if was := intentNamed(intents, prev.Intent); v.Sure < jevSure && was != "" {
 			v.Intent = was
@@ -276,6 +286,30 @@ func readJev(b []byte, intents []string, levels bool, prev before) (verdict, err
 		v.Effort, v.Score = jevLevels[i].effort, a.Score
 	}
 	return v, nil
+}
+
+// sureNeeded is how sure a group asks its classifier to be of an intent:
+// the group's own (IntentSure), or 0.4 as groups have always asked.
+func sureNeeded(g provider.Group) float64 {
+	if g.IntentSure != nil {
+		return *g.IntentSure
+	}
+	return jevSure
+}
+
+// intentOf v is the intent of v's answer at the group's own sure
+// (sureNeeded): a topic answer counts once Jev is sure enough of it —
+// "none of these", said or picked, never being an intent — while a level
+// is the level it said, every message being at one. A topic answer unsure
+// at the group's sure is no intent.
+func intentOf(v verdict, g provider.Group) string {
+	if !v.Topic {
+		return v.Intent
+	}
+	if v.Sure < sureNeeded(g) || v.Said == noIntent || v.Intent == "" {
+		return ""
+	}
+	return v.Intent
 }
 
 // intentNamed is the one of intents named, or "".
@@ -354,10 +388,10 @@ func (s *Server) jevLevelled(ctx context.Context, p provider.Provider, model str
 // says which provider and how long it was given.
 var errNoAnswer = errors.New("no answer in the classifier's wait")
 
-// askJev asks a decision provider's model through its System One API.
-func (s *Server) askJev(p provider.Provider, model string, intents []string, prev before, effort bool, text string) (v verdict, err error) {
-	wait := classifyTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
+// askJev asks a decision provider's model through its System One API,
+// within ctx: the classifier's wait, which is wait long, that every try
+// of askDecideTries shares.
+func (s *Server) askJev(ctx context.Context, wait time.Duration, p provider.Provider, model string, intents []string, prev before, effort bool, text string) (v verdict, err error) {
 	defer func() {
 		// only a call cut off by the wait is reworded: a refusal or an
 		// answer read as the wait ran out keeps its own type, which
@@ -365,7 +399,6 @@ func (s *Server) askJev(p provider.Provider, model string, intents []string, pre
 		if errors.Is(err, errNoAnswer) {
 			err = fmt.Errorf("%s gave no answer in %s", p.Name, wait)
 		}
-		cancel()
 	}()
 	if model == "" {
 		model = p.Jev()
@@ -415,10 +448,25 @@ func maskedState(ctx context.Context, text, user, reply string) (string, string,
 
 // systemOne posts body to p's System One API and returns the answer,
 // counting it in the usage as magpie's own. A gateway serving Jev is asked
-// and answers in its own way (decideAsk, decideAnswer).
+// and answers in its own way (decideAsk, decideAnswer). With the request
+// archive on it keeps the call as it keeps one a client sent (wangb on
+// Discord: 请求存档开启, 但是 systemone 的请求没有记录下来), its usage row
+// naming it.
 func (s *Server) systemOne(ctx context.Context, p provider.Provider, model string, body []byte) ([]byte, error) {
 	start := time.Now()
-	status, b, header, err := s.postDecide(ctx, p, model, body)
+	d, err := s.postDecideSent(ctx, p, model, body)
+	status, b, header := d.status, d.answer, d.header
+	archived := ""
+	if d.sent != nil {
+		c := Call{Time: start, From: provider.Chat, To: provider.Chat, Model: p.ID + "/" + model, Provider: p.ID,
+			Agent: usage.AgentOf(RouterAgent), Kind: "routing", Millis: time.Since(start).Milliseconds()}
+		if err != nil {
+			c.Error = err.Error()
+		} else if status >= 300 {
+			c.Error = provider.APIError(b, fmt.Sprintf("%d %s", status, http.StatusText(status)))
+		}
+		archived = archiveOwn(c, d.sent, d.body, status, header, b)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, errNoAnswer
@@ -442,31 +490,44 @@ func (s *Server) systemOne(ctx context.Context, p provider.Provider, model strin
 	}
 	usage.Append(usage.Record{Time: start, Agent: usage.AgentOf(RouterAgent), Kind: "routing", Provider: p.ID, Host: p.Where(), Model: model, Requested: model, Served: use.Model,
 		ProviderKeyID: keyID, ProviderKeyName: keyName, ProviderAccount: accountOf(p),
-		Input: use.Usage.Input, Output: use.Usage.Output, Millis: time.Since(start).Milliseconds(), Status: status})
+		Input: use.Usage.Input, Output: use.Usage.Output, Millis: time.Since(start).Milliseconds(), Status: status, Archive: archived})
 	return b, nil
 }
 
-// postDecide posts body to p's decision API and returns the status, body
-// and headers (its Content-Type, a refusal's Retry-After). A success is rewritten into System One's shape when
-// the provider answers in another one. DecideURL and Sign errors are as
-// they are; a transport error is named with p.
-func (s *Server) postDecide(ctx context.Context, p provider.Provider, model string, body []byte) (int, []byte, http.Header, error) {
+// decided is a decision call as it went and came back: the request magpie
+// sent and its body (in the provider's own shape), for the request archive,
+// and the answer's status, body and headers.
+type decided struct {
+	sent   *http.Request
+	body   []byte
+	status int
+	answer []byte
+	header http.Header
+}
+
+// postDecideSent posts body to p's System One API as model (DecideAsk),
+// and turns its answer back into Jev's shape when the provider answers in
+// another one. DecideURL and Sign errors are as they are; a transport
+// error is named with p. The request it sent is there once one was.
+func (s *Server) postDecideSent(ctx context.Context, p provider.Provider, model string, body []byte) (decided, error) {
+	// the headers the user gave the decision model
+	ctx = provider.WithModel(ctx, p.ID, model)
 	// every decision call goes through here — System One, a group rule's
 	// classifier, a decision group's members: a model the user disabled
 	// (#1867) is never asked
 	if msg, off := modelOff(p, model, p.ID+"/"+model); off {
-		return 0, nil, nil, errors.New(msg)
+		return decided{}, errors.New(msg)
 	}
 	ctx = s.metered(p.Via(ctx), p, "") // counted against its MaxRPM (rpm.go)
 	u, err := p.DecideModelURL(ctx, model)
 	if err != nil {
-		return 0, nil, nil, err
+		return decided{}, err
 	}
 	via := p.DecideVia()
 	body = provider.DecideAsk(via, model, body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, nil, err
+		return decided{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", RouterAgent)
@@ -474,6 +535,7 @@ func (s *Server) postDecide(ctx context.Context, p provider.Provider, model stri
 		req.Header.Set("User-Agent", "magpie/"+Version)
 		passOnCaller(ctx, req)
 	}
+	p.DecideHeaders(req.Header)
 	if via == provider.ViaVercelEval {
 		// what the AI SDK's gateway provider sends with an evaluation
 		req.Header.Set("ai-gateway-protocol-version", "0.0.1")
@@ -482,18 +544,18 @@ func (s *Server) postDecide(ctx context.Context, p provider.Provider, model stri
 		req.Header.Set("ai-evaluation-model-specification-version", "4")
 	}
 	if err := p.Sign(ctx, req, provider.Chat, body); err != nil {
-		return 0, nil, nil, err
+		return decided{}, err
 	}
 	res, err := p.Do(s.client, req)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("%s: %v", p.Name, err)
+		return decided{sent: req, body: body}, fmt.Errorf("%s: %v", p.Name, err)
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if res.StatusCode < 300 {
 		b = provider.DecideAnswer(via, b)
 	}
-	return res.StatusCode, b, res.Header, nil
+	return decided{sent: req, body: body, status: res.StatusCode, answer: b, header: res.Header}, nil
 }
 
 // maxSystemOneBody is the most a System One request may be; larger is 413
@@ -512,6 +574,13 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.serveSystemOneBody(w, r, body)
+}
+
+// serveSystemOneBody answers a System One request read: from
+// /v1/systemone, or one /v1/decisions was translated to
+// (decisions_systemone.go).
+func (s *Server) serveSystemOneBody(w http.ResponseWriter, r *http.Request, body []byte) {
 	var q struct {
 		Model string `json:"model"`
 	}
@@ -535,6 +604,12 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	}
 	p, model, err := provider.RouteDecider(q.Model)
 	if err != nil {
+		// no decision model by that name, but one OpenAI's Decisions
+		// API serves: asked there, the request and its answer
+		// translated (decisions_systemone.go)
+		if st := provider.DecideRouteStatus(err); st == http.StatusNotFound && s.systemOneByDecisions(w, r, body, q.Model) {
+			return
+		}
 		writeError(w, provider.Chat, provider.DecideRouteStatus(err), err.Error())
 		return
 	}
@@ -551,7 +626,8 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	// a gateway key held to some models (#882) is refused another; a
 	// decision model is a model, and System One asks one directly
 	if keyWho, held := keyHolds(r); held && !modelAllowed(keyWho, p, model) {
-		writeError(w, provider.Chat, http.StatusForbidden, keyModelError(keyWho, asked))
+		st, msg := keyModelRefusal(w, keyWho, p.ID+"/"+model)
+		writeError(w, provider.Chat, st, msg)
 		return
 	}
 	// its keys or accounts in its routing's order, each asked until one
@@ -559,7 +635,7 @@ func (s *Server) serveSystemOne(w http.ResponseWriter, r *http.Request) {
 	// request (fflake33 on Discord). One the user set not to serve the
 	// model is never asked; with every one so, the request is refused
 	cs, pl := s.decideKeys(p, model)
-	barred := len(cs) == 0 && len(pl.left) > 0 && !slices.ContainsFunc(pl.left, func(w Weighed) bool { return !w.Barred })
+	barred := len(cs) == 0 && slices.ContainsFunc(pl.left, func(w Weighed) bool { return w.Barred }) && !slices.ContainsFunc(pl.left, func(w Weighed) bool { return !w.Barred && !w.StandIn })
 	// and held to some accounts (#905): the decision model's provider must
 	// have one the key may use and that is let serve the model, the call
 	// spend landing on it as any's, and only those are asked
@@ -678,6 +754,39 @@ func requestEffort(proto provider.Protocol, body []byte) string {
 	return effortOfBudget(v.Thinking.Budget)
 }
 
+// outputConfigEffort is the effort an Anthropic request's output_config
+// names, whatever it asks of thinking; "" when it names none. A request
+// whose own output_config names none but carries the level of its turns
+// (Claude Code's {role: "system"} message with an output_config, which a
+// relay may keep when it drops the request's own) is asked at the last
+// of them.
+func outputConfigEffort(body []byte) string {
+	var v struct {
+		OutputConfig struct {
+			Effort string `json:"effort"`
+		} `json:"output_config"`
+		Messages []struct {
+			OutputConfig *struct {
+				Effort string `json:"effort"`
+			} `json:"output_config"`
+		} `json:"messages"`
+	}
+	if decodeJSON(body, &v) != nil {
+		return ""
+	}
+	if e := effortOf(v.OutputConfig.Effort); e != "" {
+		return e
+	}
+	for i := len(v.Messages) - 1; i >= 0; i-- {
+		if oc := v.Messages[i].OutputConfig; oc != nil {
+			if e := effortOf(oc.Effort); e != "" {
+				return e
+			}
+		}
+	}
+	return ""
+}
+
 // sentEffort is the reasoning a request goes to model at: what it asks
 // for, fitted to the model's levels as it is fitted on the way out.
 func sentEffort(proto provider.Protocol, body []byte, p provider.Provider, model string) string {
@@ -735,7 +844,9 @@ func withFixedEffort(proto provider.Protocol, body []byte, effort string) []byte
 			v.Reasoning = map[string]any{}
 		}
 		v.Reasoning["effort"] = effort
-		return withFields(body, map[string]any{"reasoning": v.Reasoning})
+		// and the agent's last change of effort mid-thread, which an
+		// upstream reading the items would take over the top's
+		return withEffortUpdated(withFields(body, map[string]any{"reasoning": v.Reasoning}), effort)
 	case provider.Anthropic:
 		var v struct {
 			Thinking *struct {
@@ -762,22 +873,130 @@ func withFixedEffort(proto provider.Protocol, body []byte, effort string) []byte
 			return body
 		}
 		return withFields(body, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": budget}})
+	case provider.Gemini:
+		var v struct {
+			Model string `json:"model"`
+		}
+		if decodeJSON(body, &v) != nil {
+			return body
+		}
+		return withGeminiEffort(body, v.Model, effort)
 	}
 	return body
+}
+
+// withModelEffort is withFixedEffort for a request going to model: a
+// Gemini request's thinkingConfig is the one model takes (withGeminiEffort),
+// which the model the client named needn't tell.
+func withModelEffort(proto provider.Protocol, body []byte, model, effort string) []byte {
+	if proto == provider.Gemini && effort != "" {
+		return withGeminiEffort(body, model, effort)
+	}
+	return withFixedEffort(proto, body, effort)
+}
+
+// withGeminiEffort asks a Gemini request's generationConfig.thinkingConfig
+// for effort, as model takes it, keeping includeThoughts as asked: a
+// Gemini 2.5 a budget in its range (vertexBudgets; it turns a level away),
+// a Gemini 3 a level of low..high (none takes xhigh or max, and it can't
+// stop thinking, so none is low), a Gemini before 2.5 nothing, as it
+// doesn't think. Another model (agy asking an OpenAI one on Gemini's API)
+// is asked the level itself, which the translation reads, and none as a
+// budget of 0. Antigravity CLI's own request sends thinkingBudget -1, or
+// an upper-case level with --effort, which agy allows only per session.
+func withGeminiEffort(body []byte, model, effort string) []byte {
+	if effort == "" {
+		return body
+	}
+	m := strings.ToLower(strings.TrimPrefix(model, "models/"))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	if strings.HasPrefix(m, "gemini-1") || strings.HasPrefix(m, "gemini-2.0") {
+		return body
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var top map[string]any
+	if dec.Decode(&top) != nil {
+		return body
+	}
+	gcKey, tcKey := "generationConfig", "thinkingConfig"
+	if _, ok := top[gcKey]; !ok {
+		if _, ok := top["generation_config"]; ok {
+			gcKey = "generation_config"
+		}
+	}
+	gc, _ := top[gcKey].(map[string]any)
+	if gc == nil {
+		gc = map[string]any{}
+	}
+	if _, ok := gc[tcKey]; !ok {
+		if _, ok := gc["thinking_config"]; ok {
+			tcKey = "thinking_config"
+		}
+	}
+	old, _ := gc[tcKey].(map[string]any)
+	include := old["includeThoughts"]
+	if include == nil {
+		include = old["include_thoughts"]
+	}
+	tc := map[string]any{}
+	if include != nil {
+		tc["includeThoughts"] = include
+	}
+	// the level as fitted to the model's own (a Gemini 3 Flash takes
+	// minimal), in effortRank's words
+	level := strings.ToLower(strings.TrimSpace(effort))
+	if l := effortOf(level); l != "" && level != "none" && level != "minimal" {
+		level = l
+	}
+	switch off, least, most, ok := vertexBudgets(m); {
+	case ok && level == "none":
+		// asked to think no more than it can help: thoughts aren't asked
+		// for where thinking is off ("include_thoughts is only enabled
+		// when thinking is enabled")
+		tc = map[string]any{"thinkingBudget": off}
+	case ok:
+		tc["thinkingBudget"] = min(max(budgetOf(effortOf(level)), least), most)
+	case strings.HasPrefix(m, "gemini-"):
+		switch at := slices.Index(effortRank, level); {
+		case level == "none" || at >= 0 && at < slices.Index(effortRank, "low"):
+			if level != "minimal" {
+				level = "low"
+			}
+		case at > slices.Index(effortRank, "high"):
+			level = "high"
+		}
+		tc["thinkingLevel"] = level
+	case level == "none":
+		tc = map[string]any{"thinkingBudget": 0}
+	default:
+		tc["thinkingLevel"] = level
+	}
+	gc[tcKey] = tc
+	return withFields(body, map[string]any{gcKey: gc})
 }
 
 // groupLevels are the reasoning levels the group offers for the member a
 // candidate is of, where the user named them (Group.Levels, #295): the
 // group's own, else those of the outermost group in it that names some.
-// nil when none is named. They bound what the candidate is asked for
+// nil when none is named. A member given several levels of its own
+// ("provider/model:low+high") is bounded by those instead. They bound what the candidate is asked for
 // (withinLevels): the agent, a model's suffix or the turn's pick asking
 // for a level the group doesn't offer is sent the nearest it does (#671).
 func groupLevels(g provider.Group, ms []provider.Member, c candidate) []string {
+	if len(c.levels) > 0 {
+		// the member's own (Member.Levels): the agent picked among the
+		// group's, and this member is sent the nearest of those it was
+		// given
+		return c.levels
+	}
 	if len(g.Levels) > 0 {
 		return g.Levels
 	}
 	for _, m := range ms {
-		if m.Provider.ID != c.p.ID || m.Model != c.model || m.Effort != c.effort {
+		if m.Provider.ID != c.p.ID || m.Model != c.model || m.Effort != c.effort || !slices.Equal(m.Levels, c.levels) {
 			continue
 		}
 		if i := slices.IndexFunc(m.Via, func(v provider.Group) bool { return len(v.Levels) > 0 }); i >= 0 {
@@ -805,4 +1024,39 @@ func agentEffort(proto provider.Protocol, body []byte) string {
 		return requestEffort(proto, body)
 	}
 	return strings.ToLower(strings.TrimSpace(bodyEffort(proto, body)))
+}
+
+// askedLevel is the reasoning level a request asks for (agentEffort),
+// and "none" for an Anthropic one that turns thinking off: a member's
+// EffortMaps may send it a level all the same.
+func askedLevel(proto provider.Protocol, body []byte) string {
+	if e := agentEffort(proto, body); e != "" || proto != provider.Anthropic {
+		return e
+	}
+	var v struct {
+		Thinking *struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
+	}
+	if decodeJSON(body, &v) == nil && v.Thinking != nil && v.Thinking.Type == "disabled" {
+		return "none"
+	}
+	return ""
+}
+
+// mappedLevel is the level a member's map sends in place of in, and
+// whether it names one. Codex's ultra is max with agents of its own, so
+// a map from max takes it too.
+func mappedLevel(to map[string]string, in string) (string, bool) {
+	if in == "" {
+		return "", false
+	}
+	if l, ok := to[in]; ok {
+		return l, true
+	}
+	if in == "ultra" {
+		l, ok := to["max"]
+		return l, ok
+	}
+	return "", false
 }

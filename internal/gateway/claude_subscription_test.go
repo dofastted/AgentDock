@@ -38,7 +38,12 @@ func TestClaudeSubscriptionPromptKeepsForeignHarnessOutOfSystem(t *testing.T) {
 	if strings.Contains(args, "system-prompt") {
 		t.Fatal("Claude bridge must retain the genuine Claude Code preset")
 	}
-	for _, want := range []string{"--input-format stream-json", "--include-partial-messages", "--strict-mcp-config", "--effort medium"} {
+	// A headless run registers no OS URL handler: --setting-sources "" keeps
+	// the user's own disableDeepLinkRegistration from loading (#4928), so
+	// the setting is passed as flag settings, which --setting-sources does
+	// not control.
+	for _, want := range []string{"--input-format stream-json", "--include-partial-messages", "--strict-mcp-config", "--effort medium",
+		`--settings {"disableDeepLinkRegistration":"disable"}`} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("missing CLI contract %q in %q", want, args)
 		}
@@ -318,7 +323,8 @@ func TestClaudeOwnWebSearchStaysInside(t *testing.T) {
 	if s := strings.Join(got, "|"); s != "start:m1|text:Let me look. |text:Go 1.27.1|stop:stop" {
 		t.Fatalf("events: %s", s)
 	}
-	if usage.Input != 40 || usage.Output != 12 {
+	// the prompt told is the answering message's, both billed
+	if usage.Input != 30 || usage.Output != 12 || usage.billed().Input != 40 {
 		t.Fatalf("usage: %+v", usage)
 	}
 }

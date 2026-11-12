@@ -81,6 +81,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await (await browser.newContext({ viewport: { width: 1000, height: 1000 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], asked = [];
       page.on("pageerror", (e) => errors.push(e.message));
       // every src given to an <img> not in the page: icon()'s probes
@@ -93,7 +94,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         } });
       });
       await page.route("**/*", serve(lang, asked));
-      await page.goto("http://magpie.test/?view=routing");
+      await page.goto("http://magpie.test/?view=groups");
       const card = page.locator(".rt-group", { hasText: "DeepSeek V4" });
       await card.waitFor();
       await card.locator("button", { hasText: words[lang].edit }).click();

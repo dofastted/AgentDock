@@ -98,6 +98,7 @@ type model struct {
 	mode    mode
 	pk      picker
 	name    textinput.Model
+	rename  string // the profile the name line renames, "" when it saves one
 	flash   string
 	flashOK bool
 	w, h    int
@@ -117,6 +118,7 @@ type model struct {
 	bal       map[string]string
 	asked     bool // balances were asked for
 	groups    []provider.Group
+	provOff   map[string]bool // providers switched off, read with the groups
 	grow      int
 	shown     int    // groups from here on were removed: listed last, to bring back
 	gid       string // the group open
@@ -126,6 +128,9 @@ type model struct {
 	direct    usage.Summary                // the agents' own calls, read from their session files
 	quotas    []provider.SubscriptionQuota // nil while the vendors are asked
 	qasked    bool                         // quotas were asked for
+	qaskedAt  time.Time                    // when they were last asked for (an asked read)
+	qgen      int                          // the quotas load the page waits for
+	qtries    int                          // that load's asks again while a read was under way
 	qleft     bool                         // windows read as what is left, not what is used
 	sstats    sessions.Stats               // the sessions' usage in the range picked
 	srange    int                          // in sessRanges
@@ -229,9 +234,10 @@ func (m *model) goTo(p page) tea.Cmd {
 		m.asked = true
 		return balancesCmd(m.provs)
 	}
-	if p == pageUsage && !m.qasked {
-		m.qasked = true
-		return quotasCmd
+	if p == pageUsage {
+		// opened: an asked read, or what is kept within quotasOpenGap of
+		// the last ask (going to another page and back)
+		return m.loadQuotas(!m.qasked || time.Since(m.qaskedAt) >= quotasOpenGap)
 	}
 	return nil
 }
@@ -303,8 +309,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case quotaMsg:
-		m.quotas = msg
-		return m, nil
+		return m, m.gotQuotas(msg)
 	case checkinMsg:
 		m.flash, m.flashOK = msg.text, msg.ok
 		// the accounts' lines say today's check-in now, with nothing asked
@@ -377,8 +382,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.reload()
 					m.flash, m.flashOK = "reloaded", true
 					if m.page == pageUsage {
-						m.quotas, m.qasked = nil, true
-						return m, quotasCmd
+						m.quotas = nil
+						// every account read again, a saved Claude
+						// account's /usage run too, as the app's
+						// Refresh does (#5380)
+						provider.AskEveryClaudeUsage()
+						return m, m.loadQuotas(true)
 					}
 					return m, nil
 				}
@@ -456,7 +465,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, syncCmd
 		}
 	case "s":
-		m.mode = modeName
+		m.mode, m.rename = modeName, ""
 		m.name = newInput("profile name")
 	case "p":
 		m.openProfiles()
@@ -566,6 +575,15 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.pk.refetch()
 		}
 		return m, nil
+	case "ctrl+e":
+		// the profile picked, renamed on a line holding its name (#2721)
+		if m.mode == modeProfiles && len(m.pk.match) > 0 {
+			m.rename = m.pk.items[m.pk.match[m.pk.cursor]].Value
+			m.name = newInput("new name")
+			m.name.SetValue(m.rename)
+			m.mode = modeName
+		}
+		return m, nil
 	case "ctrl+d":
 		if m.mode == modeProfiles && m.pk.onDel != nil && len(m.pk.match) > 0 {
 			n := m.pk.items[m.pk.match[m.pk.cursor]].Value
@@ -601,7 +619,7 @@ func (m model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.mode = modeList
+		m.mode, m.rename = modeList, ""
 		return m, nil
 	case "enter":
 		n := strings.TrimSpace(m.name.Value())
@@ -609,6 +627,15 @@ func (m model) updateName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = modeList
+		if old := m.rename; old != "" {
+			m.rename = ""
+			return m, func() tea.Msg {
+				if err := profile.Rename(old, n); err != nil {
+					return flashMsg{text: err.Error()}
+				}
+				return flashMsg{text: "profile " + old + " renamed to " + n, ok: true}
+			}
+		}
 		return m, func() tea.Msg {
 			p, err := profile.Snapshot()
 			if err != nil {
@@ -782,7 +809,7 @@ func (m model) View() string {
 		body = m.viewPicker()
 		switch {
 		case m.mode == modeProfiles:
-			footer = hints("↑↓", "move", "↵", "apply", "ctrl+d", "delete", "esc", "back")
+			footer = hints("↑↓", "move", "↵", "apply", "ctrl+e", "rename", "ctrl+d", "delete", "esc", "back")
 		case m.pk.refetch != nil:
 			footer = hints("↑↓", "move", "↵", "on / off", "ctrl+r", "fetch models again", "esc", "back")
 		case m.pk.toggle != nil:
@@ -797,10 +824,13 @@ func (m model) View() string {
 		body = m.viewGroup()
 		// two lines: there is more to do to a group than one holds
 		footer = hints("↑↓", "model / rule", "J K", "move", "a", "add model", "n", "new rule", "↵", "edit rule", "d", "take out", "esc", "back") + "\n" +
-			pad + hints("E", "effort", "F", "fast", "c", "classifier", "o", "routing", "s", "stays", "x", "context", "l", "levels", "f", "family", "R", "rename")
+			pad + hints("E", "effort", "F", "fast", "c", "classifier", "o", "routing", "s", "stays", "x", "context", "l", "levels", "f", "family", "N", "note", "R", "rename")
 	case modeName:
 		body = m.viewName()
 		footer = hints("↵", "save", "esc", "cancel")
+		if m.rename != "" {
+			footer = hints("↵", "rename", "esc", "cancel")
+		}
 	}
 
 	status := ""
@@ -962,6 +992,11 @@ func (m model) viewPicker() string {
 
 func (m model) viewName() string {
 	var b strings.Builder
+	if m.rename != "" {
+		b.WriteString(m.header("rename profile") + "\n\n" + pad + sCursor.Render("❯ ") + m.name.View() + "\n\n")
+		b.WriteString(pad + "  " + sMuted.Render("renames "+m.rename+" · the settings it holds stay as they are"))
+		return b.String()
+	}
 	b.WriteString(m.header("save profile"))
 	b.WriteString("\n\n")
 	b.WriteString(pad + sCursor.Render("❯ ") + m.name.View())

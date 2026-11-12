@@ -105,6 +105,73 @@ func TestCodexModelEffortAnswersLastWhileBuilding(t *testing.T) {
 	}
 }
 
+// A history that changes between polls, as a working Codex's does, is
+// built into the answer at most once a minute: an ask inside the minute is
+// told the last answer without reading the ledger or the sources' state,
+// and the first ask after it is told it too while the change is built
+// behind it, for the next ask.
+func TestCodexModelEffortHeldForAMinute(t *testing.T) {
+	now, rollout := effortFixture(t)
+	effortFresh, effortBehind = time.Hour, true
+	t.Cleanup(func() { effortFresh, effortBehind = 0, false })
+	var built atomic.Int32
+	effortBuilt = func() { built.Add(1) }
+	t.Cleanup(func() { effortBuilt = nil })
+	CodexModelEffort(All)
+
+	writeCodexCall(t, rollout, "main-a", "main-a", `"vscode"`, "resp-1", "m", "low", now.Add(-time.Hour), 2000, 30)
+	later := now.Add(time.Minute)
+	if err := os.Chtimes(rollout, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := findModelEffort(CodexModelEffort(All)["main-a"], "m", "low"); built.Load() != 1 || got.Input != 20 {
+		t.Fatalf("inside the minute: builds %d, %+v, want 1 and the last answer", built.Load(), got)
+	}
+	codexEffort.Lock()
+	codexEffort.periods[All].at = time.Now().Add(-2 * time.Hour)
+	codexEffort.Unlock()
+	entered, release := make(chan struct{}), make(chan struct{})
+	effortBuilt = func() {
+		built.Add(1)
+		close(entered)
+		<-release
+	}
+	asked := make(chan map[string][]sessions.ModelEffort, 1)
+	go func() { asked <- CodexModelEffort(All) }()
+	<-entered
+	select {
+	case got := <-asked:
+		if got, _ := findModelEffort(got["main-a"], "m", "low"); got.Input != 20 {
+			t.Fatalf("after the minute the ask got %+v, want the last answer", got)
+		}
+	case <-time.After(30 * time.Second):
+		close(release)
+		t.Fatal("after the minute the ask waited for the build")
+	}
+	codexEffort.Lock()
+	building := codexEffort.periods[All].building
+	codexEffort.Unlock()
+	if got, _ := findModelEffort(CodexModelEffort(All)["main-a"], "m", "low"); got.Input != 20 {
+		t.Fatalf("an ask during the build got %+v, want the last answer", got)
+	}
+	close(release)
+	<-building
+	effortBuilt = func() { built.Add(1) }
+	if got, _ := findModelEffort(CodexModelEffort(All)["main-a"], "m", "low"); built.Load() != 2 || got.Input != 2000 {
+		t.Fatalf("after the build: builds %d, %+v, want 2 and the change", built.Load(), got)
+	}
+
+	// another home's answer is never held for this one, nor told while
+	// its own is built
+	effortFixture(t)
+	if got := CodexModelEffort(All); len(got) == 0 || built.Load() != 3 {
+		t.Fatalf("a new home was told the last one's answer: builds %d, %+v", built.Load(), got)
+	}
+	if n := built.Load(); n != 3 {
+		t.Fatalf("a new home was told the last one's answer: builds %d, want 3", n)
+	}
+}
+
 // An answer is kept when there is no gateway log yet, and when the log grew
 // while it was built: the next ask builds again only if the state did change.
 func TestCodexModelEffortKeptWithoutLogAndAcrossAWrite(t *testing.T) {
@@ -155,7 +222,37 @@ func TestCodexModelEffortIsTheWholeLedgers(t *testing.T) {
 	if len(whole) != 2 {
 		t.Fatalf("fixture: the whole ledger has %d Codex threads: %+v", len(whole), whole)
 	}
+	// and only the chunks a Codex thread is known for are read for it:
+	// the Claude Code session's isn't
+	var read []sessions.CallSource
+	visitingActors = func(c *rowChunk) { read = append(read, c.Source) }
+	t.Cleanup(func() { visitingActors = nil })
 	if got := CodexModelEffort(All); !reflect.DeepEqual(got, whole) {
 		t.Fatalf("Codex-only ledger:\n got %+v\nwant %+v", got, whole)
+	}
+	if len(read) == 0 {
+		t.Fatal("no chunk was read for Codex's effort")
+	}
+	for _, src := range read {
+		if src.Path == claude {
+			t.Fatalf("the Claude Code session's chunk was read for Codex's effort: %v", read)
+		}
+	}
+}
+
+// Asks within the minute are told the kept answer itself, not a copy of
+// every thread's consumption each: over a large history the copies were
+// ~230 MB every 80 s of an open Sessions page (#2278).
+func TestCodexModelEffortAsksShareTheKeptAnswer(t *testing.T) {
+	effortFixture(t)
+	effortFresh = time.Hour
+	t.Cleanup(func() { effortFresh = 0 })
+	first := CodexModelEffort(All)
+	again := CodexModelEffort(All)
+	if len(first) == 0 {
+		t.Fatal("no consumption")
+	}
+	if reflect.ValueOf(first).UnsafePointer() != reflect.ValueOf(again).UnsafePointer() {
+		t.Fatal("an unchanged ask was told a copy of the kept answer")
 	}
 }

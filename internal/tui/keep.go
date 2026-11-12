@@ -52,8 +52,11 @@ var keep = keeper{
 // (see above), and is what to say of it.
 func keepGateway(connected bool) string {
 	k := keep
-	if k.goos != "linux" || !connected || k.autostartOn() {
+	if k.goos != "linux" || !connected {
 		return gatewayGoneNote()
+	}
+	if k.autostartOn() {
+		return atLoginNote()
 	}
 	st, err := k.status()
 	switch {
@@ -83,6 +86,19 @@ func keepGateway(connected bool) string {
 	return msg
 }
 
+// atLoginNote is said where magpie opens at login, so the terminal left
+// the gateway to the app. On Linux that can be a package's own autostart
+// entry on a box no desktop logs into (NixOS-WSL, a server over SSH),
+// which nothing ever starts (#3756): the note says the switch that has the
+// terminal hand the gateway on instead.
+func atLoginNote() string {
+	return gatewayGoneNote() + "; magpie opens at login and serves it then. Where no desktop logs in here, `magpie autostart off` has magpie tui hand it on as it quits"
+}
+
+// BackgroundLog is the log of a magpie serve that magpie tui left
+// running as it quit (serveInBackground).
+func BackgroundLog() string { return filepath.Join(appdir.Cache(), "serve.log") }
+
 // serveInBackground starts `magpie serve` on its own, outliving this
 // process and its terminal, its output in a log in magpie's cache.
 func serveInBackground() (int, string, error) {
@@ -90,7 +106,7 @@ func serveInBackground() (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	log := filepath.Join(appdir.Cache(), "serve.log")
+	log := BackgroundLog()
 	if err := os.MkdirAll(filepath.Dir(log), 0o700); err != nil {
 		return 0, "", err
 	}
@@ -102,12 +118,12 @@ func serveInBackground() (int, string, error) {
 	cmd := proc.Command(exe, "serve")
 	cmd.Stdout, cmd.Stderr = f, f
 	detach(cmd)
-	if err := cmd.Start(); err != nil {
+	// reaped if it ends while this process runs: a released one stayed
+	// <defunct> until it quit
+	if err := proc.StartReaped(cmd); err != nil {
 		return 0, "", err
 	}
-	pid := cmd.Process.Pid
-	cmd.Process.Release()
-	return pid, log, nil
+	return cmd.Process.Pid, log, nil
 }
 
 // wslHere: this Linux is a WSL distro.

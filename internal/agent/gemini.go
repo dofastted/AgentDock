@@ -26,7 +26,7 @@ func gemini(home string) *Agent { return geminiIn(here(home)) }
 // distro's (see wsl.go), whose .env names the gateway as the distro
 // reaches it, with the key it takes from there.
 func geminiIn(at place) *Agent {
-	dir := filepath.Join(at.home, ".gemini")
+	dir := at.join(".gemini")
 	path := filepath.Join(dir, "settings.json")
 	envPath := filepath.Join(dir, ".env")
 	auth := jsonGet(path, "security.auth.selectedType")
@@ -185,6 +185,7 @@ func geminiIn(at place) *Agent {
 		ID: "gemini", Name: "Gemini CLI", Icon: "geminicli-color", Aliases: []string{"gemini-cli"}, NoNames: true,
 		UA:  []string{"geminicli", "gemini-cli"},
 		Bin: "gemini", Dir: dir, Path: path,
+		Telemetry: usageStatsTelemetry(at, path, "gemini"),
 		// its model's default forgets what it had before magpie, its
 		// sign-in's default forgets the sign-in: this puts both back
 		Unwire: unroute,
@@ -261,7 +262,7 @@ func geminiIn(at place) *Agent {
 						}
 					}
 					own := group("Gemini CLI", options(ms, ""))
-					return append(own, viaMagpie("gemini", "")...)
+					return withVia(own, "gemini", "")
 				},
 			},
 		},

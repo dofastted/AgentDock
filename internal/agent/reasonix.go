@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -21,12 +20,13 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
 const reasonixKey = "MAGPIE_REASONIX_API_KEY"
 
-var reasonixKeyLine = regexp.MustCompile(`(?m)^\s*(?:export\s+)?` + reasonixKey + `\s*=`)
+var reasonixKeyLine = lazyre.New(`(?m)^\s*(?:export\s+)?` + reasonixKey + `\s*=`)
 
 // Every API request and catalog sync constructs its own Agent. The transaction
 // must cover the whole edit and rollback across those instances, including reads.
@@ -88,7 +88,7 @@ func reasonixIn(at place) *Agent {
 	if at.spell != nil {
 		goos, getenv = "linux", func(string) string { return "" }
 	}
-	dir := reasonixHome(goos, at.home, getenv)
+	dir := at.open(reasonixHome(goos, at.home, getenv))
 	gwKey := func() string { return agentKeyAt("reasonix", at.gw()) }
 	if absolute, err := filepath.Abs(dir); err == nil {
 		dir = absolute
@@ -393,7 +393,7 @@ func reasonixIn(at place) *Agent {
 						addNative(*state.Default)
 					}
 					addNative(cur["model"])
-					return append(group("Reasonix Studio", own), viaMagpie("reasonix", magpieID+"/")...)
+					return withVia(group("Reasonix Studio", own), "reasonix", magpieID+"/")
 				},
 			},
 			{Key: "effort", Label: "effort", Quiet: true,

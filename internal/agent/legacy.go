@@ -21,7 +21,7 @@ const legacyID = "dial"
 // swallowed on purpose — a file magpie cannot rewrite is one the user can
 // still fix from the picker.
 func RenameLegacy() {
-	for _, a := range All() {
+	for _, a := range local() {
 		if _, err := os.Stat(a.Path); err != nil {
 			continue
 		}
@@ -37,8 +37,18 @@ func RenameLegacy() {
 		}
 		for i := range a.Fields {
 			f := &a.Fields[i]
+			if strings.HasSuffix(f.Key, "effort") {
+				// a thinking level, never a model: Pi's is read against
+				// the models it offers, the whole catalog built at start
+				// up for it (~52 MB with a real account's providers)
+				continue
+			}
 			if rest, ok := strings.CutPrefix(f.Get(), legacyID+"/"); ok {
-				_ = f.Set(magpieID + "/" + rest)
+				// dial/… is what magpie wrote under its old name: magpie set
+				// the agent up (setUp)
+				if f.Set(magpieID+"/"+rest) == nil {
+					record(a.ID, f.Key, f.Get())
+				}
 			}
 		}
 		switch a.ID {
@@ -78,7 +88,7 @@ func moveEfforts(pid string, base func(string) (string, string, bool)) {
 	offers := func(opts []Option, v string) bool {
 		return slices.ContainsFunc(opts, func(o Option) bool { return o.Value == v })
 	}
-	for _, a := range All() {
+	for _, a := range local() {
 		if _, err := os.Stat(a.Path); err != nil {
 			continue
 		}
@@ -91,6 +101,10 @@ func moveEfforts(pid string, base func(string) (string, string, bool)) {
 			v := f.Get()
 			pre, rest := "", v
 			if r, ok := strings.CutPrefix(v, magpieID+"/"); ok {
+				if a.handWired() {
+					// the user's own provider named magpie: not ours to move
+					continue
+				}
 				pre, rest = magpieID+"/", r
 			}
 			id, ok := strings.CutPrefix(rest, pid+"/")

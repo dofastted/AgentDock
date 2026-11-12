@@ -675,6 +675,62 @@ func TestHostAdmissionLimitFailsTheNewCall(t *testing.T) {
 	}
 }
 
+// TestHostFetchWaitsForAStreamWindow (#3890): a fetch past the budget waits
+// for a window to come free and then runs, rather than failing at once into
+// a local 502 the gateway tries again; it gives up when its request ends or
+// after streamWait.
+func TestHostFetchWaitsForAStreamWindow(t *testing.T) {
+	oldWindow, oldBudget := streamWindow, streamBudget
+	oldReserve, oldWait := rpcReserve, streamWait
+	streamWindow, streamBudget, rpcReserve = 1<<20, 1<<20, 0 // one streaming call
+	t.Cleanup(func() { streamWindow, streamBudget, rpcReserve, streamWait = oldWindow, oldBudget, oldReserve, oldWait })
+
+	f := newFakeHost(t)
+	first, _, err := f.host.begin(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type got struct {
+		id  int64
+		err error
+	}
+	waited := make(chan got, 1)
+	go func() {
+		id, _, err := f.host.beginStream(context.Background())
+		waited <- got{id, err}
+	}()
+	select {
+	case g := <-waited:
+		t.Fatalf("a fetch past the budget = %d, %v, want it waiting", g.id, g.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	f.host.mu.Lock()
+	c := f.host.calls[first]
+	f.host.mu.Unlock()
+	c.release()
+	if g := <-waited; g.err != nil {
+		t.Fatalf("the waiting fetch, once a window came free: %v", g.err)
+	}
+
+	// the budget is held again: a request that ends gives the wait up
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		_, _, err := f.host.beginStream(ctx)
+		waited <- got{0, err}
+	}()
+	cancel()
+	if g := <-waited; !errors.Is(g.err, context.Canceled) {
+		t.Fatalf("a fetch whose request ended = %v, want canceled", g.err)
+	}
+	streamWait = 10 * time.Millisecond
+	if _, _, err := f.host.beginStream(context.Background()); !errors.Is(err, errTooManyCalls) {
+		t.Fatalf("a fetch past streamWait = %v, want errTooManyCalls", err)
+	}
+	if free := cap(f.host.streams) - len(f.host.streams); free != 0 {
+		t.Fatalf("%d windows free after the waits gave up, want 0 (one held)", free)
+	}
+}
+
 // TestHostCancelAfterHeadStopsTheFetch: a context that ends after the head,
 // with nothing reading or closing the body, still stops the upstream fetch.
 func TestHostCancelAfterHeadStopsTheFetch(t *testing.T) {
@@ -1001,6 +1057,78 @@ func TestHostShutdownEndsAStalledRead(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the host quitting didn't end a read waiting on it")
 	}
+}
+
+// TestHostBodyIdleEndsASilentStream: a plugin that sent part of a stream and
+// then went silent — a proxy left half-alive on a dead network keeps its
+// socket open while no byte ever comes again (#4934) — ends its reader's wait
+// bodyIdleWait after the last byte, with why, and gives the call up. Before,
+// the read waited for a chunk that was never coming, and the request hung
+// until the client cancelled it.
+func TestHostBodyIdleEndsASilentStream(t *testing.T) {
+	f := newFakeHost(t)
+	oldWait := bodyIdleWait
+	bodyIdleWait = 150 * time.Millisecond
+	t.Cleanup(func() { bodyIdleWait = oldWait })
+	id, c := f.begin(t, true)
+	b := readBody(f, id, c, context.Background())
+	reply(t, f, id, c, func() {
+		f.chunk(id, "one") // the first token arrived, then the network died:
+		// no more chunks and no answer ever come, the call staying
+		// live as a half-alive proxy's socket does
+	})
+	waitFor(t, "the chunk was queued", func() bool { return c.queuedChunks() == 1 })
+	buf := make([]byte, 8)
+	if n, err := b.Read(buf); err != nil || string(buf[:n]) != "one" {
+		t.Fatalf("first read = %q, %v, want one", buf[:n], err)
+	}
+	errs := make(chan error, 1)
+	go func() {
+		_, err := b.Read(make([]byte, 8))
+		errs <- err
+	}()
+	select {
+	case err := <-errs:
+		if err == nil || !strings.Contains(err.Error(), "sent nothing") {
+			t.Fatalf("a silent stream's read = %v, want the idle give-up", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stream silent past bodyIdleWait held its reader for ever")
+	}
+	waitFor(t, "the silent call was given up on", func() bool { return !f.registered(id) })
+}
+
+// TestHostBodyIdleSparesAFedStream: the idle wait is between bytes, not the
+// reply's whole length — a stream a chunk comes to every few waits goes on
+// however long it talks, and ends at its answer as before.
+func TestHostBodyIdleSparesAFedStream(t *testing.T) {
+	f := newFakeHost(t)
+	oldWait := bodyIdleWait
+	bodyIdleWait = 500 * time.Millisecond // a chunk every 20ms, a window
+	t.Cleanup(func() { bodyIdleWait = oldWait })
+	id, c := f.begin(t, true)
+	b := readBody(f, id, c, context.Background())
+	stop := make(chan struct{})
+	reply(t, f, id, c, func() {
+		for i := 0; ; i++ {
+			f.chunk(id, chunkAt(i))
+			select {
+			case <-stop:
+				f.answer(id, "")
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	})
+	go func() {
+		<-time.After(2 * time.Second)
+		close(stop)
+	}()
+	got, err := io.ReadAll(b)
+	if err != nil || len(got) == 0 {
+		t.Fatalf("a stream fed inside the idle wait = %d bytes, %v, want it whole", len(got), err)
+	}
+	waitFor(t, "the fed call left the host", func() bool { return !f.registered(id) })
 }
 
 // TestHostHeadKeepsTheAnswerWhenItCameWithTheHead: a head read can find the

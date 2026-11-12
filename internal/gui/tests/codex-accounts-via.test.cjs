@@ -20,7 +20,7 @@ const state = (lang) => ({
       { value: "codex/gpt-5.5", label: "GPT-5.5", note: "me@example.com · via magpie", group: "Codex", ref: "codex/gpt-5.5" },
       { value: "relay/m1", label: "m1", ref: "relay/m1", note: "Relay · via magpie", group: "Relay" }] }] },
   ],
-  profiles: [], settings: { lang, theme: "light" },
+  profiles: [], settings: { lang, theme: "light", guideHidden: true },
 });
 
 function server(lang, posts) {
@@ -55,6 +55,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, posts));

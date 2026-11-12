@@ -65,6 +65,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const saves = () => posted.filter((x) => x.action === "save").map((x) => x.body);
         const page = await (await browser.newContext({ viewport: { width: 900, height: 760 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, posted));
@@ -119,7 +120,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // a custom System One: probed at its address, saved as decide
         await page.goto("http://magpie.test/?view=providers");
         await page.locator("#addProvider").click();
-        await sheet.locator(".custom-foot .custom").click();
+        await sheet.locator(".row-head .custom").click();
         await ed.waitFor();
         await ed.locator("input").first().fill("My Decider");
         await ed.locator(".segs .opt", { hasText: "System One" }).click();

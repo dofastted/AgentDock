@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -15,13 +16,13 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -65,9 +66,15 @@ const videoTimeout = 5 * time.Minute
 
 // Videomakers are the models a provider can make videos with: a Grok
 // subscription's, another magpie's, a preset plan's models when magpie
-// implements that vendor's video API, and those a provider's own model list
-// marks as video models (customVideomakers).
-func Videomakers(p provider.Provider) []catalog.Model {
+// implements that vendor's video API, a MiniMax API key's H3 models
+// (video_minimax.go), and those a provider's own model list marks as video
+// models (customVideomakers).
+func Videomakers(p provider.Provider) []catalog.Model { return VideomakersOf(p, p.Available) }
+
+// VideomakersOf is Videomakers with p's model list from avail, called only
+// when it is wanted, as DrawersOf is: the Providers page has each
+// provider's list at hand. What avail gives is only read.
+func VideomakersOf(p provider.Provider, avail func() []catalog.Model) []catalog.Model {
 	if p.IsRemoteMagpie() {
 		out := catalog.LiveVideomakers(p.ID)
 		for i := range out {
@@ -78,14 +85,30 @@ func Videomakers(p provider.Provider) []catalog.Model {
 	if out := p.PlanVideos(); len(out) > 0 {
 		return out
 	}
+	if filmsMiniMax(p) {
+		return minimaxVideomakers(p)
+	}
 	if !drawsGrok(p) {
-		return customVideomakers(p)
+		return customVideomakersOf(p, avail)
 	}
 	out := slices.Clone(grokVideoModels)
 	for i := range out {
 		out[i].Provider = p.ID
 	}
 	return out
+}
+
+// OfferedVideomakers are Videomakers less those the user unticked in p's
+// editor (provider.HiddenVideomakers, axelburks on Discord), as
+// OfferedDrawers are of its image models: the video models a list offers to
+// pick from and Automatic picks among. A request that names a hidden one
+// still makes its video (bareVideomaker and videosCreate read Videomakers).
+func OfferedVideomakers(p provider.Provider) []catalog.Model {
+	ms := Videomakers(p)
+	if len(p.HiddenVideomakers) == 0 {
+		return ms
+	}
+	return slices.DeleteFunc(slices.Clone(ms), func(m catalog.Model) bool { return p.VideomakerHidden(m.ID) })
 }
 
 // customVideomakers are the video models of a provider set up with a base
@@ -95,14 +118,49 @@ func Videomakers(p provider.Provider) []catalog.Model {
 // videos (provider.SetModelKind, #1399). They are asked at the
 // OpenAI-shaped videos API under its base, as another magpie's are. A
 // model's name alone makes none of them one: a list that doesn't say so,
-// and a user who doesn't, leave the provider making no videos.
+// and a user who doesn't, leave the provider making no videos. A plugin's
+// are the models it says give video (capabilities.output.video), asked
+// through its fetch on the account (XYenon's Google AI Studio plugin, Veo).
 func customVideomakers(p provider.Provider) []catalog.Model {
-	if p.Account != nil || p.IsRemoteMagpie() || len(p.PlanVideos()) > 0 || videoBase(p) == "" {
+	return customVideomakersOf(p, p.Available)
+}
+
+func customVideomakersOf(p provider.Provider, avail func() []catalog.Model) []catalog.Model {
+	if p.IsPlugin() && !drawsGrok(p) {
+		var out []catalog.Model
+		for _, m := range avail() {
+			if slices.Contains(m.OutputModalities, "video") {
+				m.Provider = p.ID
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	if p.Account != nil || p.IsRemoteMagpie() || len(p.PlanVideos()) > 0 || filmsMiniMax(p) || videoBase(p) == "" {
 		return nil
 	}
 	out := catalog.LiveVideomakers(p.ID)
 	for i := range out {
 		out[i].Provider = p.ID
+	}
+	if isArk(p) {
+		// a Volcengine Ark key's Seedance models (pay-as-you-go, or one
+		// added by hand), those its list has and those the user picked, as
+		// Drawers takes a Seedream; Ark makes them at its own
+		// content-generation tasks (arkFilms). A list fetched now has them
+		// as LiveVideomakers already (its domain VideoGeneration); one
+		// fetched before has them among its chat models, until the next
+		// fetch
+		ms := slices.Clone(avail())
+		for _, id := range p.Models {
+			ms = append(ms, catalog.Model{ID: id, Name: id})
+		}
+		for _, m := range ms {
+			if arkVideoModel(m.ID) && !slices.ContainsFunc(out, func(o catalog.Model) bool { return o.ID == m.ID }) {
+				m.Provider, m.Films = p.ID, true
+				out = append(out, m)
+			}
+		}
 	}
 	// those the user said make videos, whatever the list says, and none
 	// they said draws (shen-joe, #1399: a relay whose /models marks none)
@@ -116,22 +174,56 @@ func customVideomakers(p provider.Provider) []catalog.Model {
 
 // videoBase is the root of the OpenAI-shaped videos API of another magpie
 // or a provider set up with a base URL: its Chat base, or a Responses-only
-// relay's Responses base, under which it serves the images API too.
+// relay's Responses base, under which it serves the images API too; a
+// plugin's fetch whatever API its chat is on (Provider.OpenAIBase).
 func videoBase(p provider.Provider) string {
-	return strings.TrimRight(cmp.Or(p.Base(provider.Chat), p.Base(provider.Responses)), "/")
+	return strings.TrimRight(cmp.Or(p.OpenAIBase(), p.Base(provider.Responses)), "/")
 }
 
-// filmsCustom is whether p makes model at its OpenAI-shaped videos API, as
-// its model list says (customVideomakers).
+// filmsCustom is whether p makes model as its model list says
+// (customVideomakers): at its OpenAI-shaped videos API, or, at Volcengine
+// Ark, at Ark's tasks (arkFilms).
 func filmsCustom(p provider.Provider, model string) bool {
 	return slices.ContainsFunc(customVideomakers(p), func(m catalog.Model) bool { return m.ID == model })
+}
+
+// arkVideoModel is whether id, a model of a Volcengine Ark key's list, is
+// one of Ark's Seedance video models (doubao-seedance-1-0-pro-250528,
+// doubao-seedance-2-0-260128…).
+func arkVideoModel(id string) bool {
+	return strings.Contains(strings.ToLower(id), "seedance")
+}
+
+// arkFilms is whether p makes model at Volcengine Ark's asynchronous
+// content-generation tasks (<base>/contents/generations/tasks, 火山方舟
+// 视频生成 API, https://www.volcengine.com/docs/82379/1520757): the
+// preset's Agent Plan's Seedance, or a Seedance model of any other Ark
+// key. Ark has no OpenAI-shaped videos API, so such a key's video models
+// are never asked at <base>/videos.
+func arkFilms(p provider.Provider, model string) bool {
+	if p.IsRemoteMagpie() {
+		return false
+	}
+	if p.Preset == "volcengine" && slices.ContainsFunc(p.PlanVideos(), func(m catalog.Model) bool { return m.ID == model }) {
+		return true
+	}
+	return isArk(p) && filmsCustom(p, model)
+}
+
+// arkTasks is where p, at Volcengine Ark, starts and is asked after a video.
+func arkTasks(p provider.Provider) string {
+	return cmp.Or(strings.TrimRight(p.Base(provider.Responses), "/"), strings.TrimRight(p.Base(provider.Chat), "/")) + "/contents/generations/tasks"
 }
 
 // keyMark is the mark of the key p sends with, in the id of a video it
 // started at its OpenAI-shaped videos API: the vendor keeps a video for the
 // key that started it, so it is asked after on that key, whichever comes
-// first now. "0" for a provider with no key (a local server).
+// first now. "0" for a provider with no key (a local server); a plugin's
+// account's signer, the vendor keeping it for that account.
 func keyMark(p provider.Provider) string {
+	if p.IsPlugin() {
+		return "a" + signer(p)
+	}
 	if p.Key == "" {
 		return "0"
 	}
@@ -147,11 +239,20 @@ func customVideoID(p provider.Provider, theirs string, t time.Time) string {
 // markedKey is p on its key whose mark is by (keyMark), while that key is
 // still on.
 func markedKey(p provider.Provider, by string) (provider.Provider, bool) {
+	if p.IsPlugin() {
+		// the plugin's account that started it, while it is still on
+		for _, q := range append([]provider.Provider{p}, p.AlsoOn()...) {
+			if keyMark(q) == by {
+				return q, true
+			}
+		}
+		return p, false
+	}
 	if p.Key == "" {
 		return p, by == "0"
 	}
 	for _, k := range p.KeysOn() {
-		if q := p.WithKey(k); keyMark(q) == by && videoBase(q) != "" {
+		if q := p.WithKey(k); keyMark(q) == by && (videoBase(q) != "" || filmsMiniMax(q)) {
 			return q, true
 		}
 	}
@@ -159,29 +260,82 @@ func markedKey(p provider.Provider, by string) (provider.Provider, bool) {
 }
 
 // videomaker is the model a request that names none makes its video with:
-// AutoVideomaker's, unless the Settings turned image generation off, which
-// turns video off with it. None when it is off or no provider makes videos.
+// the Settings' VideoGen while it resolves, else AutoVideomaker's, unless
+// the Settings turned image generation off, which turns video off with
+// it. None when it is off or no provider makes videos.
 func videomaker() (string, bool) {
-	if settings.Load().ImageGen == "off" {
+	st := settings.Load()
+	if st.ImageGen == "off" {
 		return "", false
+	}
+	if v := st.VideoGen; v != "" && VideomakerMissingOf(v) == "" {
+		return v, true
 	}
 	m := AutoVideomaker()
 	return m, m != ""
 }
 
+// Videomaker is the model a request that names none makes its video with
+// (videomaker), as provider/model: "" when it is off or none can.
+func Videomaker() string {
+	m, _ := videomaker()
+	return m
+}
+
+// VideomakerMissing is the model Settings › Models › Images › Video generation
+// names when magpie can't make videos with it any more, so that
+// AutoVideomaker's makes them in its place, as DrawerMissing is Image
+// generation's. "" when none is named or it resolves.
+func VideomakerMissing() string { return VideomakerMissingOf(settings.Load().VideoGen) }
+
+// VideomakerMissingOf is v, a Video generation pick, when magpie can't
+// make videos with it: its provider is gone, off or decide-only, or no
+// longer has it among its Videomakers (a custom provider's model the user
+// no longer marks a video model, #1399). A routing group resolves while
+// one of its members makes videos.
+func VideomakerMissingOf(v string) string {
+	if v == "" {
+		return ""
+	}
+	if provider.IsGroupRef(v) {
+		if _, _, ok := mediaGroupFirst(v, provider.KindVideo); ok {
+			return ""
+		}
+		return v
+	}
+	id, model, _ := strings.Cut(v, "/")
+	p, err := provider.Find(id)
+	if err != nil || !p.On() || p.DecideOnly() {
+		return v
+	}
+	if slices.ContainsFunc(Videomakers(*p), func(m catalog.Model) bool { return m.ID == model }) {
+		return ""
+	}
+	return v
+}
+
 // AutoVideomaker is the model a request that names none makes its video
 // with: the first model of the first provider that makes any. "" when none
-// can.
+// can. A MiniMax API key's H3 comes after every other: it is paid by the
+// second from the key's balance, and a key set up for chat would
+// otherwise take videos a subscription made before.
 func AutoVideomaker() string {
+	paid := ""
 	for _, p := range provider.All() {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}
-		if ms := Videomakers(p); len(ms) > 0 {
+		if ms := OfferedVideomakers(p); len(ms) > 0 {
+			if filmsMiniMax(p) {
+				if paid == "" {
+					paid = p.ID + "/" + ms[0].ID
+				}
+				continue
+			}
 			return p.ID + "/" + ms[0].ID
 		}
 	}
-	return ""
+	return paid
 }
 
 // bareVideomaker is the provider that makes videos with model named without
@@ -218,15 +372,18 @@ const grokVideoFamily = "grok-imagine-video"
 type filming struct {
 	Model, Prompt, Seconds, Size string
 	Start                        *picture  // the first frame to animate
+	End                          *picture  // the last frame, where the video ends (MiniMax)
 	References                   []picture // images the video draws its subjects from
 	// the request's other fields, which magpie doesn't read: a provider's
 	// own videos API takes them as they came (Agnes's mode, aspect_ratio;
 	// #1399, shen-joe: "mode 不能为空")
 	Extra map[string]any
+	// Form: the request was a multipart form, whose Extra are all text
+	Form bool
 }
 
 // filmingRead are the fields of a videos request magpie reads itself.
-var filmingRead = []string{"model", "prompt", "seconds", "size", "input_reference", "reference_images", "reference_images[]"}
+var filmingRead = []string{"model", "prompt", "seconds", "size", "input_reference", "last_frame", "reference_images", "reference_images[]"}
 
 // readFilming reads a videos request: JSON, or the multipart form OpenAI's
 // takes, the image to start from its input_reference.
@@ -244,7 +401,7 @@ func readFilming(r *http.Request) (filming, error) {
 			}
 			return ""
 		}
-		f.Model, f.Prompt, f.Seconds, f.Size = get("model"), get("prompt"), get("seconds"), get("size")
+		f.Model, f.Prompt, f.Seconds, f.Size, f.Form = get("model"), get("prompt"), get("seconds"), get("size"), true
 		for k := range m.Value {
 			if !slices.Contains(filmingRead, k) {
 				if f.Extra == nil {
@@ -259,6 +416,13 @@ func readFilming(r *http.Request) (filming, error) {
 				return f, err
 			}
 			f.Start = &pic
+		}
+		if fhs := m.File["last_frame"]; len(fhs) > 0 {
+			pic, err := readPart(fhs[0])
+			if err != nil {
+				return f, err
+			}
+			f.End = &pic
 		}
 		for _, k := range []string{"reference_images", "reference_images[]"} {
 			for _, fh := range m.File[k] {
@@ -280,6 +444,7 @@ func readFilming(r *http.Request) (filming, error) {
 			Seconds         json.RawMessage `json:"seconds"`
 			Size            string          `json:"size"`
 			InputReference  json.RawMessage `json:"input_reference"`
+			LastFrame       json.RawMessage `json:"last_frame"`
 			ReferenceImages json.RawMessage `json:"reference_images"`
 		}
 		if err := json.Unmarshal(body, &in); err != nil {
@@ -300,14 +465,21 @@ func readFilming(r *http.Request) (filming, error) {
 			f.Seconds = ""
 		}
 		if srcs := imageSources(in.InputReference); len(srcs) > 0 {
-			pic, err := pictureOf(srcs[0])
+			pic, err := filmPictureOf(srcs[0])
 			if err != nil {
 				return f, err
 			}
 			f.Start = &pic
 		}
+		if srcs := imageSources(in.LastFrame); len(srcs) > 0 {
+			pic, err := filmPictureOf(srcs[0])
+			if err != nil {
+				return f, err
+			}
+			f.End = &pic
+		}
 		for _, src := range imageSources(in.ReferenceImages) {
-			pic, err := pictureOf(src)
+			pic, err := filmPictureOf(src)
 			if err != nil {
 				return f, err
 			}
@@ -315,8 +487,16 @@ func readFilming(r *http.Request) (filming, error) {
 		}
 	}
 	f.Model = strings.TrimSpace(f.Model)
-	if strings.TrimSpace(f.Prompt) == "" {
+	// a video made from an image, or from content of Ark's own, may be
+	// asked with no prompt (Ark's image-to-video takes none): whether
+	// the vendor making it may is startVideo's to say
+	if strings.TrimSpace(f.Prompt) == "" && f.Start == nil && f.End == nil && len(f.References) == 0 && !f.hasContent() {
 		return f, errors.New("say what to film in prompt")
+	}
+	// -1 is Ark's "the model picks the length" (Seedance 2.0 and 2.5);
+	// startVideo turns it away for any other vendor
+	if f.Seconds == "-1" {
+		return f, nil
 	}
 	if f.Seconds != "" {
 		n, err := parseSeconds(f.Seconds)
@@ -328,9 +508,54 @@ func readFilming(r *http.Request) (filming, error) {
 	return f, nil
 }
 
+// filmPictureOf is pictureOf, and an asset:// of Ark's asset library too
+// (a video's images may be one), kept as it is.
+func filmPictureOf(src string) (picture, error) {
+	if src = strings.TrimSpace(src); strings.HasPrefix(src, "asset://") {
+		return picture{URL: src}, nil
+	}
+	return pictureOf(src)
+}
+
+// hasContent says the request sent a content of Ark's own.
+func (f filming) hasContent() bool {
+	c, _ := f.Extra["content"].([]any)
+	if f.Form {
+		if str, ok := f.Extra["content"].(string); ok {
+			c, _ = formValue("content", str, nil).([]any)
+		}
+	}
+	return len(c) > 0
+}
+
+// arkOnly is what f asks of Ark alone, which another vendor is told it
+// can't take: "" when nothing.
+func (f filming) arkOnly() string {
+	switch {
+	case f.Seconds == "-1":
+		return "seconds -1 (the model picks the length) is Volcengine Ark's alone"
+	case strings.TrimSpace(f.Prompt) == "":
+		return "say what to film in prompt (only Volcengine Ark's Seedance films an image with no prompt)"
+	}
+	for _, pic := range append([]*picture{f.Start, f.End}, ptrs(f.References)...) {
+		if pic != nil && strings.HasPrefix(pic.URL, "asset://") {
+			return "an asset:// image is in Volcengine Ark's asset library, which only Ark's Seedance reads"
+		}
+	}
+	return ""
+}
+
+func ptrs(pics []picture) []*picture {
+	out := make([]*picture, len(pics))
+	for i := range pics {
+		out[i] = &pics[i]
+	}
+	return out
+}
+
 // decimalNumber is a number as JSON writes it, not as Go's ParseFloat also
 // takes it (hex, inf, nan, underscores).
-var decimalNumber = regexp.MustCompile(`^[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?$`)
+var decimalNumber = lazyre.New(`^[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?$`)
 
 // parseSeconds is a duration in whole seconds, however it was written: 6,
 // "6", 6.0, 6e0. What the vendor's limit makes of a length it says itself.
@@ -382,26 +607,137 @@ func pixelResolution(size string) string {
 	return "480p"
 }
 
+// arkVideoRatios are the ratios Seedance takes (Ark's create-task doc,
+// https://www.volcengine.com/docs/82379/1520757); adaptive is the model's
+// own pick, which a size never means.
+var arkVideoRatios = []string{"16:9", "4:3", "1:1", "3:4", "9:16", "21:9"}
+
+// arkVideoTiers are Seedance's resolutions by the pixels a 16:9 frame of
+// each has. Every ratio's frame in Ark's table is within a few percent of
+// its tier's (720p 21:9 is 1470x630, 2.0's 4k 1:1 is 2880x2880), and a
+// tier has about 2.2 to 4 times the one below, so the nearest by pixels
+// is the tier Ark lists a size at.
+var arkVideoTiers = []struct {
+	name   string
+	pixels float64
+}{{"480p", 864 * 480}, {"720p", 1280 * 720}, {"1080p", 1920 * 1080}, {"4k", 3840 * 2160}}
+
+// arkVideoSize is the resolution and ratio Ark is asked for a size in: a
+// WIDTHxHEIGHT as the nearest of its tiers by pixels and of its ratios
+// (3840x2160 is 4k 16:9, 1470x630 is 720p 21:9), a ratio ("21:9") as the
+// nearest of those, a tier ("4k", "720p") as itself. "" for what it
+// doesn't name.
+func arkVideoSize(size string) (resolution, ratio string) {
+	size = strings.ToLower(strings.TrimSpace(size))
+	for _, t := range arkVideoTiers {
+		if size == t.name || t.name == "4k" && size == "2160p" {
+			return t.name, ""
+		}
+	}
+	if strings.Contains(size, ":") {
+		w, h, _ := strings.Cut(size, ":")
+		return "", aspectAmong(w+"x"+h, arkVideoRatios)
+	}
+	w, h, ok := strings.Cut(size, "x")
+	if !ok {
+		return "", ""
+	}
+	x, err1 := strconv.ParseFloat(w, 64)
+	y, err2 := strconv.ParseFloat(h, 64)
+	if err1 != nil || err2 != nil || x <= 0 || y <= 0 {
+		return "", ""
+	}
+	best := math.Inf(1)
+	for _, t := range arkVideoTiers {
+		if d := math.Abs(math.Log(x * y / t.pixels)); d < best {
+			best, resolution = d, t.name
+		}
+	}
+	return resolution, aspectAmong(size, arkVideoRatios)
+}
+
+// arkTextFields are Ark's create-task fields that are text, which a
+// multipart form's value is kept as even when it reads as a number
+// (safety_identifier "12345").
+var arkTextFields = []string{"model", "ratio", "resolution", "safety_identifier", "callback_url", "service_tier", "output_format", "omni_reference_task_type"}
+
+// formValue is a multipart form's field as Ark takes it: the form's
+// fields are all text, so "false", "42", `[{"type":"web_search"}]` and
+// `{"id":"…"}` are read as the JSON they are, except a field Ark takes as
+// text. A JSON body's values are its own and are never read again.
+func formValue(k string, v any, text []string) any {
+	str, ok := v.(string)
+	if !ok || slices.Contains(text, k) {
+		return v
+	}
+	var typed any
+	if json.Unmarshal([]byte(str), &typed) == nil {
+		switch typed.(type) {
+		case bool, float64, []any, map[string]any:
+			return typed
+		}
+	}
+	return v
+}
+
 // volcengineVideoBody is f as Ark's content-generation API takes it: text
-// and images in content, with image roles distinguishing the first frame from
-// subject references, plus duration, ratio and resolution as separate fields.
+// and images in content, each image's role saying what it is (the first
+// frame, the last frame, a subject to draw from), duration, ratio and
+// resolution as fields of their own, and the request's other fields, which
+// OpenAI's API doesn't have, as the caller sent them: Ark's own
+// (generate_audio, seed, watermark, return_last_frame, tools…), which a
+// caller of OpenAI's shape can only send that way (axelburks on Discord).
+//
+// A content the caller sent is Ark's own and is kept as it is, with its
+// reference videos, audio and draft_task: the prompt is put first only
+// when it has no text, and the images of OpenAI's fields after it. An Ark
+// field the caller names (ratio "adaptive", resolution, duration) is
+// never overridden by what magpie makes of size or seconds.
 func volcengineVideoBody(model string, f filming) []byte {
-	content := []map[string]any{{"type": "text", "text": f.Prompt}}
+	req := map[string]any{}
+	for k, v := range f.Extra {
+		if f.Form {
+			v = formValue(k, v, arkTextFields)
+		}
+		req[k] = v
+	}
+	content, _ := req["content"].([]any)
+	content = slices.Clone(content)
+	said := slices.ContainsFunc(content, func(e any) bool {
+		m, _ := e.(map[string]any)
+		return m["type"] == "text"
+	})
+	if f.Prompt != "" && !said {
+		content = append([]any{map[string]any{"type": "text", "text": f.Prompt}}, content...)
+	}
+	frame := func(pic *picture, role string) {
+		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]string{"url": pic.dataURL()}, "role": role})
+	}
 	if f.Start != nil {
-		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]string{"url": f.Start.dataURL()}, "role": "first_frame"})
+		frame(f.Start, "first_frame")
 	}
-	for _, pic := range f.References {
-		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]string{"url": pic.dataURL()}, "role": "reference_image"})
+	if f.End != nil {
+		frame(f.End, "last_frame")
 	}
-	req := map[string]any{"model": model, "content": content}
+	for i := range f.References {
+		frame(&f.References[i], "reference_image")
+	}
+	req["model"], req["content"] = model, content
+	set := func(k string, v any) {
+		if _, named := req[k]; !named {
+			req[k] = v
+		}
+	}
 	if f.Seconds != "" {
-		req["duration"], _ = strconv.Atoi(f.Seconds)
+		n, _ := strconv.Atoi(f.Seconds)
+		set("duration", n) // -1: the model picks
 	}
-	if ar := aspectAmong(f.Size, grokVideoAspects); ar != "" {
-		req["ratio"] = ar
+	res, ar := arkVideoSize(f.Size)
+	if ar != "" {
+		set("ratio", ar)
 	}
-	if res := pixelResolution(f.Size); res != "" {
-		req["resolution"] = res
+	if res != "" {
+		set("resolution", res)
 	}
 	b, _ := json.Marshal(req)
 	return b
@@ -457,7 +793,7 @@ func signer(p provider.Provider) string {
 
 // idPart is what a provider id or a vendor's request id is made of; an id
 // is put in a URL, so nothing that would change its path gets through.
-var idPart = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var idPart = lazyre.New(`^[A-Za-z0-9_-]+$`)
 
 // parseVideoID is the provider, vendor id, start and signer of a video's id.
 func parseVideoID(id string) (providerID, vendorID string, started time.Time, by string, ok bool) {
@@ -493,7 +829,14 @@ type videoState struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+	// Ark is an Ark task's whole answer, whose fields OpenAI's video
+	// doesn't have are passed on as they came (videoObject)
+	Ark map[string]any `json:"-"`
 }
+
+// arkOwnFields are an Ark task's fields that a video of OpenAI's shape
+// has its own of, which it isn't given Ark's in place of.
+var arkOwnFields = []string{"id", "object", "model", "status", "progress", "created_at", "updated_at", "error", "prompt", "size", "seconds"}
 
 // videoObject is a video as OpenAI's API gives it.
 func videoObject(id, model string, started time.Time, st videoState, f filming) map[string]any {
@@ -525,12 +868,25 @@ func videoObject(id, model string, started time.Time, st videoState, f filming) 
 	case f.Seconds != "":
 		obj["seconds"] = f.Seconds
 	}
+	// an Ark task's own fields: content (video_url, and last_frame_url
+	// when return_last_frame asked for it), usage, resolution, ratio,
+	// duration or frames, framespersecond, seed, generate_audio, draft,
+	// tools, output_format and the rest (axelburks on Discord)
+	for k, v := range st.Ark {
+		if !slices.Contains(arkOwnFields, k) {
+			obj[k] = v
+		}
+	}
 	if status == "failed" {
 		code, msg := st.Error.Code, st.Error.Message
-		switch st.Status {
-		case "expired":
+		switch {
+		case st.Status == "expired" && st.Ark != nil:
+			// Ark's expired is a task that ran out of time unfinished
+			// (execution_expires_after, 48 hours unless the request set it)
+			code, msg = "expired", "the task timed out: Volcengine Ark ended it unfinished once its execution_expires_after had passed"
+		case st.Status == "expired":
 			code, msg = "expired", "the vendor no longer keeps this video"
-		case "cancelled":
+		case st.Status == "cancelled":
 			code, msg = "cancelled", "the video was cancelled"
 		}
 		if msg == "" {
@@ -548,6 +904,14 @@ func videoMaker(id string) (p provider.Provider, vendorID string, started time.T
 		return p, "", started, fmt.Errorf("%q isn't the id of a video magpie is making", id)
 	}
 	found, ferr := provider.Find(pid)
+	if ferr == nil && filmsMiniMax(*found) {
+		// a MiniMax task is its key's account's: asked on that key
+		q, ok := markedKey(*found, by)
+		if !ok {
+			return p, "", started, fmt.Errorf("this video was started with a key of %s that is no longer on: turn it back on to get the video", found.Name)
+		}
+		return q, vendorID, started, nil
+	}
 	if ferr == nil && !drawsGrok(*found) && !found.IsRemoteMagpie() && len(found.PlanVideos()) == 0 && len(customVideomakers(*found)) > 0 {
 		// asked on the key that started it
 		q, ok := markedKey(*found, by)
@@ -602,6 +966,9 @@ func remoteVideoBody(model string, f filming) []byte {
 	if f.Start != nil {
 		req["input_reference"] = f.Start.dataURL()
 	}
+	if f.End != nil {
+		req["last_frame"] = f.End.dataURL()
+	}
 	var refs []string
 	for _, pic := range f.References {
 		refs = append(refs, pic.dataURL())
@@ -630,7 +997,7 @@ func asOurs(b []byte, p provider.Provider, id string) (map[string]any, error) {
 // filmsOpenAI is whether p makes videos at an OpenAI-shaped videos API:
 // another magpie, or a provider whose model list marks video models.
 func filmsOpenAI(p provider.Provider) bool {
-	return p.IsRemoteMagpie() || len(customVideomakers(p)) > 0
+	return p.IsRemoteMagpie() || len(customVideomakers(p)) > 0 && !isArk(p)
 }
 
 // remoteVideoURL is where another magpie, or a provider's OpenAI-shaped
@@ -641,10 +1008,14 @@ func remoteVideoURL(p provider.Provider, vendorID, suffix string) string {
 
 // videoStatus asks the vendor how a video is going.
 func (s *Server) videoStatus(ctx context.Context, p provider.Provider, vendorID string) (videoState, int, error) {
+	if filmsMiniMax(p) {
+		return s.minimaxVideoStatus(ctx, p, vendorID)
+	}
 	var st videoState
 	at := strings.TrimRight(p.Base(provider.Responses), "/") + "/videos/" + url.PathEscape(vendorID)
-	if p.Preset == "volcengine" {
-		at = strings.TrimRight(p.Base(provider.Responses), "/") + "/contents/generations/tasks/" + url.PathEscape(vendorID)
+	ark := p.Preset == "volcengine" || isArk(p)
+	if ark {
+		at = arkTasks(p) + "/" + url.PathEscape(vendorID)
 	}
 	b, code, err := s.sendAs(ctx, p, http.MethodGet, at, "", nil, true)
 	if err != nil {
@@ -652,6 +1023,12 @@ func (s *Server) videoStatus(ctx context.Context, p provider.Provider, vendorID 
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
 		return st, 502, fmt.Errorf("%s's answer isn't a video's: %v", p.Name, err)
+	}
+	if ark {
+		json.Unmarshal(b, &st.Ark)
+		if st.Ark == nil {
+			st.Ark = map[string]any{}
+		}
 	}
 	return st, code, nil
 }
@@ -675,7 +1052,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	who := callerOf(r)
-	call := Call{Time: start, From: provider.Chat, Agent: who.agent, Via: who.via, Model: f.Model}
+	call := Call{Time: start, From: provider.Chat, Agent: who.agent, Via: who.via, Model: f.Model, headers: headerLogOf(r.Context())}
 	usage.Saw(agentOf(r))
 	fail := func(code int, msg string) {
 		call.Status, call.Error, call.Millis = code, msg, time.Since(start).Milliseconds()
@@ -686,12 +1063,15 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	if f.Model == "" {
 		m, ok := videomaker()
 		if !ok {
-			fail(400, "no model to make videos with: sign in to a Grok subscription or set up a provider that makes videos, and leave Settings → Images → Image generation on, or name one")
+			fail(400, "no model to make videos with: sign in to a Grok subscription or set up a provider that makes videos (a MiniMax API key makes them with MiniMax-H3), and leave Settings → Models → Images → Image generation on, or name one")
 			return
 		}
 		f.Model, call.Model = m, m
 	}
-	p, model, ok := provider.Resolve(f.Model)
+	p, model, ok := mediaGroupFirst(f.Model, provider.KindVideo)
+	if !ok {
+		p, model, ok = provider.Resolve(f.Model)
+	}
 	if !ok {
 		p, model, ok = bareVideomaker(f.Model)
 	}
@@ -703,10 +1083,18 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		fail(404, fmt.Sprintf("magpie knows no model %q to make videos with", f.Model))
 		return
 	}
-	g, ms, isGroup := drawingGroup(f.Model, p, model)
+	g, ms, isGroup := mediaMembers(f.Model, provider.KindVideo)
+	if !isGroup {
+		g, ms, isGroup = groupToMake(f.Model, p, model, func(ref string) (provider.Group, []provider.Member, bool) {
+			return mediaMembers(ref, provider.KindVideo)
+		})
+	}
+	if isGroup {
+		r = heldByGroup(r, g) // held to the group's accounts, if it is
+	}
 	keyWho, keyHeld := keyHolds(r)
-	if keyHeld && named && (isGroup && !groupAllowed(keyWho, g, ms) || !isGroup && !modelAllowed(keyWho, p, model)) {
-		fail(403, keyModelError(keyWho, f.Model))
+	if named && (isGroup && !groupGiven(r, keyWho, keyHeld, g, ms) || keyHeld && !isGroup && !modelAllowed(keyWho, p, model)) {
+		fail(keyModelRefusal(w, keyWho, f.Model))
 		return
 	}
 	if msg, off := modelOff(p, model, f.Model); off { // disabled by the user (#1867)
@@ -727,9 +1115,9 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		if keyHeld {
 			keeps = groupKeeps(keyWho, g, ms)
 		}
-		t := s.drawingTries(g, ms, keeps)
+		t := s.drawingTries(g, ms, keeps, servesKind(provider.KindVideo))
 		if len(t) == 0 && keeps != nil {
-			fail(403, keyModelError(keyWho, f.Model))
+			fail(keyGroupRefusal(w, keyWho, f.Model, ms))
 			return
 		}
 		if len(t) > 0 {
@@ -737,20 +1125,23 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	call.To = provider.Chat
-	var unmask func()
 	prompt := f.Prompt
-	var hits maskHits
-	w, f.Prompt, unmask, hits, err = redactedPromptHits(r.Context(), w, f.Prompt)
-	defer unmask()
-	// the fields passed on as they came are masked as the prompt is: a
-	// negative_prompt is the user's text all the same
-	var extra maskHits
-	if err == nil {
-		err = maskStrings(r.Context(), f.Extra, &extra)
-	}
-	if err != nil { // fails closed
-		fail(maskStatus(err), err.Error())
-		return
+	var hits, extra maskHits
+	// masked unless every model it may start on is a provider the user
+	// set to go unmasked (unmaskedMembers), as a chat's is
+	if !unmaskedMembers(tries) {
+		var unmask func()
+		w, f.Prompt, unmask, hits, err = redactedPromptHits(r.Context(), w, f.Prompt)
+		defer unmask()
+		// the fields passed on as they came are masked as the prompt is: a
+		// negative_prompt is the user's text all the same
+		if err == nil {
+			err = maskStrings(r.Context(), f.Extra, &extra)
+		}
+		if err != nil { // fails closed
+			fail(maskStatus(err), err.Error())
+			return
+		}
 	}
 	n := extra.n
 	hits.add(extra)
@@ -759,7 +1150,16 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		sent += " " + string(b)
 	}
 	// the record names the member that had it last (noteMaskedUntil)
-	_, noted := noteMaskedUntil(r, "video", hits, sent, 0, cmp.Or(call.Provider, p.ID), call.Model)
+	// the Routing page lists it as it does a chat, each member asked a
+	// try of its one route (sideRoute); its polls and download are the
+	// same video, and add none
+	var grp *GroupRef
+	if isGroup {
+		grp = groupRef(g, ms)
+	}
+	side := s.beginSide(r, start, call.Model, p.ID, grp)
+	masked, noted := noteMaskedUntil(r, "video", hits, sent, side.id(), cmp.Or(call.Provider, p.ID), call.Model)
+	side.masked(masked)
 	defer func() { noted(call.Provider, model) }()
 	if n > 0 && f.Prompt == prompt { // the prompt's mask wraps w already
 		var done func()
@@ -775,8 +1175,10 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	)
 	for i, m := range tries {
 		model = m.Model
-		v, code, err = s.startVideo(ctx, r, m.Provider, m.Model, f)
+		at := time.Now()
+		v, code, err = s.startVideo(ctx, memberOn(r, g, m), m.Provider, m.Model, f)
 		p, call.Provider = v.p, v.p.ID
+		side.tryAt(candidateOf(v.p, m.Model), at)(code, err)
 		// a group's next member is asked as a chat's would be: while this
 		// one can't make videos, its vendor fails, is out of quota or
 		// doesn't serve the model; a refusal of the request is the request's
@@ -792,6 +1194,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		if len(skipped) > 0 {
 			msg += " (tried first: " + call.Fallback + ")"
 		}
+		side.end(p, model, code, errors.New(msg), Usage{})
 		fail(code, msg)
 		return
 	}
@@ -806,7 +1209,8 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 			call.Status = code
 		}
 	}
-	appendUsage(r, usage.Record{Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderAccount: accountOf(p),
+	side.end(p, model, call.Status, err, Usage{})
+	appendUsage(r, usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderAccount: accountOf(p),
 		Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)})
 	if err != nil {
 		call.Error = err.Error()
@@ -858,6 +1262,8 @@ type videoStart struct {
 // failure before any vendor is asked (the model makes no videos, a key may
 // use none of the provider's keys) has asked unset.
 func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Provider, model string, f filming) (videoStart, int, error) {
+	// the headers the user gave the video model
+	ctx = provider.WithModel(ctx, p.ID, model)
 	// the provider's other keys to start the video on, when the first
 	// says it doesn't serve the model
 	var keys []candidate
@@ -872,6 +1278,19 @@ func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Pro
 			return videoStart{p: p}, code, errors.New(msg)
 		}
 		p, keys = cs[0].p, cs[1:]
+		// an Ark key's video is a task of that key's account: its id names
+		// the key, as a plan's does, and it is asked after there
+		onKey = isArk(p)
+	} else if makesMiniMaxVideo(p, model) {
+		// on the first key a chat for the model would go to that the
+		// calling key may use, the next while one's plan doesn't make H3
+		// (a Token Plan's); the video's id names the key it is asked on
+		cs, code, msg := s.onKeys(r, p, model, f.Model)
+		if code != 0 {
+			return videoStart{p: p}, code, errors.New(msg)
+		}
+		p, keys = cs[0].p, cs[1:]
+		onKey = true
 	} else if !p.IsRemoteMagpie() && p.PlansMixed() {
 		// keys on plans of their own (KeyAccount.Plan): sent on a key
 		// whose plan makes the model, the Agent Plan's Seedance on the
@@ -892,12 +1311,16 @@ func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Pro
 		}
 	}
 	v := videoStart{p: p, remote: p.IsRemoteMagpie(), onKey: onKey}
-	v.custom = !v.remote && filmsCustom(p, model)
-	volcengine := p.Preset == "volcengine" && slices.ContainsFunc(p.PlanVideos(), func(m catalog.Model) bool { return m.ID == model })
+	volcengine := arkFilms(p, model)
+	if msg := f.arkOnly(); msg != "" && !volcengine && !v.remote {
+		return v, 400, errors.New(msg)
+	}
+	v.custom = !v.remote && !volcengine && filmsCustom(p, model)
+	minimax := !v.remote && !v.custom && makesMiniMaxVideo(p, model)
 	// any grok-imagine-video*, not only those listed: the vendor's newer ones work before magpie names them
-	if !v.remote && !v.custom && !volcengine && (!drawsGrok(p) || !strings.HasPrefix(model, grokVideoFamily)) {
+	if !v.remote && !v.custom && !volcengine && !minimax && (!drawsGrok(p) || !strings.HasPrefix(model, grokVideoFamily)) {
 		v.unfit = true
-		return v, 400, fmt.Errorf(`%s/%s can't make videos: magpie makes videos with a Grok subscription's grok-imagine-video, Volcengine Agent Plan's Seedance models, another magpie's, and a provider's models its own model list marks "kind": "video" or that you mark a Video model (right-click the model in the provider's editor: Makes…)`, p.ID, model)
+		return v, 400, fmt.Errorf(`%s/%s can't make videos: magpie makes videos with a Grok subscription's grok-imagine-video, Volcengine Agent Plan's or an Ark key's Seedance models, a MiniMax API key's MiniMax-H3 models, another magpie's, and a provider's models its own model list marks "kind": "video" or that you mark a Video model (right-click the model in the provider's editor: Makes…)`, p.ID, model)
 	}
 	// another magpie is asked at its videos API, which says itself what
 	// it can't make
@@ -909,7 +1332,13 @@ func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Pro
 		// magpie's is: OpenAI's body, its answer its own
 		at, field, body = videoBase(p)+"/videos", "id", remoteVideoBody(model, f)
 	case volcengine:
-		at, field, body = strings.TrimRight(p.Base(provider.Responses), "/")+"/contents/generations/tasks", "id", volcengineVideoBody(model, f)
+		at, field, body = arkTasks(p), "id", volcengineVideoBody(model, f)
+	case minimax:
+		var err error
+		if body, err = minimaxVideoBody(model, f); err != nil {
+			return v, 400, err
+		}
+		at, field = minimaxHost(p)+"/v2/video_generation", "task_id"
 	default:
 		var err error
 		if body, err = grokVideoBody(model, f); err != nil {
@@ -920,9 +1349,17 @@ func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Pro
 	b, code, err := s.send(ctx, p, at, "application/json", body, true)
 	// a key answering 404 that it doesn't serve the model hands it to the
 	// next (#1657), as a drawing does; the id names the key that started it
-	for ; err != nil && len(keys) > 0 && ctx.Err() == nil && keyLacksModel(code, err); keys = keys[1:] {
+	for ; err != nil && len(keys) > 0 && ctx.Err() == nil && (keyLacksModel(code, err) || minimax && minimaxLacksH3(b)); keys = keys[1:] {
 		p = keys[0].p
 		b, code, err = s.send(ctx, p, at, "application/json", body, true)
+	}
+	if minimax {
+		if err != nil {
+			err = minimaxError(code, b, err)
+		} else if msg, mcode := minimaxSaid(b); msg != "" {
+			// an answer of 200 that says it failed (base_resp)
+			code, err = 502, minimaxError(0, b, fmt.Errorf("%s: %s%s", p.Name, msg, codeUnlessSaid(msg, mcode)))
+		}
 	}
 	v.p, v.answer = p, b
 	return v, code, err
@@ -930,8 +1367,9 @@ func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Pro
 
 // videoAsker is p on a key or account the calling key may use, to ask
 // after a video (#905), as starting one is held: a video at the
-// OpenAI-shaped videos API of a provider set up with a base URL on the key
-// that started it, which the calling key must be allowed; any other on the
+// OpenAI-shaped videos API of a provider set up with a base URL, or at an
+// Ark key's tasks, on the key that started it, which the calling key must
+// be allowed; any other on the
 // first key or account it may use, as videosCreate picks. What the calling
 // key is told when it may use none, else "".
 func videoAsker(r *http.Request, p provider.Provider) (provider.Provider, string) {
@@ -939,7 +1377,7 @@ func videoAsker(r *http.Request, p provider.Provider) (provider.Provider, string
 	if !held {
 		return p, ""
 	}
-	if !p.IsRemoteMagpie() && filmsOpenAI(p) {
+	if !p.IsRemoteMagpie() && (filmsOpenAI(p) || filmsMiniMax(p) || isArk(p) && len(customVideomakers(p)) > 0) {
 		if p.Key == "" && p.Account == nil || accountAllowed(who, candidate{p: p}) {
 			return p, ""
 		}
@@ -1102,12 +1540,32 @@ func (s *Server) videosContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, 502, fmt.Sprintf("the video couldn't be fetched: %d %s", res.StatusCode, http.StatusText(res.StatusCode)))
 		return
 	}
-	w.Header().Set("Content-Type", "video/mp4")
+	body := bufio.NewReaderSize(res.Body, 512)
+	head, _ := body.Peek(12)
+	w.Header().Set("Content-Type", videoType(head, res.Header.Get("Content-Type"), st.Ark))
 	if res.ContentLength > 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(res.ContentLength, 10))
 	}
 	w.WriteHeader(200)
-	io.Copy(w, io.LimitReader(res.Body, maxVideoBytes))
+	io.Copy(w, io.LimitReader(body, maxVideoBytes))
+}
+
+// videoType is the media type of a video whose bytes begin with head:
+// QuickTime's when its ftyp box names the "qt  " brand (Seedance 2.5's
+// output_format "mov", axelburks on Discord), whatever the vendor's host
+// said; else the video type the host said, or the task's output_format;
+// else MP4, which every vendor makes by default.
+func videoType(head []byte, said string, ark map[string]any) string {
+	if len(head) >= 12 && string(head[4:8]) == "ftyp" && string(head[8:12]) == "qt  " {
+		return "video/quicktime"
+	}
+	if mt, _, err := mime.ParseMediaType(said); err == nil && strings.HasPrefix(mt, "video/") {
+		return mt
+	}
+	if f, _ := ark["output_format"].(string); strings.EqualFold(f, "mov") {
+		return "video/quicktime"
+	}
+	return "video/mp4"
 }
 
 // remoteVideoContent passes on the bytes of a video another magpie, or a
@@ -1126,6 +1584,7 @@ func (s *Server) remoteVideoContent(ctx context.Context, w http.ResponseWriter, 
 		// vendors are told no caller
 		req.Header.Set("User-Agent", "magpie/"+Version)
 		passOnCaller(ctx, req)
+		passOnUA(req, callerUA(ctx))
 	}
 	if err := p.Sign(ctx, req, provider.Chat, nil); err != nil {
 		writeError(w, provider.Chat, 502, err.Error())
@@ -1139,7 +1598,11 @@ func (s *Server) remoteVideoContent(ctx context.Context, w http.ResponseWriter, 
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-		writeError(w, provider.Chat, res.StatusCode, p.Name+": "+vendorMessage(b))
+		said, ok := provider.Unsaid(b)
+		if !ok {
+			said = vendorMessage(b)
+		}
+		writeError(w, provider.Chat, res.StatusCode, p.Name+": "+said)
 		return
 	}
 	w.Header().Set("Content-Type", cmp.Or(res.Header.Get("Content-Type"), "video/mp4"))

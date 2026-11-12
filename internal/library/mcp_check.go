@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -44,7 +45,8 @@ type ServerHealth struct {
 	ToolList []Tool `json:"toolList,omitempty"`
 	// Why is the kind of error, for the page to put in its own words:
 	// notfound, start, exited, timeout, http, refused, unreachable,
-	// protocol, novar (a ${NAME} magpie's environment hasn't: Detail names
+	// protocol, home (exits in home, works in a project: Project),
+	// novar (a ${NAME} magpie's environment hasn't: Detail names
 	// them), wsldown (a command only agents in WSL start, whose distros,
 	// Detail, aren't running: it wasn't checked)
 	Why    string `json:"why,omitempty"`
@@ -72,7 +74,12 @@ type ServerHealth struct {
 	// for its agents there. A failure is the last one's; none for a
 	// command only this machine's agents start.
 	Checked []string `json:"checked,omitempty"`
-	At      int64    `json:"at"` // when it was checked, unix ms
+	// Project is a command that exited in home and listed its tools in a
+	// project folder, where the agents given it directly start it
+	// (inProject); Detail is what it said in home. Why "home" is that
+	// command run by magpie for its agents, in home (inHome).
+	Project bool  `json:"project,omitempty"`
+	At      int64 `json:"at"` // when it was checked, unix ms
 }
 
 // Each step of a check (initialize, notifications/initialized, tools/list)
@@ -119,9 +126,13 @@ func healthKey(s *Server, own ownSignIns) string {
 	b, _ := json.Marshal(c)
 	st := mcpauth.StatusOf(s.Name, s.URL)
 	// and where a command is started, which its agents decide
+	// and whether magpie runs it in home (inProject)
 	var sides []string
 	if s.Transport == "stdio" {
 		sides = checkSides(s)
+		if inHome(s) {
+			sides = append(sides, "hub")
+		}
 	}
 	// and the agents signed in to it themselves: one signed in since
 	// isn't left as "needs sign-in"
@@ -299,12 +310,14 @@ func request(id int, method string, params any) []byte {
 	return b
 }
 
-func initializeReq() []byte {
-	return request(1, "initialize", map[string]any{
+func initializeReq() []byte { return request(1, "initialize", initParams()) }
+
+func initParams() map[string]any {
+	return map[string]any{
 		"protocolVersion": mcpProtocol,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "magpie", "version": gateway.Version},
-	})
+	}
 }
 
 var initializedNote = []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
@@ -491,44 +504,94 @@ func checkStdio(ctx context.Context, s *Server) ServerHealth {
 	return *first
 }
 
-// checkStdioAt starts the command on this machine, or in WSL distro.
-func checkStdioAt(ctx context.Context, s *Server, distro string) ServerHealth {
-	// started as the agents start it: in the environment magpie has, with
-	// the server's own variables over it
+// stdioProgram is the program checkStdio starts for a server's command,
+// and the folder it was found in when magpie's PATH lacks it. A bare name
+// PATH doesn't have is looked for as a terminal would find it
+// (proc.FindTool: the folders a user's tools are installed in, fnm's Nodes
+// among them, #2685), and that folder goes on the child's PATH, as it is
+// on a terminal's: npx's package runs the node beside it by name. A path
+// is taken as it is.
+func stdioProgram(name string) (prog, found string) {
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return name, ""
+	}
+	if _, err := exec.LookPath(name); err == nil {
+		return name, ""
+	}
+	if p := proc.FindTool(name); p != "" {
+		return p, filepath.Dir(p)
+	}
+	return name, ""
+}
+
+// withPath is env with dir after the folders its PATH has (Path, as
+// Windows spells it, too).
+func withPath(env []string, dir string) []string {
+	out := slices.Clone(env)
+	for i := len(out) - 1; i >= 0; i-- {
+		k, v, ok := strings.Cut(out[i], "=")
+		if ok && (k == "PATH" || runtime.GOOS == "windows" && strings.EqualFold(k, "PATH")) {
+			if v != "" {
+				v += string(os.PathListSeparator)
+			}
+			out[i] = k + "=" + v + dir
+			return out
+		}
+	}
+	return append(out, "PATH="+dir)
+}
+
+// startServer starts the command s runs as the agents start it, on this
+// machine or in WSL distro: in the environment magpie has, with the
+// server's own variables over it, in home. Its stdin and stdout are the
+// MCP connection; what it writes to stderr is kept in errs; stop ends a
+// run in a distro (call it beside tree.Kill). The check starts it so, and
+// so does the hub (mcp_hub.go), on this machine.
+func startServer(ctx context.Context, s *Server, distro, dir string) (tree *proc.Tree, stdin io.WriteCloser, stdout io.ReadCloser, errs *tail, stop func(), bad *ServerHealth) {
+	fail := func(h ServerHealth) (*proc.Tree, io.WriteCloser, io.ReadCloser, *tail, func(), *ServerHealth) {
+		return nil, nil, nil, nil, nil, &h
+	}
 	env, unset := expandAll(s.Env)
 	if len(unset) > 0 {
-		return failed("novar", strings.Join(unset, ", "))
+		return fail(failed("novar", strings.Join(unset, ", ")))
 	}
+	command, args := launchCmd(s, distro)
 	var cmd *exec.Cmd
 	var t wslrun.Tool
-	stop := func() {}
+	stop = func() {}
+	found := ""
 	if distro == "" {
-		cmd = proc.Command(s.Command, s.Args...)
+		var prog string
+		prog, found = stdioProgram(command)
+		cmd = proc.Command(prog, args...)
 	} else {
 		var err error
-		t, err = wslrun.In(distro, s.Command)
+		t, err = wslrun.In(distro, command)
 		switch {
 		case errors.Is(err, wslrun.ErrDown):
-			return failed("wsldown", distro)
+			return fail(failed("wsldown", distro))
 		case errors.Is(err, wslrun.ErrNotFound):
-			return failed("notfound", s.Command)
+			return fail(failed("notfound", command))
 		case err != nil:
-			return failed("start", "wsl.exe -d "+distro+": "+err.Error())
+			return fail(failed("start", "wsl.exe -d "+distro+": "+err.Error()))
 		}
 		// its own context, ended with the check, which ends the run inside
 		// the distro too (killing wsl.exe alone leaves it there); not the
 		// check's, whose timeout is told as one rather than as an exit
 		var rctx context.Context
 		rctx, stop = context.WithCancel(context.WithoutCancel(ctx))
-		cmd = wslCommand(rctx, t, s.Args...)
+		cmd = wslCommand(rctx, t, args...)
 	}
-	defer stop()
 	// Agents start MCP servers from a project or home directory. A magpie
 	// launched from a shortcut (Windows Start menu) often has C:\Windows\system32
 	// as its own cwd, which is not writable; inherit that and a server that
 	// writes into "." dies as "exited (1)" with no log. Pin the check to HOME.
 	cmd.Env = os.Environ()
-	if d := home(); d != "" {
+	d := dir
+	if d == "" || distro != "" {
+		d = home()
+	}
+	if d != "" {
 		cmd.Dir = d
 		// and PWD with it, as exec does itself only when Env is nil: a
 		// shell-script server that reads $PWD would otherwise see magpie's
@@ -536,6 +599,9 @@ func checkStdioAt(ctx context.Context, s *Server, distro string) ServerHealth {
 		if runtime.GOOS != "windows" && distro == "" {
 			cmd.Env = append(cmd.Env, "PWD="+d)
 		}
+	}
+	if found != "" {
+		cmd.Env = withPath(cmd.Env, found)
 	}
 	var names []string
 	for k, v := range env {
@@ -548,22 +614,93 @@ func checkStdioAt(ctx context.Context, s *Server, distro string) ServerHealth {
 		slices.Sort(names)
 		cmd.Env = t.Env(cmd.Env, names...)
 	}
-	stdin, err := cmd.StdinPipe()
+	in, err := cmd.StdinPipe()
 	if err != nil {
-		return failed("start", err.Error())
+		stop()
+		return fail(failed("start", err.Error()))
 	}
-	stdout, err := cmd.StdoutPipe()
+	out, err := cmd.StdoutPipe()
 	if err != nil {
-		return failed("start", err.Error())
+		stop()
+		return fail(failed("start", err.Error()))
 	}
-	errs := &tail{}
+	errs = &tail{}
 	cmd.Stderr = errs
-	tree, err := proc.StartTree(cmd)
+	tree, err = proc.StartTree(cmd)
 	if err != nil {
+		h := failed("start", err.Error())
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
-			return failed("notfound", s.Command)
+			h = failed("notfound", command)
 		}
-		return failed("start", err.Error())
+		stop()
+		return fail(h)
+	}
+	return tree, in, out, errs, stop, nil
+}
+
+// checkStdioAt starts the command on this machine, or in WSL distro, and
+// asks it for its tools.
+func checkStdioAt(ctx context.Context, s *Server, distro string) ServerHealth {
+	h := checkStdioIn(ctx, s, distro, "")
+	if distro == "" && h.Why == "exited" {
+		return inProject(ctx, s, h)
+	}
+	return h
+}
+
+// inProject is the health of a command that exited when started in home
+// (h): it is started again in an empty folder of its own, as an agent
+// starts it in its project. A server that indexes the folder it starts in
+// refuses home (fff-mcp: "Can not run certain FFF features in a file
+// system root or home directories", math_milian on Discord), and works
+// for every agent that starts it itself. Run by magpie, in home (the MCP
+// router, or Codex on magpie: mcp_run.go), it doesn't, and the page says
+// to keep it direct. A server that exits in the project folder too is h.
+func inProject(ctx context.Context, s *Server, h ServerHealth) ServerHealth {
+	dir, err := os.MkdirTemp("", "magpie-mcp-project-")
+	if err != nil {
+		return h
+	}
+	defer os.RemoveAll(dir)
+	stepTo(ctx, "initialize")
+	p := checkStdioIn(ctx, s, "", dir)
+	if p.State != "ok" {
+		return h
+	}
+	if inHome(s) {
+		h.Why = "home"
+		return h
+	}
+	p.Project = true
+	p.Detail = h.Detail
+	return p
+}
+
+// inHome is whether magpie runs s, in home, for agents given it: the MCP
+// router, or Codex on magpie (sync gives it a command as RunPath unless the
+// user keeps it direct), rather than each agent starting it itself.
+func inHome(s *Server) bool {
+	if s.Hub == HubDirect {
+		return false
+	}
+	mu.Lock()
+	l, err := load()
+	mu.Unlock()
+	if err == nil && l.MCPHub && inHub(s, "") {
+		return true
+	}
+	runs.Lock()
+	codex := runs.wired["codex"]
+	runs.Unlock()
+	return codex && slices.Contains(s.Agents, "codex")
+}
+
+// checkStdioIn is checkStdioAt with the command started in dir ("" for
+// home).
+func checkStdioIn(ctx context.Context, s *Server, distro, dir string) ServerHealth {
+	tree, stdin, stdout, errs, stop, bad := startServer(ctx, s, distro, dir)
+	if bad != nil {
+		return *bad
 	}
 	var exitErr error
 	exited := make(chan struct{})
@@ -668,6 +805,7 @@ func exitHealth(err error, errs *tail) ServerHealth {
 // remoteHeaders are the server's own headers, with magpie's token when it
 // is signed in to it: the agents reach it with that too.
 func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) {
+	s = s.live()
 	h := http.Header{}
 	headers, unset := expandAll(s.Headers)
 	if len(unset) > 0 {
@@ -676,6 +814,11 @@ func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) 
 	}
 	for k, v := range headers {
 		h.Set(k, v)
+	}
+	// another magpie's router is told the call is a router's, for it not
+	// to ask this one's back (bridge_mcp.go)
+	if u, err := url.Parse(s.URL); err == nil && strings.HasPrefix(u.Path, gateway.HubMCPAll) {
+		h.Set(gateway.RouterHeader, "1")
 	}
 	if s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL) {
 		tok, err := mcpauth.Token(ctx, s.Name)
@@ -718,107 +861,160 @@ func statusHealth(res *http.Response) ServerHealth {
 	return h
 }
 
-func checkHTTP(ctx context.Context, s *Server) ServerHealth {
+// httpSession is a connection to a streamable HTTP server: its headers,
+// with magpie's token when it is signed in to it, and the session the
+// server gave. A check holds one for its few requests, the hub for as long
+// as the server is used (mcp_hub.go).
+type httpSession struct {
+	s *Server
+
+	mu  sync.Mutex
+	hdr http.Header
+	// tok is magpie's own token, when it is signed in: one the server
+	// refuses is renewed once and asked again with, as the gateway's
+	// relay does, and one refused just after it was renewed is a sign-in
+	// that has run out
+	tok              string
+	renewed          bool
+	session, version string
+	// init is initialize's result
+	init json.RawMessage
+}
+
+func newHTTPSession(ctx context.Context, s *Server) (*httpSession, *ServerHealth) {
 	hdr, bad := remoteHeaders(ctx, s)
 	if bad != nil {
-		return *bad
+		return nil, bad
 	}
-	// magpie's own token, when it is signed in: one the server refuses is
-	// renewed once and asked again with, as the gateway's relay does, and
-	// one refused just after it was renewed is a sign-in that has run out
-	tok := ""
+	c := &httpSession{s: s, hdr: hdr, version: mcpProtocol}
 	if s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL) {
-		tok = strings.TrimPrefix(hdr.Get("Authorization"), "Bearer ")
+		c.tok = strings.TrimPrefix(hdr.Get("Authorization"), "Bearer ")
 	}
-	renewed := false
-	session, version := "", mcpProtocol
-	post := func(body []byte) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		for k, v := range hdr {
-			req.Header[k] = v
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		if session != "" {
-			req.Header.Set("Mcp-Session-Id", session)
-			req.Header.Set("MCP-Protocol-Version", version)
-		}
-		return checkClient.Do(req)
+	return c, nil
+}
+
+func (c *httpSession) post(ctx context.Context, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.s.URL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
-	// call posts a request and reads its reply, as JSON or from an event
-	// stream
-	var call func(id int, body []byte) (*rpcMsg, *ServerHealth)
-	call = func(id int, body []byte) (*rpcMsg, *ServerHealth) {
-		res, err := post(body)
-		if err != nil {
-			h := netHealth(ctx, err)
-			return nil, &h
-		}
-		defer res.Body.Close()
-		if res.StatusCode == 401 && tok != "" {
-			if renewed {
-				mcpauth.Rejected(s.Name, tok)
-			} else {
-				renewed = true
-				io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
-				fresh, err := mcpauth.Renew(ctx, s.Name, tok)
-				if err != nil {
-					return nil, &ServerHealth{State: "auth", Code: 401, OAuth: true, Detail: err.Error()}
-				}
-				tok = fresh
-				hdr.Set("Authorization", "Bearer "+fresh)
-				return call(id, body)
+	c.mu.Lock()
+	for k, v := range c.hdr {
+		req.Header[k] = slices.Clone(v)
+	}
+	session, version := c.session, c.version
+	c.mu.Unlock()
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if session != "" {
+		req.Header.Set("Mcp-Session-Id", session)
+		req.Header.Set("MCP-Protocol-Version", version)
+	}
+	return checkClient.Do(req)
+}
+
+// call posts a request and reads its reply, as JSON or from an event
+// stream.
+func (c *httpSession) call(ctx context.Context, id int, body []byte) (*rpcMsg, *ServerHealth) {
+	res, err := c.post(ctx, body)
+	if err != nil {
+		h := netHealth(ctx, err)
+		return nil, &h
+	}
+	defer res.Body.Close()
+	c.mu.Lock()
+	tok, renewed := c.tok, c.renewed
+	c.mu.Unlock()
+	if res.StatusCode == 401 && tok != "" {
+		if renewed {
+			mcpauth.Rejected(c.s.Name, tok)
+		} else {
+			io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
+			fresh, err := mcpauth.Renew(ctx, c.s.Name, tok)
+			if err != nil {
+				return nil, &ServerHealth{State: "auth", Code: 401, OAuth: true, Detail: err.Error()}
 			}
+			c.mu.Lock()
+			c.renewed, c.tok = true, fresh
+			c.hdr.Set("Authorization", "Bearer "+fresh)
+			c.mu.Unlock()
+			return c.call(ctx, id, body)
 		}
-		if res.StatusCode == 401 || res.StatusCode == 403 {
-			h := refused(res)
-			return nil, &h
-		}
-		if res.StatusCode/100 != 2 {
-			h := statusHealth(res)
-			return nil, &h
-		}
-		if sid := res.Header.Get("Mcp-Session-Id"); sid != "" {
-			session = sid
-		}
-		m, err := replyOf(res, id)
-		if err != nil {
-			if ctx.Err() != nil {
-				h := timedOut(ctx)
-				return nil, &h
-			}
-			h := failed("protocol", err.Error())
-			return nil, &h
-		}
-		return m, nil
 	}
-	m, h := call(1, initializeReq())
+	if res.StatusCode == 401 || res.StatusCode == 403 {
+		h := refused(res)
+		return nil, &h
+	}
+	if res.StatusCode/100 != 2 {
+		h := statusHealth(res)
+		return nil, &h
+	}
+	if sid := res.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.mu.Lock()
+		c.session = sid
+		c.mu.Unlock()
+	}
+	m, err := replyOf(res, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			h := timedOut(ctx)
+			return nil, &h
+		}
+		h := failed("protocol", err.Error())
+		return nil, &h
+	}
+	return m, nil
+}
+
+// initialize opens the session: initialize, and the note that it is.
+func (c *httpSession) initialize(ctx context.Context, init []byte) *ServerHealth {
+	m, h := c.call(ctx, 1, init)
 	if h != nil {
-		return *h
+		return h
 	}
 	if h := initError(m); h != nil {
-		return *h
+		return h
 	}
-	var init struct {
+	var r struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
-	if json.Unmarshal(m.Result, &init) == nil && init.ProtocolVersion != "" {
-		version = init.ProtocolVersion
+	c.mu.Lock()
+	c.init = m.Result
+	if json.Unmarshal(m.Result, &r) == nil && r.ProtocolVersion != "" {
+		c.version = r.ProtocolVersion
 	}
-	if session != "" {
-		defer endSession(s.URL, hdr, session)
-	}
+	c.mu.Unlock()
 	stepTo(ctx, "notifications/initialized")
-	if res, err := post(initializedNote); err == nil {
+	if res, err := c.post(ctx, initializedNote); err == nil {
 		io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
 		res.Body.Close()
 	} else if ctx.Err() != nil {
-		return timedOut(ctx)
+		h := timedOut(ctx)
+		return &h
 	}
-	return listTools(ctx, call)
+	return nil
+}
+
+// end tells the server the session is done with, when it gave one.
+func (c *httpSession) end() {
+	c.mu.Lock()
+	hdr, session := c.hdr.Clone(), c.session
+	c.mu.Unlock()
+	if session != "" {
+		endSession(c.s.URL, hdr, session)
+	}
+}
+
+func checkHTTP(ctx context.Context, s *Server) ServerHealth {
+	c, bad := newHTTPSession(ctx, s)
+	if bad != nil {
+		return *bad
+	}
+	if h := c.initialize(ctx, initializeReq()); h != nil {
+		return *h
+	}
+	defer c.end()
+	return listTools(ctx, func(id int, body []byte) (*rpcMsg, *ServerHealth) { return c.call(ctx, id, body) })
 }
 
 // endSession tells the server the check is done with its session, as a

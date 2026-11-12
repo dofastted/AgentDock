@@ -30,7 +30,7 @@ func fx(home string) *Agent { return fxIn(here(home)) }
 // fxIn is fx at a place: this machine's home, or a WSL distro's (see
 // wsl.go), its provider naming the gateway as the distro reaches it.
 func fxIn(at place) *Agent {
-	dir := filepath.Join(at.home, ".fx")
+	dir := at.join(".fx")
 	path := filepath.Join(dir, "settings.json")
 	// magpie's provider, with what the user set on it in fx kept
 	fxProvider := func(cur string) any { return fxKept(path, fxProviderAt(cur, at.v1())) }
@@ -62,7 +62,8 @@ func fxIn(at place) *Agent {
 		Dir: dir, Path: path,
 		// ~/.fx is where its settings are. No command: `fx` is a common name
 		// (the JSON viewer has it too), as in WSL (wsl.go).
-		detect: func() bool { return agentDir(dir) },
+		detect:   func() bool { return agentDir(dir) },
+		ListOnly: true,
 		Sync: func() error {
 			return syncJSON(path, "providers."+magpieID, func() any { return fxProvider(fxModels(path)[magpieID]) })
 		},
@@ -117,7 +118,7 @@ func fxIn(at place) *Agent {
 				if v := cur["model"]; v != "" && !usesMagpie(v) {
 					out = append(out, Option{Value: v, Icon: modelIcon("", v)})
 				}
-				return append(out, viaMagpie("fx", magpieID+"/")...)
+				return withVia(out, "fx", magpieID+"/")
 			},
 		}},
 	}

@@ -22,6 +22,7 @@ const firstMost = 8 << 20
 // firstToken times a stream's first content and first text from start,
 // and when the rest of its content came (flowMs).
 type firstToken struct {
+	onFirst                  func(int64)
 	start                    time.Time
 	first                    time.Duration // to the first content; 0 until it comes
 	text                     time.Duration // to the first text
@@ -92,6 +93,9 @@ func (f *firstToken) see(b []byte) {
 		}
 		if f.first == 0 {
 			f.first = d
+			if f.onFirst != nil {
+				f.onFirst(d.Milliseconds())
+			}
 		}
 		f.mark(d, len(ev))
 		if text {
@@ -316,9 +320,15 @@ func (f *firstToken) flowFor(reasoning int) int64 {
 }
 
 // hidesReasoning excludes sealed thinking and Responses summaries even when
-// the upstream omits a separate reasoning-token count.
-func (f *firstToken) hidesReasoning(proto provider.Protocol) bool {
-	return f.hidden || (proto == provider.Responses || proto == provider.Gemini || proto == provider.CodeAssist) && f.reasoning > 0
+// the upstream omits a separate reasoning-token count. It also marks a
+// reply whose reasoning streamed while counted, its usage's reasoning
+// tokens, is 0 (#4545): that count is unknown, not none. Anthropic's usage
+// never splits thinking out of output_tokens (DeepSeek's Anthropic endpoint
+// streamed 33 thinking deltas and said only output_tokens 35), and a Chat
+// vendor may send reasoning_content with no completion_tokens_details. The
+// record's Reasoning stays the vendor's 0, never an estimate.
+func (f *firstToken) hidesReasoning(proto provider.Protocol, counted int) bool {
+	return f.hidden || f.reasoning > 0 && (counted <= 0 || proto == provider.Responses || proto == provider.Gemini || proto == provider.CodeAssist)
 }
 
 // reasoningMs requires a paced visible channel. Responses and Gemini summaries

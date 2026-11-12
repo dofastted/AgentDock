@@ -4,16 +4,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unsafe"
 )
 
+// unraised holds parseVersions at none raised for a test of the kept
+// file's form, whatever the agents' versions are now: a file with no
+// versions in it is then as current as its parses.
+func unraised(t *testing.T) {
+	kept := parseVersions
+	parseVersions = map[string]int{}
+	t.Cleanup(func() { parseVersions = kept })
+}
+
 // The kept file decoded on a few goroutines is what one json.Unmarshal of
 // it was, and is refused where that was.
 func TestDecodeCacheIsUnmarshal(t *testing.T) {
+	unraised(t)
 	unmarshal := func(b []byte, zone string) (map[string]*state, bool) {
 		var c cacheFile
 		if json.Unmarshal(b, &c) != nil || c.Version != cacheVersion || c.Zone != zone || c.Files == nil {
@@ -62,6 +74,7 @@ func TestDecodeCacheIsUnmarshal(t *testing.T) {
 // once a file: 23.7k sessions a script ran with one prompt held 11 MB of
 // copies of it.
 func TestDecodeCacheSharesRepeats(t *testing.T) {
+	unraised(t)
 	var b strings.Builder
 	fmt.Fprintf(&b, `{"version":%d,"zone":"z","files":{`, cacheVersion)
 	for i := range 2000 {
@@ -97,32 +110,33 @@ func TestDecodeCacheSharesRepeats(t *testing.T) {
 // A file of one day holds that day's models once, and a parse of it, from
 // a clone, counts a call once in each: the kept state is as it was read.
 func TestDecodeCacheSharesOneDaysModels(t *testing.T) {
+	unraised(t)
 	m := `{"gpt-5.5":{"input":10,"output":2,"cache_read":0,"cache_write":0}}`
 	b := fmt.Sprintf(`{"version":%d,"zone":"z","files":{"/one":{"size":1,"models":%s,"days":{"2026-10-24":{"m":%s,"a":5}}},"/other":{"size":1,"models":%s,"days":{"2026-10-24":{"m":{"o3":{"input":1,"output":0,"cache_read":0,"cache_write":0}}}}},"/two":{"size":1,"models":%s,"days":{"2026-10-23":{"m":%s},"2026-10-24":{"a":1}}}}}`, cacheVersion, m, m, m, m, m)
 	files, ok := decodeCache([]byte(b), "z")
 	if !ok || len(files) != 3 {
 		t.Fatalf("decoded %d files, %v", len(files), ok)
 	}
-	same := func(a, b map[string]Tokens) bool {
-		return reflect.ValueOf(a).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
+	same := func(a, b named[Tokens]) bool {
+		return unsafe.SliceData(a) == unsafe.SliceData(b)
 	}
 	one, other, two := files["/one"], files["/other"], files["/two"]
-	if !same(one.Models, one.Days["2026-10-24"].Models) {
+	if !same(one.Models, one.Days.of("2026-10-24").Models) {
 		t.Errorf("a file of one day holds its models twice")
 	}
-	if same(other.Models, other.Days["2026-10-24"].Models) || same(two.Models, two.Days["2026-10-23"].Models) {
+	if same(other.Models, other.Days.of("2026-10-24").Models) || same(two.Models, two.Days.of("2026-10-23").Models) {
 		t.Errorf("models held once that aren't the same, or of a file of two days")
 	}
 	c := one.clone()
 	c.use("2026-10-24", "gpt-5.5", Tokens{Input: 1})
-	if c.Models["gpt-5.5"].Input != 11 || c.Days["2026-10-24"].Models["gpt-5.5"].Input != 11 {
-		t.Fatalf("a parse counted %d and %d, want 11 in each", c.Models["gpt-5.5"].Input, c.Days["2026-10-24"].Models["gpt-5.5"].Input)
+	if c.Models.of("gpt-5.5").Input != 11 || c.Days.of("2026-10-24").Models.of("gpt-5.5").Input != 11 {
+		t.Fatalf("a parse counted %d and %d, want 11 in each", c.Models.of("gpt-5.5").Input, c.Days.of("2026-10-24").Models.of("gpt-5.5").Input)
 	}
 	c.dropUse("2026-10-24", "gpt-5.5", Tokens{Input: 11, Output: 2})
-	if len(c.Models) != 0 || c.Days["2026-10-24"] == nil || len(c.Days["2026-10-24"].Models) != 0 {
-		t.Fatalf("a parse took back to %v and %+v", c.Models, c.Days["2026-10-24"])
+	if len(c.Models) != 0 || c.Days.of("2026-10-24") == nil || len(c.Days.of("2026-10-24").Models) != 0 {
+		t.Fatalf("a parse took back to %v and %+v", c.Models, c.Days.of("2026-10-24"))
 	}
-	if one.Models["gpt-5.5"].Input != 10 || one.Days["2026-10-24"].Models["gpt-5.5"].Input != 10 {
+	if one.Models.of("gpt-5.5").Input != 10 || one.Days.of("2026-10-24").Models.of("gpt-5.5").Input != 10 {
 		t.Fatalf("the kept state was written: %v", one.Models)
 	}
 }
@@ -132,13 +146,13 @@ func TestDecodeCacheSharesOneDaysModels(t *testing.T) {
 // no parse, an empty index and none at all.
 func TestEncodeCacheIsMarshal(t *testing.T) {
 	at := time.Date(2026, 10, 25, 7, 0, 0, 0, time.UTC)
-	files := map[string]*state{"/b/<a&b>.jsonl": {Size: 3, Mod: 9, Title: "a <b> & \"c\"  ", Start: at, Last: at, Models: map[string]Tokens{"m": {Input: 1}}}, "/a/x.jsonl": nil}
+	files := map[string]*state{"/b/<a&b>.jsonl": {Size: 3, Mod: 9, Title: "a <b> & \"c\"  ", Start: at, Last: at, Models: named[Tokens]{{"m", Tokens{Input: 1}}}}, "/a/x.jsonl": nil}
 	for i := range 3000 {
 		files[fmt.Sprintf("/s/%04d.jsonl", i)] = &state{Size: int64(i), Cwd: strings.Repeat("d", i%300), Start: at, Last: at.Add(time.Duration(i) * time.Second)}
 	}
 	for _, c := range []cacheFile{
 		{Version: cacheVersion, Zone: "28800/28800", Files: files},
-		{Version: cacheVersion, Zone: "<z>", Files: map[string]*state{}},
+		{Version: cacheVersion, Zone: "<z>", Parsers: map[string]int{"codex": 2, "claude": 1}, Files: map[string]*state{"/c": {Agent: "codex", Size: 1}}},
 		{Version: cacheVersion, Zone: "0/0"},
 	} {
 		want, err := json.Marshal(c)
@@ -156,5 +170,39 @@ func TestEncodeCacheIsMarshal(t *testing.T) {
 			}
 			t.Fatalf("%d files: %d bytes, want %d; apart at %d: %.80q", len(c.Files), got.Len(), len(want), n, got.Bytes()[n:])
 		}
+	}
+}
+
+// A raise of one agent's parseVersions reads that agent's files again and
+// keeps every other agent's parses: a raise of cacheVersion read a long
+// history whole, minutes of CPU after an update (#2278).
+func TestParseVersionsReadOneAgentAgain(t *testing.T) {
+	defer func(v map[string]int) { parseVersions = v }(parseVersions)
+	kept := func(c cacheFile, now map[string]int) []string {
+		var b bytes.Buffer
+		if err := encodeCache(&b, c); err != nil {
+			t.Fatal(err)
+		}
+		parseVersions = now
+		files, ok := decodeCache(b.Bytes(), "z")
+		if !ok {
+			t.Fatal("refused")
+		}
+		return slices.Sorted(maps.Keys(files))
+	}
+	files := map[string]*state{"/codex": {Agent: "codex", Size: 1}, "/claude": {Agent: "claude", Size: 2}, "/old": {Size: 3}}
+	c := cacheFile{Version: cacheVersion, Zone: "z", Files: files}
+	if got := kept(c, map[string]int{}); !slices.Equal(got, []string{"/claude", "/codex", "/old"}) {
+		t.Errorf("nothing raised: kept %v", got)
+	}
+	if got := kept(c, map[string]int{"claude": 1}); !slices.Equal(got, []string{"/codex"}) {
+		t.Errorf("claude raised: kept %v, want Codex's alone", got)
+	}
+	c.Parsers = map[string]int{"claude": 1}
+	if got := kept(c, map[string]int{"claude": 1}); !slices.Equal(got, []string{"/claude", "/codex", "/old"}) {
+		t.Errorf("saved at the same versions: kept %v", got)
+	}
+	if got := kept(c, map[string]int{"claude": 1, "codex": 1}); !slices.Equal(got, []string{"/claude"}) {
+		t.Errorf("codex raised: kept %v, want Claude Code's alone", got)
 	}
 }

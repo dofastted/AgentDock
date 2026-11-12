@@ -62,7 +62,7 @@ func TestClaudeNativeReplayAcrossReadersAndRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			shard := loadCalls(file{path: path, agent: "claude", size: info.Size(), mod: info.ModTime()})
+			shard := loadCalls(file{path: path, agent: "claude", size: info.Size(), mod: modOf(info.ModTime())})
 			if shard == nil || shard.Claude != nil {
 				t.Fatal("call shard persisted block/tool maps")
 			}
@@ -119,7 +119,7 @@ func TestEvictedClaudeRevisionsReleasedAndRebuilt(t *testing.T) {
 	want := Tokens{10338, 37363, 281066, 63398, 0}
 	List(0)
 	var got Tokens
-	for _, v := range cache[path].Models {
+	for _, v := range cache[path].Models.all() {
 		got.add(v)
 	}
 	if got != want {

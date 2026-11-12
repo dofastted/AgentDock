@@ -14,9 +14,10 @@ package provider
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // FastWord is the last part of a member typed to be sent fast.
@@ -30,6 +31,11 @@ func MemberFast(id string) (member string, fast bool) {
 }
 
 func memberFastIn(entries []Entry, id string) (string, bool) {
+	if base, acct := MemberAccount(id); acct != "" {
+		// "a/m:high:fast#x": fast is said before the account, which is last
+		m, fast := memberFastIn(entries, base)
+		return WithMemberAccount(m, acct), fast
+	}
 	i := strings.LastIndex(id, ":")
 	if i <= 0 || !strings.EqualFold(id[i+1:], FastWord) {
 		return id, false
@@ -88,6 +94,14 @@ func CanFast(p Provider, model string) bool {
 		_, ok = pluginModel(pp, model+"-fast")
 		return ok
 	}
+	if p.IsRemoteMagpie() {
+		// another magpie's model it offers its own Codex Fast on (its
+		// list's service_tiers, #1234): a pick sent fast here goes on to
+		// it with service_tier "priority", which it sends its vendor as
+		// its own Codex's turn would be (littlekk88 on Discord: the
+		// picker had no Fast for a remote magpie's model)
+		return slices.Contains(RemoteTiers(p, model), "priority")
+	}
 	if p.Account != nil {
 		switch p.Account.Agent {
 		case "codex":
@@ -113,6 +127,20 @@ func CanFast(p Provider, model string) bool {
 		return true
 	}
 	return OwnFast(p, model)
+}
+
+// RemoteTiers are the service tiers another magpie's list says it offers
+// on model (#1234), nil for a provider that isn't one.
+func RemoteTiers(p Provider, model string) []string {
+	if !p.IsRemoteMagpie() {
+		return nil
+	}
+	for _, m := range p.liveByID(model) {
+		if len(m.Tiers) > 0 {
+			return m.Tiers
+		}
+	}
+	return nil
 }
 
 // OwnFast reports whether model has a fast mode only as the user's own
@@ -145,14 +173,16 @@ func modelSlug(model string) string {
 }
 
 var (
-	openAIFast = regexp.MustCompile(`^(gpt-|o\d)`)
+	openAIFast = lazyre.New(`^(gpt-|o\d)`)
 	// a dated id is its model's: claude-opus-4-8-20260501
-	claudeDated = regexp.MustCompile(`-\d{8}$`)
+	claudeDated = lazyre.New(`-\d{8}$`)
 )
 
 // claudeFastModels are the Claude models with fast mode (speed "fast",
-// beta fast-mode-2026-02-01).
-var claudeFastModels = []string{"claude-opus-4-8", "claude-opus-5", "claude-opus-5-5"}
+// beta fast-mode-2026-02-01). Fable 5.2 has it from its launch
+// (2026-11-09, $16/$80 per Mtok; Claude Code 2.1.321 offers it on Fable
+// 5.2 and Mythos 5.2); Fable 5.1 and before never had it.
+var claudeFastModels = []string{"claude-opus-4-8", "claude-opus-5", "claude-opus-5-5", "claude-fable-5-2"}
 
 // ClaudeFast reports whether a Claude model has fast mode.
 func ClaudeFast(model string) bool {
@@ -186,20 +216,42 @@ func cleanFast(entries []Entry, g *Group) error {
 			return fmt.Errorf("%s is a group: its models are sent as it says, so it takes no :%s", model, FastWord)
 		}
 		if p, m, ok := resolveIn(entries, model); ok && !CanFast(p, m) {
-			return fmt.Errorf("%s has no fast mode magpie can ask for (ChatGPT and OpenAI GPT models, a GPT model on a provider you added by its address, Cursor's with a fast one, a plugin's it says are served at priority, and Claude Opus 4.8 and 5 on an Anthropic key have)", model)
+			return fmt.Errorf("%s has no fast mode magpie can ask for (ChatGPT and OpenAI GPT models, a GPT model on a provider you added by its address, Cursor's with a fast one, a plugin's it says are served at priority, another magpie's it offers Fast on, and Claude Opus 4.8 and 5 on an Anthropic key have)", model)
 		}
 		out = append(out, f)
 	}
 	g.Fast = out
+	// Ultra is a part of Fast: a member kept out of it is kept out here
+	g.Ultra = slices.DeleteFunc(slices.Clone(g.Ultra), func(u string) bool { return !slices.Contains(out, key(u)) })
 	return nil
+}
+
+// IsUltra reports whether the group sends member id in the faster mode.
+func (g Group) IsUltra(id string) bool {
+	return slices.Contains(g.Ultra, id) && slices.Contains(g.Fast, id)
 }
 
 // SetMemberFast sends the group's member id fast, or not, where it is in
 // the group.
 func (g *Group) SetMemberFast(id string, fast bool) {
+	tier := ""
+	if fast {
+		tier = "priority"
+	}
+	g.SetMemberTier(id, tier)
+}
+
+// SetMemberTier sends the group's member id at tier: "" the usual speed,
+// "priority" fast, "ultrafast" the faster mode of an account that offers
+// it. Only a member that is in the group is switched on.
+func (g *Group) SetMemberTier(id, tier string) {
 	g.Fast = slices.DeleteFunc(slices.Clone(g.Fast), func(x string) bool { return x == id })
-	if fast && slices.Contains(g.Members, id) {
+	g.Ultra = slices.DeleteFunc(slices.Clone(g.Ultra), func(x string) bool { return x == id })
+	if tier != "" && slices.Contains(g.Members, id) {
 		g.Fast = append(g.Fast, id)
+		if tier == "ultrafast" {
+			g.Ultra = append(g.Ultra, id)
+		}
 	}
 }
 
@@ -228,12 +280,28 @@ func (g *Group) RenameMember(from, to string) {
 			g.Fast[i] = to
 		}
 	}
+	for i, f := range g.Ultra {
+		if f == from {
+			g.Ultra[i] = to
+		}
+	}
+	for i, p := range g.Placed {
+		if p == from {
+			g.Placed[i] = to
+		}
+	}
 	for i, o := range g.Off {
 		if o == from {
 			g.Off[i] = to
 		}
 	}
 	g.Weights = renamedWeights(g.Weights, func(m string) string {
+		if m == from {
+			return to
+		}
+		return m
+	})
+	g.EffortMaps = renamedEffortMaps(g.EffortMaps, func(m string) string {
 		if m == from {
 			return to
 		}

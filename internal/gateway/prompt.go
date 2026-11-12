@@ -18,12 +18,12 @@ package gateway
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -346,12 +346,12 @@ func (p *Prompt) calibrate(counted, window int) {
 
 var (
 	// Claude Code: "Contents of /path/CLAUDE.md (project instructions, …):"
-	contentsOf = regexp.MustCompile(`(?m)^Contents of (\S.*?) \(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\):[ \t]*$`)
+	contentsOf = lazyre.New(`(?m)^Contents of (\S.*?) \(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\):[ \t]*$`)
 	// OpenCode: "Instructions from: /path/AGENTS.md"
-	instructionsFrom = regexp.MustCompile(`(?m)^Instructions from: (\S.*?)[ \t]*$`)
+	instructionsFrom = lazyre.New(`(?m)^Instructions from: (\S.*?)[ \t]*$`)
 	// Codex: "# AGENTS.md instructions for /path"
-	agentsFor = regexp.MustCompile(`^# (\S+\.md) instructions for (\S.*?)[ \t]*\n`)
-	leadTag   = regexp.MustCompile(`^\s*<([a-zA-Z_][\w -]{0,40})>`)
+	agentsFor = lazyre.New(`^# (\S+\.md) instructions for (\S.*?)[ \t]*\n`)
+	leadTag   = lazyre.New(`^\s*<([a-zA-Z_][\w -]{0,40})>`)
 )
 
 // memoryTag says whose an instruction file is from how the agent
@@ -492,8 +492,8 @@ var (
 	readTools = map[string]bool{"Read": true, "read": true, "read_file": true, "ReadFile": true, "view": true,
 		"View": true, "NotebookRead": true, "readFile": true, "open_file": true, "cat": true}
 	pathKeys  = []string{"file_path", "path", "filePath", "target_file", "notebook_path", "file", "filename", "uri"}
-	cmdOfExec = regexp.MustCompile(`\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"`)
-	toolOfJS  = regexp.MustCompile(`\btools\.(\w+)\s*\(`)
+	cmdOfExec = lazyre.New(`\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"`)
+	toolOfJS  = lazyre.New(`\btools\.(\w+)\s*\(`)
 	readCmds  = map[string]bool{"cat": true, "head": true, "tail": true, "nl": true, "bat": true, "less": true, "more": true}
 )
 
@@ -714,22 +714,26 @@ func userSays(text string) bool { return userWords(text) != "" }
 var (
 	// reminders are what agents add to a user's message for the model
 	// alone: Claude Code's <system-reminder>, ZCode's with a source=.
-	reminders = regexp.MustCompile(`(?s)<system-reminder(?:\s[^>]*)?>.*?</system-reminder>`)
+	reminders = lazyre.New(`(?s)<system-reminder(?:\s[^>]*)?>.*?</system-reminder>`)
 	// myRequest heads what the user typed in the Codex app, after the
 	// context it puts first (# Context from my IDE setup:, <in-app-browser-context>…).
-	myRequest = regexp.MustCompile(`(?m)^## My request(?: for Codex)?:[ \t]*\n?`)
+	myRequest = lazyre.New(`(?m)^## My request(?: for Codex)?:[ \t]*\n?`)
 	// injected are how a text the agent put in as the user begins, beside
 	// agentsFor and the reminders: Codex's and the Codex app's context,
-	// Claude Code's and ZCode's notices, plugin metadata, agent lists and
-	// todo nudges.
+	// Reasonix's snapshot of the workspace, Claude Code's and ZCode's
+	// notices, plugin metadata, agent lists and todo nudges.
 	injected = []string{
 		"<system-reminder", "<environment_context>", "<user_instructions>", "<turn_aborted>",
 		"<user_shell_command>", "<subagent_notification>", "<in-app-browser-context",
+		"<external_codex_apps_open_page>", "<session-context",
 		"<task-notification>", "<subagent-notification>", "<plugin_reference>",
 		"Available agent types for the Agent tool:", "Available agent types and the tools they have access to:",
 		"New agent types are now available for the Agent tool:",
 		"The TodoWrite tool hasn't been used recently.", "The task tools haven't been used recently.",
 		"Conversation rewind applied.", "Workspace rewind applied.",
+		// the tool list changed: Claude Code's deferred tools and MCP
+		// servers' instructions, told after a result
+		"The following deferred tools are", "# MCP Server Instructions", "The following MCP servers",
 	}
 )
 
@@ -760,6 +764,12 @@ func userWords(text string) string {
 		}
 	}
 	return t
+}
+
+// saysAnything is whether userSaid has anything, without joining the
+// words of a long turn only to see they are there
+func saysAnything(m Message) bool {
+	return slices.ContainsFunc(m.Parts, func(p Part) bool { return p.Kind == Text && userSays(p.Text) })
 }
 
 // userSaid is what the user said in a message: the words of its texts.
@@ -1222,19 +1232,35 @@ func windowFor(id, model string) int {
 	return windowOf(*p, model)
 }
 
+// livePrompt is p as a route still answering shows it: in the window of
+// the model its try went to, read as the try went out (packinggoods on
+// Discord: a request in flight on a remote magpie's claude-opus-5-5 said
+// the model's window isn't known, its window set only once it was done).
+// p itself is left as it is, for the route's end to scale and give the
+// window of the model that answered.
+func livePrompt(p *Prompt, window int) *Prompt {
+	if p == nil || window <= 0 || p.Window == window {
+		return p
+	}
+	c := *p
+	c.Window = window
+	return &c
+}
+
 // inspectPrompt reads the request's prompt beside it, putting the estimate
 // in the trace as soon as it is read; wait returns it, for the route's
 // end to scale to what was counted. masked is the body as the vendor would
-// get it with masking on, kept a while for the card's text (PromptText).
-func (s *Server) inspectPrompt(tr *Route, from provider.Protocol, body, masked []byte) (wait func() *Prompt) {
+// get it with masking on, kept a while for the card's text (PromptText);
+// plain when it went unmasked, so is masked only when the card asks.
+func (s *Server) inspectPrompt(tr *Route, from provider.Protocol, body, masked []byte, plain bool) (wait func() *Prompt) {
 	ch := make(chan *Prompt, 1)
 	go func() {
 		p := promptOf(from, body)
 		if p != nil {
-			s.trace.keepBody(tr.ID, from, masked)
+			s.trace.keepBody(tr.ID, from, masked, plain)
 			s.trace.update(tr, func(t *Route) {
 				if t.Prompt == nil {
-					t.Prompt = p
+					t.Prompt = livePrompt(p, t.window)
 				}
 			})
 		}

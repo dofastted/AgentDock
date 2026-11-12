@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>远程 magpie · magpie 文档</title>
+<title>远程 magpie：局域网多台电脑共用一个 AI 网关 · magpie 文档</title>
 <meta name="description" content="在多台电脑上用同一个 magpie：在网络上共享它，在其他电脑上把它添加为远程 magpie（应用、TUI 或 CLI），以及能用到什么：模型、路由组、图像、System One、价格和额度。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/remote">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/remote">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/remote">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/remote">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/remote">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="远程 magpie">
 <meta property="og:description" content="一个 magpie 的供应商、账号和路由组，用在你的每台电脑上。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/remote">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "远程 magpie",
+   "description": "在多台电脑上用同一个 magpie：在网络上共享它，在其他电脑上把它添加为远程 magpie（应用、TUI 或 CLI），以及能用到什么：模型、路由组、图像、System One、价格和额度。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/remote",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "远程 magpie",
+     "item": "https://usemagpie.ai/docs/zh/remote"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -76,6 +136,9 @@
     <a href="#add">2. 在其他电脑上添加</a>
     <a href="#models">能用到什么</a>
     <a href="#quotas">额度与用量</a>
+    <a href="#keys">短期密钥</a>
+    <a href="#oidc">GitHub Actions 的密钥</a>
+    <a href="#api">统计 API</a>
     <a href="#trouble">出问题时</a>
   </aside>
 
@@ -123,13 +186,84 @@ magpie provider refresh office   <span class="c"># 重新获取列表</span></pr
       <li><b>所有 API。</b>请求按 Agent 使用的 API 原样转发（Anthropic Messages 和 token 计数、Responses、Chat Completions）。共享 magpie 的供应商只用另一种 API 提供的模型，只转换一次，不会在两台电脑上各转一次。Responses 走 HTTP（包括 SSE），不走 WebSocket。</li>
       <li><b>图像和视频。</b>它的图像和视频模型会被自动识别，经由它的图像生成、编辑和视频 API 提供。</li>
       <li><b>System One。</b>它的决策模型（Jev、Clef，以及你自己命名的模型）接到它的 <code>/v1/systemone</code>，作为决策模型而不是对话模型出现。刷新供应商列表可以发现新的。只写 <code>office</code> 时使用列表里的第一个决策模型。</li>
-      <li><b>Embeddings、rerank 和语音转文字</b>发往它对应的 API。它们在 Agent 列表里保持远程上的样子；出现在列表里并不代表能用来对话。</li>
+      <li><b>Embeddings、rerank、语音转文字和文字转语音</b>发往它对应的 API。它们在 Agent 列表里保持远程上的样子；出现在列表里并不代表能用来对话。</li>
       <li><b>价格。</b>每个模型在本机按共享 magpie 的计价（那边手动设的价格，否则是供应商的标价），两台电脑算出来一样。在本机设的价格优先。</li>
     </ul>
 
     <h2 id="quotas"><a class="anchor" href="#quotas">额度与用量</a></h2>
     <p>用量页、菜单栏和 <code>magpie quota</code> 会显示共享 magpie 的订阅卡片，带上它的名字（<code>Codex · office</code>，id <code>office/codex</code>），内容是那边最近一次读取的结果：只有保存登录的电脑去问厂商。在本机刷新卡片会让那边再读一次，最多每 30 秒一次。Codex 重置或 WorkBuddy 签到要在那台电脑上，用它自己的应用、TUI 或 CLI 来做。那边限了额度、模型或账号的密钥看不到它的任何卡片：本机只显示这把密钥自己的卡片和它的限额。</p>
     <p>共享的 magpie 把本机的请求记在本机所用网关密钥的名字下，并记下应答的账号。</p>
+
+    <h2 id="keys"><a class="anchor" href="#keys">短期密钥</a></h2>
+    <p>在沙箱里启动 agent 的程序，可以给每个 agent 发一把自己的网关密钥，到期自动失效。密钥有效期 1 分钟到 30 天，可以限定部分模型、部分账号、整个有效期内的 token 数或花费，或只读。密钥本身只在返回里出现一次。</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-keys">复制</button>
+      <pre id="ex-keys">curl -s -X POST http://127.0.0.1:3425/v1/magpie/keys \
+  -d '{"name":"sandbox-1","ttl":"1h","models":["office/codex/gpt-5"],"tokens":200000}'
+<span class="c"># {"id":"k…","name":"sandbox-1","key":"sk-magpie-…","expires":"…","models":[…],"limit":{…}}</span>
+curl -s http://127.0.0.1:3425/v1/magpie/keys              <span class="c"># 你签发的密钥（已遮盖）</span>
+curl -s -X DELETE http://127.0.0.1:3425/v1/magpie/keys/k…  <span class="c"># 提前吊销</span></pre>
+    </div>
+    <p>本机上的程序不带密钥即可调用；浏览器里的网页不行。其他电脑、容器或 CI 要带一把你允许签发的网关密钥来调用，它签发的每把密钥都受它约束：用不了它不能用的模型和账号，不会比它晚过期，花费也计入它的限额。关掉或删掉它，它签发的密钥立刻失效。命令行里也一样，只输出密钥本身：</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-keys-cli">复制</button>
+      <pre id="ex-keys-cli">magpie gateway-key issue --ttl 1h --name sandbox-1 --models office/codex/gpt-5 --tokens 200000
+magpie gateway-key issuer &lt;id&gt; on    <span class="c"># 允许这个密钥签发密钥</span>
+magpie gateway-key issue --ttl 30m --from &lt;id&gt; --read-only --json
+magpie gateway-key list               <span class="c"># until 10-31 14:00、expired、issued by …</span></pre>
+    </div>
+    <p>过期的密钥在每个 API 上都返回 <code>401</code> 并说明原因（“the gateway key "sandbox-1" expired at …: ask for a new one”），本机请求也一样。一小时后它会被删掉。</p>
+
+    <h2 id="oidc"><a class="anchor" href="#oidc">GitHub Actions 的密钥</a></h2>
+    <p>GitHub Actions 的任务不用在仓库 secrets 里放网关密钥，也能拿到短期密钥：用 GitHub 给它的 OIDC token 来换。写一条规则，指定仓库（还可以指定分支、environment 或任意 claim，精确值或带 <code>*</code>）、签发所用的网关密钥和有效期：</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-oidc-cli">复制</button>
+      <pre id="ex-oidc-cli">magpie gateway-key issuer &lt;id&gt; on
+magpie gateway-key oidc add --key &lt;id&gt; --repo owner/app --ref refs/heads/main --ttl 1h
+<span class="c"># 输出规则 id 和它的 audience：magpie-&lt;规则 id&gt;</span>
+magpie gateway-key oidc list
+magpie gateway-key oidc remove &lt;rule id&gt;</pre>
+    </div>
+    <p>在 workflow 里向 GitHub 要一个带规则 audience 的 token，POST 到 <code>/v1/magpie/keys/oidc</code>：</p>
+    <div class="code">
+      <span class="lang">YAML</span>
+      <button class="copy" data-copy="ex-oidc">复制</button>
+      <pre id="ex-oidc">permissions:
+  id-token: write
+steps:
+  - name: Get a magpie key
+    run: |
+      TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&amp;audience=magpie-&lt;rule id&gt;" | jq -r .value)
+      KEY=$(curl -s -X POST https://&lt;your magpie&gt;/v1/magpie/keys/oidc \
+        -H "Authorization: Bearer $TOKEN" -d '{"ttl":"30m"}' | jq -r .key)
+      echo "::add-mask::$KEY"
+      echo "MAGPIE_KEY=$KEY" &gt;&gt; "$GITHUB_ENV"</pre>
+    </div>
+    <p>换到的密钥由规则里的网关密钥签发，和其他签发的密钥一样受它约束，有效期不超过规则所写，名字是仓库、分支和运行编号。其他仓库或分支的 token、过期的 token、已经换过的 token 会收到 <code>401</code> 和原因。只有 magpie 共享时其他电脑才能调用这个接口，被拒的 token 计入失败认证次数。没有规则就什么都换不到。</p>
+
+    <h2 id="api"><a class="anchor" href="#api">统计 API</a></h2>
+    <p>用量页上的内容也以 JSON 提供给本机；共享 magpie 时，也提供给带网关密钥的请求。受预算、模型或账号限制的密钥只能看到自己的请求和限额；主人为它打开<span class="ui">额度</span>后（<code>magpie gateway-key quotas &lt;id&gt; on</code>），还能看到它可用部分的额度。</p>
+    <ul>
+      <li><code>/v1/magpie/usage?period=today|7d|30d|all</code>：总量，以及按模型、agent、提供商、账号和网关密钥的分项。</li>
+      <li><code>/v1/magpie/usage/requests</code>：请求记录，支持 <code>period</code>、<code>day</code>、<code>offset</code>、<code>limit</code>，以及筛选 <code>model</code>、<code>agent</code>、<code>provider</code>、<code>account</code>、<code>callerKey</code>、<code>failed=1</code>、<code>retried=1</code> 和 <code>q</code>。</li>
+      <li><code>/v1/magpie/quotas</code>：每个订阅的额度窗口（<code>?kept=1</code> 不去问厂商）；<code>/v1/magpie/quotas/history?days=</code>：剩余额度的历史，最多 45 天。</li>
+      <li><code>/v1/magpie/limit</code>：这把密钥自己的限额、过期时间，以及签发它的密钥的限额；受限的密钥还会告诉它受什么限制（<code>heldTo</code>）、可用的模型（<code>models</code>），以及能否看到额度（<code>quotas</code>、<code>quotaProviders</code>）。</li>
+      <li><code>/v1/magpie/concurrency</code>：每个账号正在进行的请求。</li>
+    </ul>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-api">复制</button>
+      <pre id="ex-api">curl -s 'http://127.0.0.1:3425/v1/magpie/usage?period=7d'
+curl -s 'http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&amp;callerKey=k…&amp;failed=1&amp;limit=50'
+curl -s 'http://127.0.0.1:3425/v1/magpie/quotas?kept=1'
+curl -s 'http://127.0.0.1:3425/v1/magpie/quotas/history?days=14'
+curl -s http://127.0.0.1:3425/v1/magpie/limit -H 'Authorization: Bearer sk-magpie-…'
+curl -s http://127.0.0.1:3425/v1/magpie/concurrency</pre>
+    </div>
 
     <h2 id="trouble"><a class="anchor" href="#trouble">出问题时</a></h2>
     <div class="table-wrap"><table>
@@ -157,10 +291,20 @@ magpie provider refresh office   <span class="c"># 重新获取列表</span></pr
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

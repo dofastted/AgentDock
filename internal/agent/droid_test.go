@@ -282,3 +282,221 @@ func TestDroidOverrideAndLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// droidWants holds droid's own reading of a model's name (droid 0.231.0's
+// xs and g2): /\bgpt[-_.]?\d/i, /codex/i, /\bo[1-9](?:[-_.]|$)/i for
+// OpenAI, then /claude|haiku|sonnet|opus/i for Claude.
+func TestDroidWantsItsOwnRule(t *testing.T) {
+	for m, want := range map[string]string{
+		"ultrafast/gpt-6.1-sol":    "openai",
+		"x/GPT5":                   "openai",
+		"x/gpt_4o":                 "openai",
+		"codex/gpt-5.5":            "openai",
+		"x/gpt-5.3-codex":          "openai",
+		"x/my-codex-proxy-model":   "openai",
+		"x/o3":                     "openai",
+		"x/o4-mini":                "openai",
+		"x/o1.preview":             "openai",
+		"x/gpt-oss-120b":           "",
+		"x/proto1":                 "",
+		"x/o10x":                   "",
+		"x/claude-opus-4-7":        "anthropic",
+		"or/anthropic/sonnet-next": "anthropic",
+		"x/HAIKU":                  "anthropic",
+		"deepseek/pro":             "",
+		"x/kimi-k2.5":              "",
+	} {
+		if got := droidWants(m); got != want {
+			t.Errorf("%s: %q, want %q", m, got, want)
+		}
+	}
+}
+
+// A GPT or a Claude served on Chat is written on the provider droid asks
+// for, so droid doesn't warn about it at every session start (ji233 on
+// Discord: "ultrafast/gpt-6.1-sol appears to be an OpenAI model"), and an
+// entry an older magpie wrote on Chat is moved on the next sync.
+func TestDroidProviderByName(t *testing.T) {
+	_, path := droidHome(t)
+	provider.Save(provider.Provider{ID: "ultrafast", Name: "Ultrafast", Key: "k", Chat: "http://127.0.0.1:1/v1",
+		Models: []string{"gpt-6.1-sol", "o3", "claude-opus-4-7", "kimi-k2.5"}})
+	a := droid(os.Getenv("HOME"))
+	if err := a.Apply("model", "magpie/ultrafast/gpt-6.1-sol"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]string{
+		"custom:magpie/ultrafast/gpt-6.1-sol":     {"openai", gatewayV1()},
+		"custom:magpie/ultrafast/o3":              {"openai", gatewayV1()},
+		"custom:magpie/ultrafast/claude-opus-4-7": {"anthropic", gateway.URL()},
+		"custom:magpie/ultrafast/kimi-k2.5":       {"generic-chat-completion-api", gatewayV1()},
+		"custom:magpie/deepseek/pro":              {"generic-chat-completion-api", gatewayV1()},
+		"custom:magpie/anth/claude-sonnet-5":      {"anthropic", gateway.URL()},
+		"custom:magpie/resp/grok-5":               {"openai", gatewayV1()},
+	}
+	check := func(when string) {
+		t.Helper()
+		ms, _, _ := droidFile(t, path)
+		for id, w := range want {
+			if e := ms[id]; e == nil || e["provider"] != w[0] || e["baseUrl"] != w[1] {
+				t.Errorf("%s: %s: %v", when, id, e)
+			}
+		}
+		if d := a.Check(); d != "" {
+			t.Errorf("%s: check: %s", when, d)
+		}
+	}
+	check("apply")
+
+	// as an older magpie left it: every Chat model on
+	// generic-chat-completion-api, and no record of what it wrote
+	old := strings.ReplaceAll(readFile(path), `"provider": "openai"`, `"provider": "generic-chat-completion-api"`)
+	old = strings.Replace(old, `"model": "ultrafast/claude-opus-4-7",`, `"model": "ultrafast/claude-opus-4-7", "x": 1,`, 1)
+	os.WriteFile(path, []byte(old), 0o644)
+	forget("droid:" + path + ":wrote")
+	if err := a.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	check("sync over an older magpie's")
+}
+
+// A field of one of magpie's entries the user changed stays as they set
+// it through a sync and a new pick; the rest follows the catalog, and the
+// baseUrl follows the provider they picked.
+func TestDroidKeepsAnEntryEditedByHand(t *testing.T) {
+	_, path := droidHome(t)
+	provider.Save(provider.Provider{ID: "ultrafast", Name: "Ultrafast", Key: "k", Chat: "http://127.0.0.1:1/v1",
+		Models: []string{"gpt-6.1-sol", "kimi-k2.5"}})
+	a := droid(os.Getenv("HOME"))
+	if err := a.Apply("model", "magpie/ultrafast/kimi-k2.5"); err != nil {
+		t.Fatal(err)
+	}
+	var f map[string]any
+	json.Unmarshal([]byte(readFile(path)), &f)
+	for _, m := range f["customModels"].([]any) {
+		e := m.(map[string]any)
+		switch e["id"] {
+		case "custom:magpie/ultrafast/gpt-6.1-sol":
+			// back on Chat, by their own choice
+			e["provider"] = "generic-chat-completion-api"
+			e["maxContextLimit"] = 300000
+			e["extraArgs"] = map[string]any{"reasoning_effort": "high"}
+			e["index"] = 7
+		case "custom:magpie/ultrafast/kimi-k2.5":
+			e["provider"] = "anthropic"
+			e["displayName"] = "Kimi (mine)"
+			delete(e, "noImageSupport")
+		}
+	}
+	b, _ := json.MarshalIndent(f, "", "  ")
+	os.WriteFile(path, b, 0o644)
+	for _, step := range []func() error{a.Sync, func() error { return a.Apply("model", "magpie/deepseek/pro") }} {
+		if err := step(); err != nil {
+			t.Fatal(err)
+		}
+		ms, _, _ := droidFile(t, path)
+		g := ms["custom:magpie/ultrafast/gpt-6.1-sol"]
+		if g["provider"] != "generic-chat-completion-api" || g["baseUrl"] != gatewayV1() || g["maxContextLimit"] != float64(300000) ||
+			g["extraArgs"] == nil || g["index"] != nil || g["apiKey"] != gateway.Token || g["displayName"] == nil {
+			t.Errorf("gpt: %v", g)
+		}
+		k := ms["custom:magpie/ultrafast/kimi-k2.5"]
+		if _, ok := k["noImageSupport"]; ok || k["provider"] != "anthropic" || k["baseUrl"] != gateway.URL() || k["displayName"] != "Kimi (mine)" {
+			t.Errorf("kimi: %v", k)
+		}
+		if p := ms["custom:magpie/deepseek/pro"]; p["provider"] != "generic-chat-completion-api" || p["displayName"] != "pro · DeepSeek" {
+			t.Errorf("an entry not edited: %v", p)
+		}
+	}
+	// disconnecting drops them with the record
+	if err := a.Apply("model", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stashLoad()["droid:"+path+":wrote"]; ok {
+		t.Error("record kept after disconnect")
+	}
+}
+
+// tao5010 on Discord: droid offered none of magpie's models any thinking
+// level. droid gives a custom model it doesn't know levels only when its
+// entry has reasoningEffort (droid 1.3.0), and takes a built-in's own
+// through baseModelId.
+func TestDroidReasoningEffort(t *testing.T) {
+	_, path := droidHome(t)
+	provider.Save(provider.Provider{ID: "oa", Name: "OA", Key: "k", Responses: "http://127.0.0.1:1/v1",
+		Models: []string{"gpt-5.4", "plain"}})
+	for ref, levels := range map[string][]string{
+		"deepseek/pro":   {"low", "medium", "high"},
+		"deepseek/flash": {"low", "high"},
+		"resp/grok-5":    {"xhigh"},
+		"oa/gpt-5.4":     {"low", "medium", "high"},
+	} {
+		if err := provider.SetModelEfforts(ref, levels); err != nil {
+			t.Fatal(ref, err)
+		}
+	}
+	if err := provider.SetModelReasonless("oa/plain", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []provider.Group{
+		{ID: "gpt-5.4", Name: "Both", Members: []string{"deepseek/pro", "oa/gpt-5.4"}},
+		{ID: "apart", Name: "Apart", Members: []string{"deepseek/flash", "resp/grok-5"}},
+	} {
+		if err := provider.SaveGroup(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := droid(os.Getenv("HOME"))
+	if err := a.Apply("model", "magpie/deepseek/pro"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]any{ // reasoningEffort, baseModelId
+		"custom:magpie/deepseek/pro":   {"medium", nil},
+		"custom:magpie/deepseek/flash": {"high", nil},
+		"custom:magpie/resp/grok-5":    {"xhigh", nil},
+		"custom:magpie/oa/gpt-5.4":     {"medium", "gpt-5.4"},
+		"custom:magpie/oa/plain":       {nil, nil},
+		"custom:magpie/group/gpt-5.4":  {"medium", nil}, // never a built-in
+		"custom:magpie/group/apart":    {nil, nil},
+	}
+	check := func(when string, want map[string][2]any) {
+		t.Helper()
+		ms, _, _ := droidFile(t, path)
+		for id, w := range want {
+			e, ok := ms[id]
+			if !ok {
+				t.Errorf("%s: %s missing", when, id)
+				continue
+			}
+			if e["reasoningEffort"] != w[0] || e["baseModelId"] != w[1] {
+				t.Errorf("%s: %s reasoningEffort %v baseModelId %v, want %v %v", when, id, e["reasoningEffort"], e["baseModelId"], w[0], w[1])
+			}
+		}
+	}
+	check("written", want)
+
+	// what the user sets stays theirs, a field they took out stays out
+	var f map[string]any
+	json.Unmarshal([]byte(readFile(path)), &f)
+	for _, m := range f["customModels"].([]any) {
+		e := m.(map[string]any)
+		switch e["id"] {
+		case "custom:magpie/deepseek/pro":
+			e["reasoningEffort"] = "high"
+			e["baseModelId"] = "deepseek-v4"
+		case "custom:magpie/oa/gpt-5.4":
+			delete(e, "baseModelId")
+		}
+	}
+	b, _ := json.MarshalIndent(f, "", "  ")
+	os.WriteFile(path, b, 0o644)
+	want["custom:magpie/deepseek/pro"] = [2]any{"high", "deepseek-v4"}
+	want["custom:magpie/oa/gpt-5.4"] = [2]any{"medium", nil}
+	if err := a.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	check("after sync", want)
+	if err := a.Apply("model", "magpie/oa/gpt-5.4"); err != nil {
+		t.Fatal(err)
+	}
+	check("after apply", want)
+}

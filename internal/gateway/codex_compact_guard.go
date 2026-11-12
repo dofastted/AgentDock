@@ -125,6 +125,30 @@ func wantsWhole(ctx context.Context) bool {
 	return v
 }
 
+// compactionAskKey marks a request that is magpie's own summary ask for a
+// compaction (codexCompact). It is not Codex's turn: a provider that
+// isn't OpenAI's is given its developer messages as the system ones they
+// are (forVendor), while Codex's own turns keep the role the client sent.
+type compactionAskKey struct{}
+
+func asksCompaction(ctx context.Context) bool {
+	v, _ := ctx.Value(compactionAskKey{}).(bool)
+	return v
+}
+
+func askCompaction(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), compactionAskKey{}, true))
+}
+
+// askAsSent is a summary ask taken back to the roles the client sent,
+// after the swap was refused: the ChatGPT backend behind a relay takes
+// developer alone, and the summary went to it as system (forVendor,
+// #5067). Its turns, developer as they came, are taken, and the summary
+// goes the same way.
+func askAsSent(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), compactionAskKey{}, false))
+}
+
 func askWhole(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), wholeReplyKey{}, true))
 }

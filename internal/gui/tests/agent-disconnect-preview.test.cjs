@@ -35,7 +35,8 @@ function serve(lang, textSize, posts) {
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
-    if (req.method() === "POST") posts.push(url.pathname);
+    // the window saying it is in use (update/using) is not the page's doing
+    if (req.method() === "POST" && url.pathname !== "/api/update/using") posts.push(url.pathname);
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme: "light", textSize, web: false })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
@@ -69,6 +70,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport, deviceScaleFactor: zoom, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });

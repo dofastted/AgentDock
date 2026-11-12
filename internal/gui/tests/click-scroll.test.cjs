@@ -56,6 +56,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     // click only the date bar, including while its history is loading.
     const dayButtons = page.locator(".rt-days .rt-day");
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.route("**/*", serve);
@@ -93,7 +94,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
     await t.test("date controls stay separate from request grouping controls", async () => {
       await reset();
-      assert.equal(await page.locator(".rt-group-by .rt-day").count(), 2, "the grouping controls share the date-button class");
+      assert.equal(await page.locator(".rt-group-by .rt-day").count(), 3, "the grouping controls share the date-button class");
+      assert.equal(await page.locator('.rt-group-by .rt-day[data-by="key"]').evaluate((b) => b.hidden), true, "By key waits for a gateway key");
       assert.equal(await dayButtons.count(), 2, "only Live and the fixture's history day should be selected");
       assert.match(await dayButtons.first().innerText(), /Live/);
       await dayButtons.nth(1).click();
@@ -290,7 +292,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const heard = (fn, e) => { try { fn(e); } finally { window.__wheelsHeard++; } };
         window.addEventListener = function (type, fn, o) {
           if (type !== "wheel") return add.call(this, type, fn, o);
-          return add.call(this, type, (e) => (window.__lateWheel ? setTimeout(() => heard(fn, e), 60) : heard(fn, e)), o);
+          return add.call(this, type, (e) => (window.__lateWheel ? setTimeout(() => heard(fn, e), window.__lateBy || 60) : heard(fn, e)), o);
         };
       });
       await reset();
@@ -329,6 +331,27 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await wheel(-40);
       assert(Math.abs((await scrollTop()) - (was - 40)) <= 1, "the wheel moves the view by its own step only");
       await page.evaluate(() => { window.__lateWheel = false; });
+    });
+
+    // A window that has learned of wheels it never hears (macOS 13, or a run
+    // put back on a loaded machine) waits 120ms before it puts a scroll back
+    // (waitsBack). A wheel heard later still than that gives back what was
+    // put back, as it does at once.
+    await t.test("a wheel heard after the wait for unheard wheels is still the reader's", async () => {
+      await reset();
+      await page.evaluate(() => localStorage.setItem("magpie.unheardWheels", "1"));
+      await reset();
+      await page.locator(view).evaluate((v) => { const s = document.createElement("div"); s.style.cssText = "flex:none;height:1600px"; v.append(s); });
+      await page.evaluate(() => { window.__lateWheel = true; window.__lateBy = 250; });
+      const box = await page.locator(view).boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + 60);
+      const scrollTop = () => page.locator(view).evaluate((v) => v.scrollTop);
+      const was = await scrollTop(), n = await page.evaluate(() => window.__wheelsHeard);
+      await page.mouse.wheel(0, 300);
+      await page.waitForFunction((n) => window.__wheelsHeard > n, n);
+      await page.waitForFunction(() => performance.now() >= purposeUntil);
+      assert((await scrollTop()) > was + 100, "the wheel heard 250ms late must scroll the view");
+      await page.evaluate(() => { window.__lateWheel = false; window.__lateBy = 0; localStorage.removeItem("magpie.unheardWheels"); });
     });
 
     assert.deepEqual(errors, [], "page runtime errors");

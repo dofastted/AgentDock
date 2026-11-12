@@ -43,12 +43,18 @@ func fresh(t *testing.T) {
 	restingUntil.Lock()
 	restingUntil.m = map[string]time.Time{}
 	restingUntil.Unlock()
+	codexHolds.Lock()
+	codexHolds.m = nil
+	codexHolds.Unlock()
 	sticks.Lock()
 	sticks.m = map[string]stick{}
 	sticks.Unlock()
 	refusedSeals.Lock()
 	refusedSeals.m = map[string]sealsRefused{}
 	refusedSeals.Unlock()
+	overflowLearned.Lock()
+	overflowLearned.m = map[string]map[string]refusedLong{}
+	overflowLearned.Unlock()
 	turnRules.Lock()
 	turnRules.m = map[string]turnRule{}
 	turnRules.Unlock()
@@ -61,6 +67,7 @@ func fresh(t *testing.T) {
 	provider.ForgetCopilotForTest()
 	provider.ForgetRemoteCardsForTest()
 	provider.ForgetKeptCardsForTest()
+	provider.ForgetCodexClientsForTest()
 	remoteRefreshes.Lock()
 	remoteRefreshes.at = map[string]time.Time{}
 	remoteRefreshes.Unlock()
@@ -74,7 +81,7 @@ func fresh(t *testing.T) {
 // rather than a turn on, or with a failure already counted.
 func forgetRouting() {
 	routed.Lock()
-	routed.used, routed.failures, routed.slow = map[string]tokenUse{}, map[string]int{}, map[string]slowRun{}
+	routed.used, routed.failures, routed.slow, routed.answered = map[string]tokenUse{}, map[string]int{}, map[string]slowRun{}, map[string]time.Time{}
 	routed.Unlock()
 	routes.Forget()
 }
@@ -258,6 +265,21 @@ func TestRoutingGroups(t *testing.T) {
 	r := s.trace.routes[len(s.trace.routes)-1]
 	if r.Group == nil || r.Group.ID != "mine" || len(r.Order) != 2 || r.Order[0].Provider != "b" || r.Order[1].Model != "only-a" {
 		t.Fatalf("trace: %+v", r)
+	}
+
+	// renamed, the group still takes requests on its old id (xinvxueyuan
+	// on Discord); renamed back, it is its own id again
+	if err := provider.RenameGroup("mine", "ours"); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := postAs(t, s, "", `{"model":"group/mine","messages":[{"role":"user","content":"hi"}]}`); code != 200 || !strings.Contains(body, "from ka") {
+		t.Fatalf("old id: %d %s", code, body)
+	}
+	if r := s.trace.routes[len(s.trace.routes)-1]; r.Group == nil || r.Group.ID != "ours" {
+		t.Fatalf("old id trace: %+v", r)
+	}
+	if err := provider.RenameGroup("ours", "mine"); err != nil {
+		t.Fatal(err)
 	}
 
 	// removing one magpie found hides it; showing it brings it back

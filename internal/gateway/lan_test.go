@@ -172,32 +172,129 @@ func TestPublicURLShared(t *testing.T) {
 	}
 }
 
-// A container is known by Docker's or Podman's marker file, or a runtime
-// in PID 1's cgroup; a plain system has none of them.
+// A container is known by Docker's or Podman's marker file, a runtime in
+// PID 1's cgroup, a container's init or magpie as PID 1, or a cgroup v2
+// namespace's root on an overlay root filesystem (Docker's default under
+// cgroup v2 names no runtime, and a NAS's runtime may write no marker:
+// mtoolstec on X, LazyCat). A plain system has none of them, a systemd
+// host on an overlay root included.
 func TestInContainer(t *testing.T) {
-	mk := func(file, body string) string {
+	mk := func(files map[string]string) string {
 		root := t.TempDir()
-		if file != "" {
+		for file, body := range files {
 			p := filepath.Join(root, file)
 			os.MkdirAll(filepath.Dir(p), 0o755)
 			os.WriteFile(p, []byte(body), 0o644)
 		}
 		return root
 	}
+	const (
+		overlay = "22 1 0:21 / / rw,relatime - ext4 /dev/sda1 rw\n" +
+			"512 480 0:52 / / rw,relatime master:1 - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w\n" +
+			"513 512 0:55 / /proc rw,nosuid - proc proc rw\n"
+		ext4  = "22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n23 22 0:5 / /proc rw - proc proc rw\n"
+		btrfs = "30 1 0:27 /@ / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw\n"
+	)
 	for _, c := range []struct {
-		file, body string
-		want       bool
+		name  string
+		files map[string]string
+		want  bool
 	}{
-		{"", "", false},
-		{"proc/1/cgroup", "0::/init.scope\n", false},
-		{".dockerenv", "", true},
-		{"run/.containerenv", "", true},
-		{"proc/1/cgroup", "12:pids:/docker/4f1c…\n", true},
-		{"proc/1/cgroup", "0::/kubepods/besteffort/pod1\n", true},
+		{"nothing", nil, false},
+		{"systemd host", map[string]string{"proc/1/cgroup": "0::/init.scope\n", "proc/1/comm": "systemd\n", "proc/1/mountinfo": ext4}, false},
+		{"systemd host on overlayroot", map[string]string{"proc/1/cgroup": "0::/init.scope\n", "proc/1/comm": "systemd\n", "proc/1/mountinfo": overlay}, false},
+		{"cgroup-less init host", map[string]string{"proc/1/cgroup": "0::/\n", "proc/1/comm": "init\n", "proc/1/mountinfo": btrfs}, false},
+		{"WSL", map[string]string{"proc/1/cgroup": "0::/\n", "proc/1/comm": "init\n", "proc/1/mountinfo": ext4}, false},
+		{".dockerenv", map[string]string{".dockerenv": ""}, true},
+		{".containerenv", map[string]string{"run/.containerenv": ""}, true},
+		{"cgroup v1 docker", map[string]string{"proc/1/cgroup": "12:pids:/docker/4f1c…\n"}, true},
+		{"kubepods", map[string]string{"proc/1/cgroup": "0::/kubepods/besteffort/pod1\n"}, true},
+		{"cgroup v2 namespace on overlay", map[string]string{"proc/1/cgroup": "0::/\n", "proc/1/comm": "sh\n", "proc/1/mountinfo": overlay}, true},
+		{"magpie as PID 1", map[string]string{"proc/1/cgroup": "0::/\n", "proc/1/comm": "magpie\n", "proc/1/mountinfo": btrfs}, true},
+		{"docker --init", map[string]string{"proc/1/comm": "docker-init\n"}, true},
+		{"tini", map[string]string{"proc/1/comm": "tini\n"}, true},
 	} {
-		if got := inContainer(mk(c.file, c.body)); got != c.want {
-			t.Errorf("%s %q: %v", c.file, c.body, got)
+		if got := inContainer(mk(c.files)); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// In a LazyCat (懒猫微服) app magpie sees only its container's address,
+// and Settings offered http://172.28.3.65:3425 under "Share on local
+// network" (mtoolstec on X). LazyCat names the app's domain in
+// LAZYCAT_APP_DOMAIN, and the app is reached there over HTTPS: it is the
+// address shared, unless MAGPIE_PUBLIC_URL names another. A package's
+// MAGPIE_PUBLIC_URL template a system didn't render is no address, and
+// LazyCat's is used instead.
+func TestLazyCatPublicURL(t *testing.T) {
+	// an app's container on the box's bridge (lazycat_test.go)
+	lazyCatNet(t, []string{"lo", "eth0"}, map[string][]string{"eth0": {"172.28.3.66"}}, bridgeRoutes, "172.28.3.65")
+	inThisContainer = func() bool { return inContainer("/") }
+	t.Setenv("MAGPIE_ADDR", "0.0.0.0:3425")
+	t.Setenv("MAGPIE_PUBLIC_URL", "")
+	t.Setenv("LAZYCAT_APP_DOMAIN", "")
+	if got := PublicURL(); got != "" {
+		t.Fatalf("outside LazyCat: %q", got)
+	}
+	for _, c := range []struct{ public, domain, want string }{
+		{"", "magpie.snyht3.heiyu.space", "https://magpie.snyht3.heiyu.space"},
+		{"", " Magpie.Snyht3.heiyu.space\n", "https://magpie.snyht3.heiyu.space"},
+		{"https://{{.S.AppDomain}}", "magpie.snyht3.heiyu.space", "https://magpie.snyht3.heiyu.space"},
+		{"https://ai.example.com", "magpie.snyht3.heiyu.space", "https://ai.example.com"},
+		{"", "https://magpie.snyht3.heiyu.space", ""},
+		{"", "magpie", ""},
+		{"", "magpie.box.heiyu.space/x", ""},
+		{"", "-a.heiyu.space", ""},
+	} {
+		t.Setenv("MAGPIE_PUBLIC_URL", c.public)
+		t.Setenv("LAZYCAT_APP_DOMAIN", c.domain)
+		if got := PublicURL(); got != c.want {
+			t.Errorf("MAGPIE_PUBLIC_URL=%q LAZYCAT_APP_DOMAIN=%q: %q, want %q", c.public, c.domain, got, c.want)
+			continue
+		}
+		if c.want == "" {
+			continue
+		}
+		if got := LANURLs(); !slices.Equal(got, []string{c.want}) {
+			t.Errorf("LAZYCAT_APP_DOMAIN=%q: shared at %v, want %s", c.domain, got, c.want)
+		}
+		if ContainerAddrs() {
+			t.Errorf("LAZYCAT_APP_DOMAIN=%q: the addresses are said to be a container's", c.domain)
+		}
+		if !InContainer() {
+			t.Errorf("LAZYCAT_APP_DOMAIN=%q: not in a container", c.domain)
+		}
+	}
+}
+
+// A container on the host's network (network_mode: host, as NAS panels
+// offer) sees the host's interfaces, Docker's bridges among them, and its
+// addresses are the host's: they aren't said to be a container's own. A
+// container on a bridge network has its eth0 alone (jiezhengj on Discord:
+// magpie in Docker on a NAS).
+func TestHostNetwork(t *testing.T) {
+	for _, c := range []struct {
+		names []string
+		want  bool
+	}{
+		{[]string{"lo", "eth0"}, false},
+		{[]string{"lo", "eth0", "eth1"}, false},
+		{[]string{"lo", "eth0", "docker0", "br-3f1c2a9b0d4e", "veth1a2b3c4"}, true},
+		{[]string{"lo", "ovs_eth0", "docker0"}, true},
+		{[]string{"lo", "enp3s0", "cni-podman0"}, true},
+		{[]string{"lo", "eth0", "podman0"}, true},
+	} {
+		if got := hostNetwork(c.names); got != c.want {
+			t.Errorf("%v: %v, want %v", c.names, got, c.want)
+		}
+	}
+	was := ifaceNames
+	t.Cleanup(func() { ifaceNames = was })
+	t.Setenv("MAGPIE_PUBLIC_URL", "")
+	ifaceNames = func() []string { return []string{"lo", "eth0", "docker0"} }
+	if ContainerAddrs() {
+		t.Error("on the host's network, the addresses are said to be a container's")
 	}
 }
 
@@ -335,14 +432,15 @@ func TestNetworkGatewayGuardsEveryRoute(t *testing.T) {
 		{"GET", "/api/version"}, {"GET", "/api/tags"}, {"POST", "/api/show"},
 		{"GET", "/v1/magpie/quotas"}, {"GET", "/v1/magpie/quotas/history"},
 		{"GET", provider.RemoteCardsPath}, {"POST", provider.RemoteRefreshPath},
+		{"POST", provider.RemoteCodexResetPath + "?user=me@example.com"},
 		{"GET", "/v1/magpie/route?session=s"}, {"GET", "/v1/magpie/concurrency"}, {"GET", "/v1/magpie/limit"},
 		{"POST", "/v1/chat/completions"}, {"POST", "/chat/completions"},
 		{"POST", "/v1/responses"}, {"POST", "/responses"}, {"GET", "/v1/responses"}, {"GET", "/responses"},
 		{"POST", "/v1/messages"}, {"POST", "/messages"}, {"POST", "/v1/messages/count_tokens"},
 		{"POST", "/v1/systemone"},
 		{"POST", "/v1/images/generations"}, {"POST", "/v1/images/edits"},
-		{"POST", "/v1/embeddings"}, {"POST", "/v1/rerank"},
-		{"POST", "/v1/audio/transcriptions"}, {"POST", "/v1/audio/translations"},
+		{"POST", "/v1/embeddings"}, {"POST", "/v1/rerank"}, {"POST", "/v1/decisions"},
+		{"POST", "/v1/audio/transcriptions"}, {"POST", "/v1/audio/translations"}, {"POST", "/v1/audio/speech"},
 		{"POST", "/v1/videos"}, {"GET", "/v1/videos/v1"}, {"GET", "/v1/videos/v1/content"},
 		{"POST", "/_magpie/claude-mcp/tok"}, {"POST", "/mcp/neon"},
 		{"POST", CodexPath + "/responses"}, {"GET", CodexCatalogPath},
@@ -386,5 +484,67 @@ func TestNetworkGatewayGuardsEveryRoute(t *testing.T) {
 	}
 	if c, b := call("GET", "/v1/models", "127.0.0.1:5000", "Authorization", "Bearer magpie"); c != 200 {
 		t.Fatal("loopback:", c, b)
+	}
+}
+
+// TestDefaultGateway reads the bridge's gateway from a container's
+// /proc/net/route, as Docker's default bridge writes it (jiezhengj's NAS:
+// other containers reach the host at 172.17.0.1).
+func TestDefaultGateway(t *testing.T) {
+	const docker = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n" +
+		"eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n" +
+		"eth0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+	for _, c := range []struct{ name, table, want string }{
+		{"docker's default bridge", docker, "172.17.0.1"},
+		{"a compose network", "Iface\tDestination\tGateway\tFlags\neth0\t000013AC\t00000000\t0001\neth0\t00000000\t010013AC\t0003\n", "172.19.0.1"},
+		{"no default route", "Iface\tDestination\tGateway\tFlags\neth0\t000011AC\t00000000\t0001\n", ""},
+		{"a default route without a gateway", "Iface\tDestination\tGateway\tFlags\neth0\t00000000\t00000000\t0001\n", ""},
+		{"no table (not Linux)", "", ""},
+	} {
+		if got := defaultGateway(c.table); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+	// in a container it is offered on the gateway's port; on the host's
+	// network, where the addresses are the host's own, it is not
+	t.Cleanup(func(rt func() string, ifn func() []string, in func() bool) func() {
+		return func() { routeTable, ifaceNames, inThisContainer = rt, ifn, in }
+	}(routeTable, ifaceNames, inThisContainer))
+	routeTable = func() string { return docker }
+	ifaceNames = func() []string { return []string{"lo", "eth0"} }
+	inThisContainer = func() bool { return true }
+	if got, want := ContainerHostURL(), Scheme()+"://172.17.0.1:"+Port(); got != want {
+		t.Errorf("in a container: %q, want %q", got, want)
+	}
+	ifaceNames = func() []string { return []string{"lo", "eth0", "docker0"} }
+	if got := ContainerHostURL(); got != "" {
+		t.Errorf("on the host's network: %q, want none", got)
+	}
+	ifaceNames = func() []string { return []string{"lo", "eth0"} }
+	inThisContainer = func() bool { return false }
+	if got := ContainerHostURL(); got != "" {
+		t.Errorf("not in a container: %q, want none", got)
+	}
+}
+
+// A private network's address is never called the internet's: RFC 1918's
+// (a NAS's 192.168.31.218, Docker's 172.17.0.1), Tailscale's, IPv6's own
+// private range. A name isn't looked up.
+func TestURLKind(t *testing.T) {
+	for u, want := range map[string]string{
+		"http://192.168.31.218:3425":    "local",
+		"http://172.17.0.1:3425":        "local",
+		"http://10.0.0.5:3425":          "local",
+		"http://100.101.102.103:3425":   "local",
+		"http://[fd12:3456::1]:3425":    "local",
+		"http://203.0.113.9:3425":       "internet",
+		"http://[2001:4860::8888]:3425": "internet",
+		"https://magpie.example.com":    "",
+		"http://nas.local:3425":         "",
+		"":                              "",
+	} {
+		if got := URLKind(u); got != want {
+			t.Errorf("URLKind(%q) = %q, want %q", u, got, want)
+		}
 	}
 }

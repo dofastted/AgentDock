@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/privacy">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/privacy">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/privacy">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/privacy">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/privacy">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="隐私">
 <meta property="og:description" content="magpie 自己发出的所有内容，以及怎么关掉。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/privacy">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "隐私",
+   "description": "magpie 自己会发出什么、发到哪里：每天一次的用户计数、更新检查和其他公开列表、usemagpie.ai 能看到什么、OTLP 导出，以及关闭它们的每个开关。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/privacy",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "隐私",
+     "item": "https://usemagpie.ai/docs/zh/privacy"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -110,6 +170,7 @@
       <li><b>模型</b>：接入的 agent 设定的模型，记为供应商 ID 加厂商模型 ID（<code>deepseek/deepseek-v4</code>）。密钥类供应商上 <a href="https://models.dev">models.dev</a> 没收录的模型 ID（本地模型、微调模型）只记作 <code>&lt;供应商&gt;/other</code>；你自己供应商上的模型记作 <code>custom</code>；路由组记作 <code>group</code>。</li>
     </ul>
     <p>同时发送 <code>magpie partner</code> 事件：添加供应商页里排在最前的每个合作伙伴，按它的 ID，在已结束的某一天里被展示、行被打开、Key 页面被打开、从它添加供应商的次数（<code>what</code>：<code>shown</code>、<code>opened</code>、<code>keys</code>、<code>added</code>；每天每项最多 20 次，添加最多 5 次）。只有次数，从不包含你自己的供应商。</p>
+    <p id="plugins">这部分开着时，magpie 当天还会告诉 <code>usemagpie.ai</code> 装了 Discover 里列出的哪些插件（且已开启），让 Discover 显示每个插件有多少人在用：<code>POST /api/plugins/report</code>，带同一个随机 ID 和插件的 npm 包名；打了 <code>magpie-plugin</code> 标签的仓库记作 <code>github:owner/repo</code>（最多 50 个）。来自本地文件夹、私有仓库或 Discover 没列出的包的插件，永远不会发送。在插件页点赞时发 <code>POST /api/plugins/like</code>，带 ID、插件名和点赞还是取消，只有本机装了的插件才能点赞；点过赞的插件记在 <code>plugin-likes.json</code>。网站只统计近 7 天上报过某个插件的 ID 数，30 天后删除上报记录；你的 IP 只以哈希形式保存一小时，用来限制请求频率。Discover 从 <code>GET /api/plugins/stats</code> 读取计数，这个请求不带 ID。代码见 <a href="https://github.com/yetone/magpie/blob/main/internal/stats/plugins.go">internal/stats/plugins.go</a> 和 <a href="https://github.com/yetone/magpie/blob/main/site/pluginstats.js">site/pluginstats.js</a>。</p>
     <p>每个事件都带 <code>$process_person_profile: false</code>，PostHog 不为这个 ID 建用户档案。不发送名称、Base URL、账号、密钥、提示词、回复和用量。一整批大致如下：</p>
     <div class="code">
       <span class="lang">POST https://us.i.posthog.com/batch/</span>
@@ -143,7 +204,7 @@
     <ul>
       <li>关掉 <span class="ui">设置</span> → <span class="ui">隐私</span> → <span class="ui">计入用户数</span>，或在 <code>settings.json</code> 里写 <code>"noStats": true</code>：整个每日计数。</li>
       <li>在 magpie 的环境变量里设 <code>DO_NOT_TRACK=1</code> 或 <code>MAGPIE_NO_STATS=1</code>（除空、<code>0</code>、<code>false</code> 之外的任何值）：整个每日计数，不管设置里怎么选。</li>
-      <li>关掉 <span class="ui">设置</span> → <span class="ui">隐私</span> → <span class="ui">分享我用的 agent、provider 和模型</span>，或 <code>"noUsageStats": true</code>：<code>magpie uses</code>、<code>magpie partner</code> 事件和 <code>magpie active</code> 里的数量；ID、版本和系统仍会发送。合作伙伴次数也不再记录。</li>
+      <li>关掉 <span class="ui">设置</span> → <span class="ui">隐私</span> → <span class="ui">分享我用的 agent、provider、模型和插件</span>，或 <code>"noUsageStats": true</code>：<code>magpie uses</code>、<code>magpie partner</code> 事件、<code>magpie active</code> 里的数量和<a href="#plugins">插件上报</a>；ID、版本和系统仍会发送。合作伙伴次数也不再记录。</li>
       <li>关掉 <span class="ui">设置</span> → <span class="ui">关于</span> → <span class="ui">自动更新</span>，或 <code>"noAutoUpdate": true</code>：magpie 自己向 <code>usemagpie.ai</code> 询问新版本（否则每 6 小时一次）。这不属于计数。</li>
     </ul>
     <p>设置里的改动在下一次每小时检查时生效，不用重启。<code>settings.json</code> 在 magpie 的文件夹里（见<a href="#files">下文</a>）：</p>
@@ -163,26 +224,30 @@
       <tr><th>文件</th><th>用途</th></tr>
       <tr><td><code>install-id</code></td><td>随机 ID，第一次发送计数时生成</td></tr>
       <tr><td><code>stats-sent</code></td><td>上次发送的日期（UTC），保证每天只发一次</td></tr>
+      <tr><td><code>plugin-likes.json</code></td><td>你在 Discover 里点过赞的插件</td></tr>
       <tr><td><code>partner-counts.json</code>（缓存文件夹）</td><td>还没发送的合作伙伴次数，最多保留 14 天</td></tr>
     </table></div>
     <p><code>install-id</code> 和 <code>stats-sent</code> 在 magpie 的文件夹里：macOS 和 Linux 上是 <code>~/.config/magpie</code>，Windows 上是 <code>%USERPROFILE%\.config\magpie</code>，设置了 <code>$XDG_CONFIG_HOME</code> 时是 <code>$XDG_CONFIG_HOME/magpie</code>，便携版则在它的数据文件夹里。<code>partner-counts.json</code> 在 <code>~/.cache/magpie</code>（或 <code>$XDG_CACHE_HOME/magpie</code>，便携版数据文件夹里的 <code>cache</code>）。这些文件都可以删：删掉 <code>install-id</code> 后，下次发送会生成新的随机 ID，你会被算作新用户；关掉计数后，它们都不会再写入。</p>
     <p>请求存档（<span class="ui">用量</span>页请求列表上方的<span class="ui">请求存档</span>开关）<b>默认关闭</b>。同步没有 S3 存储桶时打开它，每次经过网关的调用的请求头和正文会存到 magpie 文件夹里的 <code>request-archive</code>，一次调用一个文件，只有你的用户能读，密钥按 S3 存档同样的方式遮掉。它最多占 1 GiB（settings.json 里的 <code>requestArchiveLocalMB</code>），超过后先删最早的调用。这个开关只属于这台电脑，同步不会在别的电脑上把它打开。有 S3 存储桶时调用存到桶里，这里不写任何东西。这个文件夹随时可以删。</p>
+    <p>应用会把它做了什么写进日志 <code>app.log</code>：macOS 上在 <code>~/Library/Logs/magpie</code>，Windows 上在 <code>%LOCALAPPDATA%\magpie\logs</code>，Linux 上在 <code>~/.local/state/magpie</code>（见 <a href="/docs/zh/start#log">magpie 的日志在哪里？</a>），只有你的用户能读。它记下 magpie 做了什么和遇到的错误，从不记密钥、提示词或回复，除非你发出去，否则只留在你的电脑上。它最多 5 MiB，另留一个更早的 <code>app.old.log</code>。随时可以删。</p>
 
     <h2 id="site"><a class="anchor" href="#site">usemagpie.ai 能看到什么</a></h2>
     <p>magpie 会向自己的网站请求几样东西，不受隐私设置影响，就像任何应用访问自己的更新服务器。这些请求都不带安装 ID 或账号。</p>
     <ul>
       <li><code>/api/latest</code>：更新信息，每 6 小时一次（开了 <code>noAutoUpdate</code> 则不请求），带 <code>?lang=</code> 取对应语言的说明；<span class="ui">设置</span> → <span class="ui">关于</span> → <span class="ui">更新渠道</span>选了稳定版时还带 <code>?channel=stable</code>。两者都不含你是谁。<code>/api/notes</code> 在更新后给出“新功能”。</li>
+      <li><code>/files/&lt;版本&gt;/&lt;文件&gt;</code>：更新和安装脚本下载的发布文件，由 Cloudflare R2 提供；站点上没有的文件会转到 github.com。不做任何统计。</li>
       <li><code>/api/partners</code>：添加供应商页的合作伙伴列表，每 6 小时一次。在有合作伙伴上架时，每十次拉取记一次 <code>magpie partners fetch</code> 事件，附 Cloudflare 给出的国家。</li>
       <li><code>/go/&lt;合作伙伴&gt;/site</code> 和 <code>/go/&lt;合作伙伴&gt;/keys</code>：在浏览器里打开合作伙伴的官网和 Key 页面链接时，先记一次 <code>magpie partner go</code>（哪个合作伙伴、哪个链接、地区、国家），再跳转。</li>
+      <li><code>/api/plugins/stats</code>：Discover 里每个插件的在用人数和点赞数，最多每小时取一次，不带 ID；<a href="#plugins">插件上报</a>和点赞带 ID，只在开着分享时发送。</li>
       <li><code>/api/icon?url=…</code>：插件、导入链接和库里的图标经它获取，图标所在的服务器只看到 Cloudflare 的地址，看不到你的。它只转发图片，不计数也不记录。</li>
     </ul>
-    <p>网站自己的页面（这些文档、首页）带 Cloudflare Web Analytics，不用 Cookie 统计页面访问。应用不加载它。代码见 <a href="https://github.com/yetone/magpie/blob/main/site/worker.js">site/worker.js</a>。</p>
+    <p>网站自己的页面（这些文档、首页）带 Cloudflare Web Analytics 和 PostHog Web Analytics（<code>us.i.posthog.com</code>），都不用 Cookie。PostHog 在浏览器的本地存储里为本站记一个随机访客 id，再次访问算同一位访客。它收到每个页面的地址、来源页面、你在页面上点了什么（不含输入的内容）、页面及其请求的加载速度、页面遇到的报错、浏览器、系统和屏幕尺寸、IP 所在的国家和城市，以及这次访问的录屏（页面显示的内容、鼠标移动、点击、滚动和控制台消息），所有输入框都被遮住；浏览器开了 Do Not Track 或 Global Privacy Control 就什么都不发。PostHog 的请求经由本站的 <code>usemagpie.ai/r/</code> 转给 PostHog，连同你的 IP 一起转发，本站的 Cookie 不转发。打开 <code>/download</code> 下载链接或获取 <code>install.sh</code> 时，会另外向 PostHog 发一次计数：哪个文件、你所在的国家、是浏览器还是命令发起的；不带 id，也不带 IP。应用两者都不加载。代码见 <a href="https://github.com/yetone/magpie/blob/main/site/worker.js">site/worker.js</a>。</p>
 
     <h2 id="lists"><a class="anchor" href="#lists">magpie 拉取的公开列表</a></h2>
     <p>为了给模型定价和命名，magpie 会拉取 <a href="https://models.dev">models.dev</a> 的模型目录（<code>models.dev/api.json</code>）；为了用你的货币显示价格，会从 <code>open.er-api.com</code> 拉取美元汇率（缓存 12 小时）。插件及其更新来自 npm 仓库，库里的内容来自 GitHub。这些都是公开数据的普通下载，不发送任何关于你、你的供应商或用量的信息；和任何请求一样，这些主机能看到你的 IP（或代理的 IP）。magpie 还会用你自己的密钥或登录向各个供应商读取额度和模型列表；<span class="ui">设置</span> → <span class="ui">额度</span> → <span class="ui">额度刷新</span> → <span class="ui">仅手动</span> 可以只在你要求时才读。</p>
 
     <h2 id="otel"><a class="anchor" href="#otel">OTLP 导出</a></h2>
-    <p>magpie 可以把每个网关请求导出到你自己的 OpenTelemetry 收集器（比如 Langfuse）。它<b>默认关闭</b>，只发到你设置的地址，从不发给我们。开启后发送每个请求的 span：agent、供应商、模型、token 数、状态、耗时和估算费用。另有开关可以加上指标、本地 agent 对话，以及请求和回复正文（密钥已遮盖）。在 <span class="ui">设置</span> → <span class="ui">可观测性</span> 里开启，<code>magpie serve</code> 也可以用 <code>MAGPIE_OTEL_ENABLED</code>、<code>MAGPIE_OTEL_ENDPOINT</code>、<code>MAGPIE_OTEL_HEADERS</code>、<code>MAGPIE_OTEL_METRICS</code>、<code>MAGPIE_OTEL_SESSIONS</code>、<code>MAGPIE_OTEL_BODIES</code> 和 <code>MAGPIE_OTEL_BODIES_WHOLE</code>。只设地址不会开启导出。用 Langfuse 的话，在那里选 <span class="ui">Langfuse</span>，填上地址和项目的两个密钥，magpie 会据此生成地址和认证头。细节见<a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#otlp-export">参考文档</a>。</p>
+    <p>magpie 可以把每个网关请求导出到你自己的 OpenTelemetry 收集器（比如 Langfuse）。它<b>默认关闭</b>，只发到你设置的地址，从不发给我们。开启后发送每个请求的 span：agent、供应商、模型、请求所用网关密钥的名称（你起的名字，从不发送密钥本身）、token 数、状态、耗时和估算费用。另有开关可以加上指标、本地 agent 对话，以及请求和回复正文（密钥已遮盖）。在 <span class="ui">设置</span> → <span class="ui">可观测性</span> 里开启，<code>magpie serve</code> 也可以用 <code>MAGPIE_OTEL_ENABLED</code>、<code>MAGPIE_OTEL_ENDPOINT</code>、<code>MAGPIE_OTEL_HEADERS</code>、<code>MAGPIE_OTEL_METRICS</code>、<code>MAGPIE_OTEL_SESSIONS</code>、<code>MAGPIE_OTEL_BODIES</code> 和 <code>MAGPIE_OTEL_BODIES_WHOLE</code>。只设地址不会开启导出。用 Langfuse 的话，在那里选 <span class="ui">Langfuse</span>，填上地址和项目的两个密钥，magpie 会据此生成地址和认证头。每次导出的 resource 是 <code>service.name=magpie</code>，再加上你自己在 <code>OTEL_RESOURCE_ATTRIBUTES</code> 和 <code>OTEL_SERVICE_NAME</code> 里设置的值（比如服务器名），不会读取你机器上的任何信息。细节见<a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#otlp-export">参考文档</a>。</p>
 
     <h2 id="masking"><a class="anchor" href="#masking">发给供应商的内容脱敏</a></h2>
     <p>上面几节讲的是 magpie 自己发出的东西。你的 Agent 发出的内容会去往你选的供应商，<b>隐私脱敏</b>让其中的密钥留在这台电脑上。它<b>默认关闭</b>，在 <span class="ui">设置</span> → <span class="ui">隐私</span> 里打开。</p>
@@ -216,10 +281,20 @@
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

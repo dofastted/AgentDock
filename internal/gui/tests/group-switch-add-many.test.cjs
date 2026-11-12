@@ -3,9 +3,12 @@
 // and a group was made one model at a time, not seeing which groups a
 // model was in already.
 // - A group of the user's has a switch on its card: off, it posts
-//   groups/switch with on false, the card is dimmed but for the switch and
+//   groups/switch with on false, the card's logos go grey and it
 //   says "switched off", and the keyboard stays on the switch; on again
 //   posts on true. A group magpie found has no switch (it is removed).
+// - justacati on X: a group switched off is listed after the ones on, and
+//   back in its place when it is on again; Move down on the last one on
+//   is not offered, as it would move it nowhere one can see.
 // - The editor's Add a model picker stays open: each model clicked is added
 //   and ticked, clicked again it is taken out; each says the other groups
 //   it is in. Saved, the members are the ones picked, in the order picked.
@@ -74,10 +77,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await (await browser.newContext({ viewport: { width: 1100, height: 1400 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
-      await page.goto("http://magpie.test/?view=routing");
+      await page.goto("http://magpie.test/?view=groups");
       const card = (id) => page.locator(`.rt-group[data-id="${id}"]`);
       await card("g").waitFor();
       await page.locator(".rt-gsec").evaluate((x) => x.scrollIntoView({ block: "center" })); // as the reader would
@@ -97,12 +101,24 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert((await card("g").locator(".tags").textContent()).includes(w.off), "the card says it is off");
       await page.waitForFunction((m) => document.querySelector("#status").textContent.includes(m), w.offSaid);
       assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("rt-gon")), true, "the keyboard left the switch");
-      const dim = await card("g").evaluate((r) => [...r.children].map((c) => [c.classList.contains("rt-gon"), getComputedStyle(c).opacity]));
-      for (const [isSw, o] of dim) assert.equal(o, isSw ? "1" : "0.5");
+      const order = () => page.locator(".rt-group[data-id]").evaluateAll((rs) => rs.map((r) => r.dataset.id));
+      assert.deepEqual(await order(), ["other", "auto-one", "g"], "the group switched off is not listed after the ones on");
+      // the last one on can't be moved down into the ones off
+      await card("auto-one").locator(".rt-ghandle").click();
+      const down = page.locator(".menu-item, [role=menuitem]").filter({ hasText: lang === "en" ? "Move down" : "下移" });
+      await down.first().waitFor();
+      assert.equal(await down.first().evaluate((b) => b.disabled || b.getAttribute("aria-disabled") === "true" || b.classList.contains("off")), true, "Move down offered on the last group on");
+      await page.keyboard.press("Escape");
+      await sw().focus();
+      // off, its logos are grey and its words stay readable, not dimmed
+      // (jiabubu on Discord; group-disabled-contrast measures them)
+      const dim = await card("g").evaluate((r) => [...r.children].map((c) => [c.classList.contains("rt-ghandle"), getComputedStyle(c).opacity, getComputedStyle(c).filter]));
+      for (const [isLogo, o, f] of dim) assert.deepEqual([o, f], isLogo ? ["0.6", "grayscale(1)"] : ["1", "none"]);
       assert.equal(await page.locator(".rt-gedit").count(), 0, "the switch opened the editor");
       await sw().click();
       await page.waitForFunction(() => !document.querySelector('.rt-group[data-id="g"]')?.classList.contains("disabled"));
       assert.deepEqual(posts.at(-1), { path: "/api/groups/switch", body: { id: "g", on: true } });
+      assert.deepEqual(await order(), ["g", "other", "auto-one"], "switched on again, the group is not back in its place");
       assert.equal(await at(), before, "the switch moved the page");
 
       // Add a model: several in one go

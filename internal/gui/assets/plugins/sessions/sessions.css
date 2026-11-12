@@ -19,6 +19,7 @@
 .sm-filter { width: 200px; flex: 0 1 200px; min-width: 110px; }
 .sm-trash-btn { display: inline-flex; align-items: center; gap: 5px; flex: none; }
 .sm-trash-btn.on { background: var(--pill); color: var(--fg); }
+.sm-toset { flex: none; white-space: nowrap; }
 .sm-body { display: flex; flex-direction: column; gap: 8px; flex: none; }
 .sm-note { margin: 0 2px; }
 /* where a session said what was searched for, the words themselves marked */
@@ -30,7 +31,7 @@
 .sm-bar .sm-delete:disabled { opacity: .45; }
 .sm-count { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sm-check { flex: none; margin: 0; width: 14px; height: 14px; accent-color: var(--accent); }
-.sm-tree { display: flex; flex-direction: column; gap: 8px; }
+.sm-tree { display: flex; flex-direction: column; gap: 8px; container: sm-tree / inline-size; }
 .sm-group .skeleton.sk-line { width: 60%; height: 12px; }
 .sm-select.on { background: var(--pill); color: var(--fg); }
 /* the folders are one list, parted by hairlines, never a card each; the
@@ -63,6 +64,15 @@ body.window .sm-group .row.sm-sess { padding-left: 32px; }
 .row.sess .sm-del:hover { color: var(--red); background: var(--red-soft); }
 /* carrying a session on in another agent, and its conversation (#845) */
 .row.sm-sess .sess-carry { height: 24px; color: var(--fg); }
+/* a control's room on a row without it (the icons' are .copy, as wide), so every row's columns line up
+   (ysm119 on Discord); and Resume is as wide when it says Copied */
+.sm-slot { visibility: hidden; pointer-events: none; }
+.sm-slot-resume { flex: none; height: 24px; padding: 0 10px; border: 0; border-radius: 7px; font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+.row.sm-sess .sm-slot-carry { height: 24px; }
+.row.sm-sess [data-wide]::before, .row.sm-sess [data-wide]::after { content: attr(data-wide); display: block; height: 0; overflow: hidden; visibility: hidden; }
+.row.sm-sess [data-wide]::after { content: attr(data-wide2); }
+.row.sess .sm-del.off { opacity: .4; cursor: default; }
+.row.sess .sm-del.off:hover { color: var(--muted); background: none; }
 .pop.proto-menu.sess-carry-menu { width: min(300px, calc(100vw - 16px)); background: var(--card); }
 .sess-talk-btn, .sess-export { height: 22px; padding: 0 8px; font-size: 11.5px; }
 .sess-talk { max-height: min(560px, 70vh); overflow-y: auto; margin-top: 4px; padding: 8px 10px 4px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--bg); }
@@ -86,13 +96,32 @@ body.window .sm-group .row.sm-sess { padding-left: 32px; }
      scrolled and its scrollbar took 10px */
   .row.sess.sm-sess { gap: 8px; }
 }
+/* the list's own width, not the window's: beside the sidebar a 780px
+   window left a row's title "7" of its name, its tokens, cost, Resume and
+   Continue in taking the rest (cybercaius on Discord) */
+@container sm-tree (max-width: 700px) {
+  .row.sm-sess .num { display: none; }
+  .row.sm-sess .cost { min-width: 0; }
+  .row.sess.sm-sess { gap: 8px; }
+}
+/* narrower still, the title has the first line to itself and what is done
+   with the session goes under it, on the right */
+@container sm-tree (max-width: 600px) {
+  .row.sess.sm-sess { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; padding-top: 7px; padding-bottom: 7px; }
+  .row.sm-sess > .who { flex-basis: 100%; }
+  .row.sm-sess:has(> .sm-check) > .who { flex-basis: calc(100% - 22px); }
+  /* the title has its own line: the cost keeps its width again, so each
+     row's second line wraps at the same place and lines up (ysm119) */
+  .row.sm-sess .cost { min-width: 58px; }
+}
 @media (max-width: 420px) {
-  .sm-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 6px; }
+  .sm-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; row-gap: 6px; }
   .sm-switch { grid-column: 1 / -1; }
   .sm-agent-pick { max-width: 100%; }
   .sm-filter { grid-column: 1; grid-row: 2; width: 100%; min-width: 0; }
   .sm-select { grid-column: 2; grid-row: 2; }
   .sm-trash-btn { grid-column: 3; grid-row: 2; justify-self: end; }
+  .sm-toset { grid-column: 4; grid-row: 2; }
 }
 /* Codex sessions made with another provider, hidden from Codex's history (#887) */
 .row.sm-provider { gap: 10px; min-height: 40px; padding: 8px 11px; height: auto; }
@@ -105,6 +134,9 @@ body.window .sm-group .row.sm-sess { padding-left: 32px; }
 .sm-provider-list li .name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sm-provider-list li .note { flex: none; font-size: 11px; color: var(--faint); }
 .sm-provider-list { max-height: min(300px, 45vh); overflow-y: auto; }
+.sm-provider-pick { grid-column: 1 / -1; min-width: 0; display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; }
+.sm-provider-pick .grow { flex: 1; }
+.sm-provider-pick .text { flex: none; font-size: 12px; }
 /* Recording gateway conversations (#1355): a setting card above the list,
    its switch, what it keeps and where, and a labelled delete */
 .list.row.sm-record { gap: 6px 12px; min-height: 48px; padding: 9px 11px 9px 13px; height: auto; flex-wrap: wrap; }
@@ -136,3 +168,48 @@ body.window .row.sm-sub-row { min-height: 42px; padding-left: calc(14px + var(--
 @media (max-width: 560px) {
   .sm-subs { --sub-step: 10px; padding-left: calc(12px + var(--sub-depth, 0) * var(--sub-step)); padding-right: 8px; }
 }
+
+/* the consent (RustCats on X): which agents' sessions may be read, asked
+   before any is; a plain grouped list of switches, as System Settings */
+.sm-consent { display: flex; flex-direction: column; gap: 10px; max-width: 560px; margin: 8px auto 16px; padding: 18px 18px 16px; border-radius: 12px; background: var(--card, var(--bg)); box-shadow: 0 0 0 0.5px var(--line); }
+.sm-consent-title { font-size: 14px; font-weight: 600; color: var(--fg); }
+.sm-consent-sub, .sm-consent-none { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.sm-consent-list { margin: 2px 0 0; }
+.sm-consent-row { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 6px 12px; cursor: pointer; }
+.sm-consent-row > svg, .sm-consent-row > img { flex: none; width: 16px; height: 16px; }
+.sm-consent-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--fg); }
+.sm-consent-row .lib-switch { flex: none; cursor: pointer; padding: 0; border: 0; }
+.sm-consent-row .lib-switch:disabled { opacity: .5; cursor: default; }
+.sm-consent-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+/* a session's output speed (session_speed.go): its last two minutes and
+   tokens a second now, opening the round's numbers */
+.row.sm-sess .sm-speed { flex: none; display: inline-flex; align-items: center; gap: 10px; height: 30px; padding: 0 8px; border: 0; border-radius: 7px; background: none; color: var(--muted); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; transition: background-color .15s ease; }
+.row.sm-sess .sm-speed[hidden] { display: none; }
+@media (hover: hover) and (pointer: fine) { .row.sm-sess .sm-speed:hover { background: var(--pill); } }
+.row.sm-sess .sm-speed.open { background: var(--pill); }
+.row.sm-sess .sm-speed:active { transform: scale(.97); }
+.sm-speed .sm-curve { display: block; flex: none; }
+.sm-speed-val { min-width: 72px; text-align: right; }
+.sm-speed-val.live { color: var(--fg); }
+.sm-speed-val b { font-size: 13px; font-weight: 600; }
+.sm-speed-val small { font-size: 11px; color: var(--muted); }
+.sm-curve-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
+.sm-curve-fill { fill: var(--accent); fill-opacity: .08; }
+.sm-curve-gap { stroke: var(--faint); stroke-width: 1.5; stroke-dasharray: 3 3; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .sm-curve-fill { fill-opacity: .1; } }
+:root[data-theme="dark"] .sm-curve-fill { fill-opacity: .1; }
+/* a narrow list keeps the number and leaves the curve to the popover */
+@container sm-tree (width < 620px) { .sm-speed .sm-curve { display: none; } .sm-speed-val { min-width: 0; } }
+.pop.sm-speed-pop { width: min(340px, calc(100vw - 16px)); max-height: none; padding: 14px 16px; gap: 10px; transform-origin: right top; font-variant-numeric: tabular-nums; }
+.pop.sm-speed-pop.up { transform-origin: right bottom; }
+.sm-sp-head { display: flex; align-items: baseline; gap: 6px; }
+.sm-sp-big { font-size: 28px; font-weight: 600; letter-spacing: -.02em; color: var(--fg); }
+.sm-sp-unit { font-size: 12px; color: var(--muted); }
+.sm-sp-chart { position: relative; height: 72px; }
+.sm-sp-chart .sm-curve { width: 100%; }
+.sm-sp-gap { position: absolute; bottom: 8px; font-size: 10.5px; color: var(--muted); white-space: nowrap; pointer-events: none; }
+.sm-sp-dot { position: absolute; right: -4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--card); }
+.sm-sp-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-top: 10px; border-top: 1px solid var(--line-2); }
+.sm-sp-stats > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sm-sp-k { font-size: 11px; color: var(--muted); }
+.sm-sp-v { font-size: 13px; font-weight: 500; color: var(--fg); white-space: nowrap; }

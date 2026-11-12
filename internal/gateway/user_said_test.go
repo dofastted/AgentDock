@@ -30,6 +30,15 @@ const (
 	envContext       = "<environment_context>\n  <cwd>/Users/me/app</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-12</current_date>\n</environment_context>"
 	codexAgents      = "# AGENTS.md instructions for /Users/me/app\n\n<INSTRUCTIONS>\nRun the tests.\n</INSTRUCTIONS>"
 	inAppBrowser     = "# Context from my IDE setup:\n\n# In app browser:\n<in-app-browser-context source=\"ambient-ui-state\">\nhttps://example.test/ — Example\n</in-app-browser-context>\n\n"
+	codexPage        = `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`
+	pastedRequest    = "# Files pasted by the user:\n\n## \"Fix a race...\": /tmp/fixture/task.txt\n\n" +
+		"Pasted text contains the user's request.\n\n## My request:\n"
+	// Reasonix 1.x's snapshot of the workspace, which opens each of its
+	// conversations: as keeyangyy (#3938) read it from Reasonix's source
+	// (internal/sessioncontext), the folder and digest left out as there
+	reasonixContext = "<session-context version=\"1\">\nThis host-generated snapshot supersedes every earlier session-context snapshot.\n\n" +
+		"## Environment\n- OS: windows/amd64\n- Shell: powershell\n\n## Workspace\nCurrent workspace: \"<dir>\"\n\n" +
+		"## Background memory\n...\n\n## Skills catalog\n...\n\nDigest: sha256:<hex>\n</session-context>"
 )
 
 func userMsg(texts ...string) Message {
@@ -71,6 +80,7 @@ func TestTurnInSkipsWhatTheAgentPutIn(t *testing.T) {
 		{"Codex app's context and request", []Message{userMsg(envContext, "fix the bug"), saidAnswer, userMsg(inAppBrowser + "## My request for Codex:\nnow the test")}, 2, false},
 		{"Codex app's context alone", []Message{userMsg(envContext, "fix the bug"), saidAnswer, userMsg(inAppBrowser + "## My request for Codex:\n")}, 1, true},
 		{"nothing said yet", []Message{userMsg(envContext)}, 0, false},
+		{"Reasonix's snapshot, then the user's words", []Message{userMsg(reasonixContext), userMsg("fix the bug")}, 1, false},
 	} {
 		turn, within := turnIn(&Request{Messages: tc.ms})
 		if turn != tc.turn || within != tc.within {
@@ -107,6 +117,9 @@ func TestUserTextSkipsWhatTheAgentPutIn(t *testing.T) {
 		{"a todo nudge after the turn", []Message{userMsg(q), saidAnswer, userMsg(zcodeTodo)}, q},
 		{"Codex", []Message{userMsg(codexAgents, envContext, "fix the bug")}, "fix the bug"},
 		{"the Codex app", []Message{userMsg(inAppBrowser + "## My request for Codex:\nwhat is this page?")}, "what is this page?"},
+		{"the Codex app's page state", []Message{userMsg(codexPage)}, ""},
+		{"page state, pasted files and an empty request", []Message{userMsg(codexPage), userMsg(pastedRequest)}, ""},
+		{"page state beside the request", []Message{userMsg(codexPage, pastedRequest+"fix the race")}, "fix the race"},
 		{"a reminder with a source", []Message{userMsg(goalContinuation + "\nship it")}, "ship it"},
 	} {
 		if got := userText(&Request{Messages: tc.ms}); got != tc.want {
@@ -126,6 +139,7 @@ func TestFirstWordsAreWhatTheUserSaid(t *testing.T) {
 		{userMsg(first, pluginRef), userMsg(agentList)},
 		{userMsg(goalContinuation), saidAnswer, userMsg(first)},
 		{userMsg(codexAgents, envContext, first)},
+		{userMsg(reasonixContext), userMsg(first)},
 	} {
 		if got := firstWords(&Request{Messages: ms}); got != a {
 			t.Errorf("key changed for conversation %d", i)
@@ -176,9 +190,24 @@ func TestIntentHoldsPastWhatTheAgentPutIn(t *testing.T) {
 	}
 }
 
+// The Codex app's page state is not words of the user's: alone, or beside
+// pasted files when "My request" is empty, it asks the classifier nothing
+// (#3418) — there is nothing of the user's to classify.
+func TestIntentSkipsWhatTheCodexAppPutIn(t *testing.T) {
+	s, _, _, c := intented(t, provider.Rule{Use: "b/big", Intent: "complex tasks"})
+	c.set("1", 0)
+	body := `{"model":"group/r","messages":[` +
+		`{"role":"user","content":` + quote(codexPage) + `},` +
+		`{"role":"user","content":` + quote(pastedRequest) + `}]}`
+	_, r := postOK(t, s, "s1", body)
+	if n := c.n(); n != 0 {
+		t.Fatalf("classifier asked %d time(s): %.120q (%+v)", n, c.last(), r.Rule.Classified)
+	}
+}
+
 func TestUserSaysPastAReminderWithASource(t *testing.T) {
 	for _, s := range []string{goalContinuation, taskNotification, pluginRef, agentList, zcodeAgentList, zcodeTodo, envContext, codexAgents,
-		"<turn_aborted>\nThe user interrupted.\n</turn_aborted>", inAppBrowser + "## My request:\n"} {
+		"<turn_aborted>\nThe user interrupted.\n</turn_aborted>", inAppBrowser + "## My request:\n", codexPage} {
 		if userSays(s) {
 			t.Errorf("said: %.40q", s)
 		}

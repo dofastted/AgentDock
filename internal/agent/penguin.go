@@ -103,7 +103,7 @@ func penguinRoot(at place) string {
 	if d := at.getenv("PENGUIN_HOME"); d != "" {
 		return d
 	}
-	return filepath.Join(at.home, ".penguin", "data")
+	return at.join(".penguin", "data")
 }
 
 // penguinProject is the Project the CLI works in: $PENGUIN_PROJECT_ID,
@@ -191,6 +191,10 @@ func penguinIn(at place) *Agent {
 		ID: "penguin", Name: "PenguinHarness", Icon: "penguin-color", Bin: "penguin",
 		Aliases: []string{"penguin-harness", "penguinharness"}, Spelled: prefixed,
 		Dir: filepath.Dir(root), Path: path,
+		// the desktop app, on this machine (a distro has none): installed
+		// and not opened yet, it has made no ~/.penguin
+		sign:     func() bool { return at.spell == nil && (&Agent{ID: "penguin"}).HasApp() },
+		ListOnly: true,
 		Sync: func() error {
 			t, err := edit.GetTOMLTable(path, providerTable)
 			if err != nil || t == nil {
@@ -285,7 +289,7 @@ func penguinIn(at place) *Agent {
 				return dropMagpie()
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(penguinOwnOptions(path, cur["model"]), viaMagpie("penguin", magpieID+"/")...)
+				return withVia(penguinOwnOptions(path, cur["model"]), "penguin", magpieID+"/")
 			},
 		}},
 	}, path)

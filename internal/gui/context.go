@@ -8,15 +8,22 @@ package gui
 // requests from the live trace.
 
 import (
+	"fmt"
+	"maps"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // defaultWindow is the window a prompt is measured against when the
@@ -86,12 +93,27 @@ type ctxAgent struct {
 	Models     []string           `json:"models"`
 	LatestID   int64              `json:"latestId"`
 	LatestTime time.Time          `json:"latestTime"`
+	// Clients are the libraries scriptsAgent's card is of, the most used
+	// first
+	Clients []string `json:"clients,omitempty"`
 }
+
+// scriptsAgent is the card the requests of a script go under: those whose
+// User-Agent names only an HTTP library, a runtime or an API SDK
+// (usage.IsLibrary: curl, Bun, python-httpx), or nothing at all ("other").
+// Each had a card of its own, scored as an agent's (theforeveriris on X).
+// Read from each route's agent as kept, so the history's older days go
+// there too; the Usage page's Agents list still has each by its own name.
+const scriptsAgent = "scripts"
 
 type ctxJSON struct {
 	Days     int          `json:"days"`
 	Agents   []ctxAgent   `json:"agents"`
 	Sessions []ctxSession `json:"sessions"`
+	// held is set when a call was left out of every session, its reply not
+	// read yet (ctxRec.Unmatched): the answer then stands only until the
+	// page's next read, which is after the fork's file has been read again
+	held bool
 }
 
 // ctxSessions is how many sessions are listed, the latest; ctxPoints how
@@ -99,6 +121,8 @@ type ctxJSON struct {
 const (
 	ctxSessions = 80
 	ctxPoints   = 160
+	// ctxSessionPoints is how many a session's own line keeps, the latest
+	ctxSessionPoints = 1000
 )
 
 func median(xs []int) int {
@@ -146,6 +170,81 @@ func mcpTokens(p *gateway.Prompt) int {
 	return n
 }
 
+// ctxRec is what the tab reads of a route: its prompt's parts by their
+// tokens, its items left out, and the whole prompt only where it can be its
+// session's latest (keepLatest). The tab held a week of routes whole, the
+// prompts' items and the tries' accounts with them, and read them again
+// at every refresh (Yayoi_no_yume on X: a 1-core server with 962 MB went
+// down with the tab open).
+type ctxRec struct {
+	ID                      int64
+	Time                    time.Time
+	Millis                  int64 // how long it took: it ended at Time and this
+	Agent, Model, Kind, Sub string
+	Session, Parent, Conv   string
+	ResponseID              string
+	Done, Failed, Canceled  bool
+	// Unmatched is a call whose opening a fork copied too, whose reply names
+	// no session yet, and that ended too recently for its reply to be read
+	// (waitingForReply): it is its source's or the fork's, and no evidence
+	// here says which, so the tab counts it in neither (joinConvs)
+	Unmatched                  bool
+	Asked                      bool // it has a prompt of some tokens
+	Tokens, Window, MCP, Cache int
+	Counted, Tools, CacheKnown bool
+	Parts                      []gateway.PromptPart // items left out
+	Prompt                     *gateway.Prompt      // whole, when kept
+}
+
+// recOf is r as the tab reads it, its whole prompt kept when whole.
+func recOf(r gateway.Route, whole bool) ctxRec {
+	c := ctxRec{ID: r.ID, Time: r.Time, Millis: r.Millis, Agent: r.Agent, Model: r.Model, Kind: r.Kind, Sub: r.Sub,
+		Session: r.Session, Parent: r.ParentSession, Conv: r.Conv, ResponseID: r.ResponseID, Done: r.Done,
+		Failed: r.Status >= 400 || r.Error != "", Canceled: usage.CanceledBy(r.Status, r.Error),
+		Cache: cacheOf(r), CacheKnown: cacheKnown(r)}
+	if p := r.Prompt; p != nil {
+		c.Asked = p.Tokens > 0
+		c.Tokens, c.Window, c.Counted = p.Tokens, p.Window, p.Counted
+		c.MCP, c.Tools = mcpTokens(p), withTools(p)
+		c.Parts = make([]gateway.PromptPart, len(p.Parts))
+		for i, x := range p.Parts {
+			c.Parts[i] = gateway.PromptPart{Kind: x.Kind, Tokens: x.Tokens}
+		}
+		if whole {
+			c.Prompt = p
+		}
+	}
+	return c
+}
+
+// keepLatest is routes as the tab reads them, the whole prompt kept only on
+// each session's latest route with tools and its latest without: of these
+// two, the one the tab counts (toolSessions) is its session's latest, over
+// the other days' routes too.
+func keepLatest(routes []gateway.Route) []ctxRec {
+	latest := map[string]int{}
+	for i := range routes {
+		r := &routes[i]
+		// as contextOfRecs counts a session's request
+		if !r.Done || r.Agent == "" || r.Status >= 400 || r.Error != "" || r.Prompt == nil || r.Prompt.Tokens <= 0 || r.Kind != "" || r.Sub != "" {
+			continue
+		}
+		k := r.Agent + "\x00" + sessionOfRoute(*r) + "\x00" + strconv.FormatBool(withTools(r.Prompt))
+		if j, ok := latest[k]; !ok || !r.Time.Before(routes[j].Time) {
+			latest[k] = i
+		}
+	}
+	whole := make(map[int]bool, len(latest))
+	for _, i := range latest {
+		whole[i] = true
+	}
+	out := make([]ctxRec, len(routes))
+	for i, r := range routes {
+		out[i] = recOf(r, whole[i])
+	}
+	return out
+}
+
 func cacheOf(r gateway.Route) int {
 	if len(r.Usage) == 0 {
 		return 0
@@ -171,16 +270,47 @@ func sessionOfRoute(r gateway.Route) string {
 	return r.Conv
 }
 
+func sessionOfRec(r *ctxRec) string {
+	switch {
+	case r.Parent != "":
+		return r.Parent
+	case r.Session != "":
+		return r.Session
+	}
+	return r.Conv
+}
+
 // joinConvs puts a route that names no session under the agent's session
-// its conversation id was read from (sessions' Convs): dsh's
-// chat-completions and messages routes send no session id, so the gateway
-// keys each request by its first prompt's hash, and the page showed
-// "magpie-a…" where the Sessions page shows the session's title (Kumo31
-// on Discord). An id two sessions share stays as it is.
-func joinConvs(routes []gateway.Route, list func() []sessions.Session) {
+// its reply or its conversation id was read from (sessions' ResponseIDs and
+// Convs): dsh's chat-completions and messages routes send no session id, so
+// the gateway keys each request by its first prompt's hash, and the page
+// showed "magpie-a…" where the Sessions page shows the session's title
+// (Kumo31 on Discord). A hash is the conversation's opening, which a fork
+// copies, so the reply's own id is asked first: a fork's reply has one its
+// source does not, and names the fork. An id two sessions share stays as it
+// is.
+//
+// An opening a fork copied names neither of the two, though: the source owns
+// it (the fork's copy was taken off Convs at its seed's end, sessions'
+// SeedConvs), yet the fork's own requests open the same way. A call of theirs
+// whose reply dsh hasn't written yet — in flight, or completed a moment
+// before, while the page reads the session's file — has nothing to say which
+// one it was, and counting it under the source moved the fork's own request
+// there: the source's card climbed with every turn of the fork. Such a call
+// is left out of both (ctxRec.Unmatched) until its reply names one, which the
+// next read of the fork's file does (the answer keeps for as long as one is
+// left out).
+//
+// Only a call that may yet be named is left out: one with a reply id, ended
+// within convsKept (waitingForReply). A call without a reply id — dsh's
+// history before #5491 recorded them, and a dsh that keeps none — goes by its
+// opening as it always did, or the source's own card would lose its history
+// and could vanish; and a call whose reply never comes falls back to its
+// opening after that window, so the page stops re-reading the sessions for it.
+func joinConvs(routes []ctxRec, list func() []sessions.Session) {
 	loose := false
 	for _, r := range routes {
-		if r.Session == "" && r.ParentSession == "" && r.Conv != "" {
+		if r.Session == "" && r.Parent == "" && (r.ResponseID != "" || r.Conv != "") {
 			loose = true
 			break
 		}
@@ -188,24 +318,167 @@ func joinConvs(routes []gateway.Route, list func() []sessions.Session) {
 	if !loose {
 		return
 	}
-	of := map[string]string{}
-	for _, s := range list() {
-		for _, c := range s.Convs {
-			k := s.Agent + "\x00" + c
-			if id, ok := of[k]; ok && id != s.ID {
-				of[k] = ""
-			} else if !ok {
-				of[k] = s.ID
-			}
-		}
-	}
+	of := routeOwners(list())
+	now := time.Now()
 	for i, r := range routes {
-		if r.Session == "" && r.ParentSession == "" && r.Conv != "" {
-			if id := of[r.Agent+"\x00"+r.Conv]; id != "" {
-				routes[i].Session = id
-			}
+		if r.Session != "" || r.Parent != "" {
+			continue
+		}
+		// a done call is named by its reply: a turn's messages (Route.LastConvs)
+		// are for one still answering, which the tab doesn't count
+		id, named := ownerBy(r.Agent, r.ResponseID, r.Conv, nil, of)
+		if !named && r.ResponseID != "" && of[ownerKey(r.Agent, ownerResponse, r.ResponseID)] != "" {
+			// the reply names another conversation, and the guard for a
+			// vendor's repeated ids keeps the opening: as it did before
+			// reply ids were read
+			routes[i].Session = id
+			continue
+		}
+		if !named && waitingForReply(&routes[i], sharedOpening(r.Agent, r.Conv, of), now) {
+			// its opening is the source's and a fork's both, and its reply
+			// names no one yet: it is neither's until it does
+			routes[i].Unmatched = true
+			continue
+		}
+		routes[i].Session = id
+	}
+}
+
+// waitingForReply says a call is one whose reply may still name its session:
+// it has a reply id, its opening a fork copied too (shared), and it ended
+// within convsKept — the window Routing's looseKeys waits in for the reply
+// dsh writes after its file (trace.go). Past that no reply is coming: the
+// call goes by its opening, as it did before reply ids were read.
+func waitingForReply(r *ctxRec, shared bool, now time.Time) bool {
+	return shared && r.ResponseID != "" && now.Sub(r.Time.Add(time.Duration(r.Millis)*time.Millisecond)) < convsKept
+}
+
+// ownerOf is the session an agent's route that names none belongs to: the
+// one whose own replies carry the route's reply id, and, when no one's does,
+// the one whose conversation the route opens. A reply id is the vendor's,
+// which some give out again (Ollama's chatcmpl-<0-998>), so it names a
+// session over the opening only where the two agree: the opening is no
+// one's, or two sessions', or the reply's session's own, or one it was
+// forked from (sessions' ForkOf, or the opening its seed carried when the
+// fork names no parent). Another session's opening goes by the opening, as
+// it did before reply ids were read.
+func ownerOf(agent, responseID, conv string, of map[string]string) string {
+	id, _ := ownerBy(agent, responseID, conv, nil, of)
+	return id
+}
+
+// ownerOfRoute is ownerOf of a route, its newest turn's message too: the
+// Routing page names a request still answering by it, since no reply id
+// exists yet (Route.LastConvs).
+func ownerOfRoute(r gateway.Route, of map[string]string) string {
+	id, _ := ownerBy(r.Agent, r.ResponseID, r.Conv, r.LastConvs, of)
+	return id
+}
+
+// ownerBy is ownerOf, and whether the reply or the turn's own message named
+// the session rather than the opening: a route whose opening a fork copied
+// too, and whose reply names no session, belongs to neither (joinConvs).
+// turnConvs are the ids of the messages the request's turn carries
+// (Route.LastConvs): a request still answering has no reply id, and those
+// messages are its branch's file's, not its source's. They name a session
+// under the reply's guard: one whose own turn has them alone, and that
+// agrees with the opening — a "继续" another conversation's newest turn
+// has too doesn't take this one.
+func ownerBy(agent, responseID, conv string, turnConvs []string, of map[string]string) (id string, named bool) {
+	opened := ""
+	if conv != "" {
+		opened = of[ownerKey(agent, ownerConv, conv)]
+	}
+	if responseID != "" {
+		if id := of[ownerKey(agent, ownerResponse, responseID)]; id != "" && (opened == "" || forkedFrom(agent, id, opened, conv, of)) {
+			return id, true
 		}
 	}
+	for _, c := range turnConvs {
+		if id := of[ownerKey(agent, ownerLast, c)]; id != "" && (opened == "" || forkedFrom(agent, id, opened, conv, of)) {
+			return id, true
+		}
+	}
+	return opened, false
+}
+
+// sharedOpening says conv is an opening a fork copied (sessions' SeedConvs):
+// the session that owns it and the fork whose seed opened that way both do,
+// so the opening alone doesn't say which one a route that opens that way is.
+func sharedOpening(agent, conv string, of map[string]string) bool {
+	return conv != "" && of[ownerKey(agent, ownerCopied, conv)] != ""
+}
+
+// forkedFrom says session id is from, or a fork of it, or of a fork of it:
+// by the source its header names (ForkOf), or, for a fork dsh wrote with
+// none, by the opening conv its seed carried (sessions' SeedConvs).
+func forkedFrom(agent, id, from, conv string, of map[string]string) bool {
+	for n := 0; id != "" && n < 64; n++ {
+		if id == from {
+			return true
+		}
+		if conv != "" && of[ownerKey(agent, ownerSeed, id+"\x00"+conv)] != "" {
+			return true
+		}
+		id = of[ownerKey(agent, ownerFork, id)]
+	}
+	return false
+}
+
+// The kinds of id a route without a session id is named by: the reply it
+// got, and the conversation it opens; the message its newest turn carried,
+// which a request still answering is known by (ownerLast); and a session's
+// source, for the session a fork's reply names (ForkOf), the opening a
+// fork's seed carried, kept on the fork itself (SeedConvs), and that
+// opening kept again among the openings a fork copied, which names neither
+// the source nor the fork alone (ownerCopied).
+const (
+	ownerResponse = "response"
+	ownerConv     = "conv"
+	ownerLast     = "last"
+	ownerFork     = "fork"
+	ownerSeed     = "seed"
+	ownerCopied   = "copied"
+)
+
+func ownerKey(agent, kind, id string) string { return agent + "\x00" + kind + "\x00" + id }
+
+// routeOwners is each agent's reply ids and conversation ids (agent, NUL,
+// kind, NUL, the id) and the session of that agent each was read from
+// (sessions' ResponseIDs, Convs and TurnConvs); "" for an id two sessions
+// share, which stays as it is. A fork's session id is kept with the one it
+// was forked from (ownerFork), and the openings its seed carried among the
+// openings a fork copied (ownerCopied).
+func routeOwners(list []sessions.Session) map[string]string {
+	of := map[string]string{}
+	put := func(k, id string) {
+		if was, ok := of[k]; ok && was != id {
+			of[k] = ""
+		} else if !ok {
+			of[k] = id
+		}
+	}
+	for _, s := range list {
+		for _, c := range s.Convs {
+			put(ownerKey(s.Agent, ownerConv, c), s.ID)
+		}
+		for _, c := range s.TurnConvs {
+			put(ownerKey(s.Agent, ownerLast, c), s.ID)
+		}
+		for _, r := range s.ResponseIDs {
+			put(ownerKey(s.Agent, ownerResponse, r), s.ID)
+		}
+		if s.ForkOf != "" {
+			of[ownerKey(s.Agent, ownerFork, s.ID)] = s.ForkOf
+		}
+		for _, c := range s.SeedConvs {
+			// the fork's own record that its seed opened c, the opening
+			// it shares with the session it was copied from
+			of[ownerKey(s.Agent, ownerSeed, s.ID+"\x00"+c)] = s.ID
+			of[ownerKey(s.Agent, ownerCopied, c)] = s.ID
+		}
+	}
+	return of
 }
 
 // compacted says a prompt is a compaction of the one before it: under 60%
@@ -213,8 +486,8 @@ func joinConvs(routes []gateway.Route, list func() []sessions.Session) {
 func compacted(prev, next int) bool { return prev >= 20000 && next < prev*6/10 }
 
 // ctxKey is the agent's session a route is in, "" when it names none.
-func ctxKey(r gateway.Route) string {
-	if key := sessionOfRoute(r); key != "" {
+func ctxKey(r *ctxRec) string {
+	if key := sessionOfRec(r); key != "" {
 		return r.Agent + "\x00" + key
 	}
 	return ""
@@ -230,10 +503,10 @@ func withTools(p *gateway.Prompt) bool { return partTokens(p, gateway.PartTools)
 // its title and its quota check — not a turn of the conversation, whose
 // prompt can't stand for it: a classifier's 40K after a 100K turn is no
 // compaction (Player on Discord: 45 in a session that never compacted).
-func toolSessions(routes []gateway.Route) map[string]bool {
+func toolSessions(routes []ctxRec) map[string]bool {
 	out := map[string]bool{}
-	for _, r := range routes {
-		if r.Kind == "" && r.Sub == "" && r.Prompt != nil && withTools(r.Prompt) {
+	for i := range routes {
+		if r := &routes[i]; r.Kind == "" && r.Sub == "" && r.Tools {
 			if sk := ctxKey(r); sk != "" {
 				out[sk] = true
 			}
@@ -244,6 +517,22 @@ func toolSessions(routes []gateway.Route) map[string]bool {
 
 // contextOf works the agents and their sessions out of their routes.
 func contextOf(routes []gateway.Route, days int) ctxJSON {
+	recs := make([]ctxRec, len(routes))
+	for i, r := range routes {
+		recs[i] = recOf(r, true)
+	}
+	return contextOfRecs(recs, days)
+}
+
+// contextOfRecs is contextOf of the routes as the tab reads them.
+func contextOfRecs(routes []ctxRec, days int) ctxJSON {
+	return contextOfRecsFor(routes, days, "")
+}
+
+// contextOfRecsFor is contextOfRecs, and when only isn't "" it lists that
+// one session alone (agent + "\x00" + its id), with up to ctxSessionPoints
+// of its requests: a session's line on the Sessions page.
+func contextOfRecsFor(routes []ctxRec, days int, only string) ctxJSON {
 	sort.SliceStable(routes, func(i, j int) bool { return routes[i].Time.Before(routes[j].Time) })
 	out := ctxJSON{Days: days, Agents: []ctxAgent{}, Sessions: []ctxSession{}}
 	type agentAcc struct {
@@ -266,9 +555,21 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 		return listed
 	}
 	joinConvs(routes, list)
+	// routes are the tab's copies, so the history kept (ctxKept) keeps
+	// each route's own agent
+	scripts := map[string]int{}
+	for i := range routes {
+		if a := routes[i].Agent; a == "other" || usage.IsLibrary(a) {
+			if a != "other" {
+				scripts[a]++
+			}
+			routes[i].Agent = scriptsAgent
+		}
+	}
 	tooled := toolSessions(routes)
 	var order []string
-	for _, r := range routes {
+	for i := range routes {
+		r := &routes[i]
 		if !r.Done || r.Agent == "" {
 			continue
 		}
@@ -278,40 +579,49 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 			agents[r.Agent] = acc
 		}
 		acc.a.Calls++
-		if r.Status >= 400 || r.Error != "" {
-			acc.a.Errors++
+		if r.Failed {
+			// one its agent canceled was no error it saw, nor a prompt it
+			// finished asking
+			if !r.Canceled {
+				acc.a.Errors++
+			}
 			continue
 		}
-		p := r.Prompt
-		if p == nil || p.Tokens <= 0 || r.Kind != "" || !withTools(p) && tooled[ctxKey(r)] {
+		if !r.Asked || r.Kind != "" || !r.Tools && tooled[ctxKey(r)] {
 			// a title or another side call is neither the conversation's
 			// nor what the agent's prompts are like
 			continue
 		}
-		window := p.Window
+		window := r.Window
 		if window <= 0 {
 			window = defaultWindow
 		}
 		acc.a.Requests++
-		acc.prompts = append(acc.prompts, p.Tokens)
-		acc.bases = append(acc.bases, partTokens(p, gateway.PartSystem, gateway.PartTools, gateway.PartSkills, gateway.PartMemory))
-		acc.mcps = append(acc.mcps, mcpTokens(p))
-		for _, x := range p.Parts {
+		acc.prompts = append(acc.prompts, r.Tokens)
+		acc.bases = append(acc.bases, partTokens(&gateway.Prompt{Parts: r.Parts}, gateway.PartSystem, gateway.PartTools, gateway.PartSkills, gateway.PartMemory))
+		acc.mcps = append(acc.mcps, r.MCP)
+		for _, x := range r.Parts {
 			acc.parts[x.Kind] += x.Tokens
 		}
-		if p.Counted && cacheKnown(r) {
-			acc.counted += p.Tokens
-			acc.cached += min(cacheOf(r), p.Tokens)
+		if r.Counted && r.CacheKnown {
+			acc.counted += r.Tokens
+			acc.cached += min(r.Cache, r.Tokens)
 		}
 		acc.models[r.Model]++
 		if r.Time.After(acc.a.LatestTime) {
 			acc.a.LatestTime, acc.a.LatestID = r.Time, r.ID
 		}
 		acc.a.Window = max(acc.a.Window, window)
-		key := sessionOfRoute(r)
-		if key == "" || r.Sub != "" {
+		key := sessionOfRec(r)
+		if key == "" || r.Sub != "" || r.Unmatched {
 			// a subagent's prompt is its own conversation's, not the
-			// one whose session id it goes under
+			// one whose session id it goes under; a call whose opening
+			// a fork copied is neither's until its reply names one, and
+			// counting it under the source is what the fork's own card
+			// climbed with
+			if r.Unmatched {
+				out.held = true
+			}
 			continue
 		}
 		acc.sessions[key] = true
@@ -324,30 +634,37 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 		}
 		if n := len(s.Points); n > 0 {
 			prev := s.Points[n-1].Tokens
-			if compacted(prev, p.Tokens) {
+			if compacted(prev, r.Tokens) {
 				s.Compacts++
 				acc.a.Compacts++
-			} else if d := p.Tokens - prev; d > 0 {
+			} else if d := r.Tokens - prev; d > 0 {
 				acc.growths = append(acc.growths, d)
 			}
 		}
-		s.Points = append(s.Points, ctxPoint{ID: r.ID, Time: r.Time, Tokens: p.Tokens, Window: p.Window, Cache: cacheOf(r), CacheUnknown: !cacheKnown(r)})
+		s.Points = append(s.Points, ctxPoint{ID: r.ID, Time: r.Time, Tokens: r.Tokens, Window: r.Window, Cache: r.Cache, CacheUnknown: !r.CacheKnown})
 		s.Requests++
-		s.Last, s.Latest, s.LatestID, s.Model = r.Time, p, r.ID, r.Model
-		s.Peak = max(s.Peak, p.Tokens)
+		s.Last, s.Latest, s.LatestID, s.Model = r.Time, r.Prompt, r.ID, r.Model
+		s.Peak = max(s.Peak, r.Tokens)
 		s.Window = max(s.Window, window)
 	}
 	// the sessions, the latest first
 	slices.SortFunc(order, func(a, b string) int { return sess[b].Last.Compare(sess[a].Last) })
 	var codexIDs, desktopIDs, piIDs []string
+	keep := ctxPoints
+	if only != "" {
+		keep = ctxSessionPoints
+	}
 	for _, sk := range order {
 		s := sess[sk]
+		if only != "" && sk != only {
+			continue
+		}
 		if acc := agents[s.Agent]; acc != nil && s.Requests > 1 {
 			acc.fills = append(acc.fills, float64(s.Peak)/float64(s.Window))
 		}
 		if len(out.Sessions) < ctxSessions {
-			if len(s.Points) > ctxPoints {
-				s.Points = s.Points[len(s.Points)-ctxPoints:]
+			if len(s.Points) > keep {
+				s.Points = s.Points[len(s.Points)-keep:]
 			}
 			out.Sessions = append(out.Sessions, *s)
 			switch s.Agent {
@@ -430,6 +747,14 @@ func contextOf(routes []gateway.Route, days int) ctxJSON {
 		slices.SortFunc(a.Models, func(x, y string) int { return acc.models[y] - acc.models[x] })
 		if len(a.Models) > 3 {
 			a.Models = a.Models[:3]
+		}
+		if a.Agent == scriptsAgent {
+			a.Clients = slices.SortedFunc(maps.Keys(scripts), func(x, y string) int {
+				if scripts[x] != scripts[y] {
+					return scripts[y] - scripts[x]
+				}
+				return strings.Compare(x, y)
+			})
 		}
 		scoreAgent(a, acc.counted > 0)
 		out.Agents = append(out.Agents, *a)
@@ -517,16 +842,103 @@ func scoreAgent(a *ctxAgent, counted bool) {
 	}
 }
 
-// contextRoutes reads the routes of the days asked for: the history kept,
-// and the live trace's not yet in it.
-func contextRoutes(r *http.Request, days int) []gateway.Route {
-	seen := map[int64]bool{}
-	var out []gateway.Route
+// ctxKept is what the tab has read of the routing history: each day's
+// routes as it reads them, by the size and time its files had, and its
+// last answer by what it was worked out of. The tab asks at every refresh
+// of the Usage page (5s by default); a day whose files are as they were
+// isn't read again, and an answer whose routes are the same is given
+// again. A day is its latest routes at most (gateway.History), so what is
+// kept doesn't grow with the history.
+var ctxKept = struct {
+	sync.Mutex
+	days map[string]ctxDay
+	key  string
+	at   time.Time
+	out  ctxJSON
+}{days: map[string]ctxDay{}}
+
+type ctxDay struct {
+	key  string
+	recs []ctxRec
+}
+
+// ctxAgain is how long an answer stands while nothing it was worked out of
+// changed: the sessions' titles and the models' names it has are read
+// again after it.
+const ctxAgain = time.Minute
+
+// ctxWhileUnmatched is how long an answer stands when a call was left out
+// of every session, its reply not read yet (ctxRec.Unmatched): the page
+// reads every 5 s, and the read after the fork's file is read again names
+// it. Only a call within convsKept is left out (waitingForReply), so this
+// ends with that window: one whose reply never comes goes by its opening.
+const ctxWhileUnmatched = 5 * time.Second
+
+// readingDay, in tests, is told each day the tab reads from the history.
+var readingDay func(day string)
+
+// dayStamp is what a day's files are now: their sizes and times.
+func dayStamp(day string) string {
+	var b strings.Builder
+	base := filepath.Join(gateway.HistoryDir(), day+".jsonl")
+	for _, p := range []string{base, base + ".gz"} {
+		if fi, err := os.Stat(p); err == nil {
+			fmt.Fprintf(&b, "%d/%d;", fi.Size(), fi.ModTime().UnixNano())
+		} else {
+			b.WriteString("-;")
+		}
+	}
+	return b.String()
+}
+
+// contextRecs reads the routes of the days asked for: the history kept,
+// and the live trace's not yet in it. stamp is what they were read from.
+func contextRecs(r *http.Request, days int) (out []ctxRec, stamp string) {
+	ctxKept.Lock()
+	defer ctxKept.Unlock()
+	return contextRecsLocked(r, days)
+}
+
+func contextRecsLocked(r *http.Request, days int) (out []ctxRec, stamp string) {
 	now := time.Now()
+	list := make([]string, 0, days)
 	for i := days - 1; i >= 0; i-- {
-		day := now.AddDate(0, 0, -i).Format("2006-01-02")
-		_, rs, _ := gateway.History(day)
-		for _, x := range rs {
+		list = append(list, now.AddDate(0, 0, -i).Format("2006-01-02"))
+	}
+	out, stamp = daysRecsLocked(r, list)
+	// a day out of the range is let go; the range's days are kept for the
+	// next refresh
+	asked := map[string]bool{}
+	for _, day := range list {
+		asked[day] = true
+	}
+	for day := range ctxKept.days {
+		if !asked[day] {
+			delete(ctxKept.days, day)
+		}
+	}
+	return out, stamp
+}
+
+// daysRecsLocked reads the routes of the days listed, from what is kept
+// of them when their files are as they were, and the live trace's not yet
+// in the history.
+func daysRecsLocked(r *http.Request, list []string) (out []ctxRec, stamp string) {
+	seen := map[int64]bool{}
+	var key strings.Builder
+	for _, day := range list {
+		st := dayStamp(day)
+		fmt.Fprintf(&key, "%s=%s", day, st)
+		d, ok := ctxKept.days[day]
+		if !ok || d.key != st {
+			if readingDay != nil {
+				readingDay(day)
+			}
+			_, rs, _ := gateway.History(day)
+			d = ctxDay{key: st, recs: keepLatest(rs)}
+			ctxKept.days[day] = d
+		}
+		for _, x := range d.recs {
 			if !seen[x.ID] {
 				seen[x.ID] = true
 				out = append(out, x)
@@ -537,7 +949,8 @@ func contextRoutes(r *http.Request, days int) []gateway.Route {
 		for _, x := range gw.Trace(r.Context(), 0, 0).Routes {
 			if x.Done && !seen[x.ID] {
 				seen[x.ID] = true
-				out = append(out, x)
+				out = append(out, recOf(x, true))
+				fmt.Fprintf(&key, ",%d", x.ID)
 			}
 		}
 	}
@@ -546,21 +959,96 @@ func contextRoutes(r *http.Request, days int) []gateway.Route {
 	for i := range out {
 		out[i].Model = pub(out[i].Model)
 	}
+	return out, key.String()
+}
+
+// ctxSessionDays is how far back a session's line reads: the Usage page's
+// Context tab's longest range
+const ctxSessionDays = 30
+
+// contextSession is one agent's session as the Context tab counts it,
+// every request of it the gateway saw from the day of from to the day of
+// to (the session's first and last, as the Sessions page has them), read
+// within the last ctxSessionDays days; nil when the gateway saw none.
+// The days read stay kept until the tab's next read lets go of those
+// out of its range.
+func contextSession(r *http.Request, agent, id string, from, to time.Time) *ctxSession {
+	now := time.Now()
+	oldest := now.AddDate(0, 0, -(ctxSessionDays - 1))
+	if from.IsZero() || from.Before(oldest) {
+		from = oldest
+	}
+	if to.IsZero() || to.After(now) {
+		to = now
+	}
+	// day by day at noon, which a change of clocks never moves to another day
+	y, m, dd := from.Local().Date()
+	last := to.Local().Format("2006-01-02")
+	var list []string
+	for d := time.Date(y, m, dd, 12, 0, 0, 0, time.Local); len(list) < ctxSessionDays; d = d.AddDate(0, 0, 1) {
+		day := d.Format("2006-01-02")
+		list = append(list, day)
+		if day >= last {
+			break
+		}
+	}
+	ctxKept.Lock()
+	recs, _ := daysRecsLocked(r, list)
+	ctxKept.Unlock()
+	out := contextOfRecsFor(recs, len(list), agent+"\x00"+id)
+	if len(out.Sessions) == 0 {
+		return nil
+	}
+	return &out.Sessions[0]
+}
+
+// contextFor is the tab's answer for the days asked for: the last one
+// again when its routes are the same and it isn't ctxAgain old, or
+// ctxWhileUnmatched old when it left a route out of every session.
+func contextFor(r *http.Request, days int) ctxJSON {
+	ctxKept.Lock()
+	defer ctxKept.Unlock()
+	recs, stamp := contextRecsLocked(r, days)
+	stamp = strconv.Itoa(days) + "|" + stamp
+	keep := ctxAgain
+	if ctxKept.out.held {
+		keep = ctxWhileUnmatched
+	}
+	if stamp == ctxKept.key && time.Since(ctxKept.at) < keep {
+		return ctxKept.out
+	}
+	out := contextOfRecs(recs, days)
+	ctxKept.key, ctxKept.at, ctxKept.out = stamp, time.Now(), out
 	return out
 }
 
 func contextRoutesAPI(mux *http.ServeMux) {
+	// one session's prompts, request by request, against its window: the
+	// line the Sessions page draws in a session's details (liang_yongxiang
+	// on Discord). from and to are its first and last, RFC 3339.
+	mux.HandleFunc("GET /api/context/session", func(rw http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		agent, id := q.Get("agent"), q.Get("id")
+		if agent == "" || id == "" {
+			http.Error(rw, "agent and id are needed", http.StatusBadRequest)
+			return
+		}
+		from, _ := time.Parse(time.RFC3339, q.Get("from"))
+		to, _ := time.Parse(time.RFC3339, q.Get("to"))
+		writeJSON(rw, map[string]any{"session": contextSession(r, agent, id, from, to)})
+	})
 	mux.HandleFunc("GET /api/context", func(rw http.ResponseWriter, r *http.Request) {
 		days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 		if days <= 0 || days > 30 {
 			days = 7
 		}
-		writeJSON(rw, contextOf(contextRoutes(r, days), days))
+		writeJSON(rw, contextFor(r, days))
 	})
 	// the text of a part of a request's prompt (masaka on Discord): the
 	// part's items, and one item's text when item is given. From the
 	// gateway this GUI runs, which keeps the last requests' masked bodies
-	// in memory only; 404 when the request's is no longer kept.
+	// in memory only, else from the request archive; 404 with why when
+	// neither has it.
 	mux.HandleFunc("GET /api/context/text", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		id, err := strconv.ParseInt(q.Get("id"), 10, 64)
@@ -575,15 +1063,17 @@ func contextRoutesAPI(mux *http.ServeMux) {
 				return
 			}
 		}
-		gw := served.Load()
-		if gw == nil {
-			http.Error(rw, "not kept", http.StatusNotFound)
-			return
+		var pt gateway.PromptText
+		ok := false
+		if gw := served.Load(); gw != nil {
+			pt, ok = gw.PromptText(id, q.Get("kind"), item >= 0)
 		}
-		pt, ok := gw.PromptText(id, q.Get("kind"), item >= 0)
 		if !ok {
-			http.Error(rw, "not kept", http.StatusNotFound)
-			return
+			// gone from memory: the request archive's copy, when it
+			// kept one (context_archive.go)
+			if pt, ok = archivedPromptText(rw, r, id, q.Get("kind"), item >= 0); !ok {
+				return
+			}
 		}
 		if item >= 0 {
 			// the one item's text; the rest by name and size only
@@ -603,4 +1093,5 @@ func contextRoutesAPI(mux *http.ServeMux) {
 		rw.Header().Set("Cache-Control", "no-store")
 		writeJSON(rw, pt)
 	})
+	contextReplyAPI(mux)
 }

@@ -33,12 +33,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Where ZCode's coding plan and its sign-in are; vars so tests can point
@@ -305,7 +305,7 @@ type zhipuSubscription struct {
 }
 
 // zhipuDate finds the dates in a span like "2026-09-18 12:00:00-2026-10-18 12:00:00".
-var zhipuDate = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?`)
+var zhipuDate = lazyre.New(`\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?`)
 
 // zhipuTime reads the plan's times, "2026-10-18 12:00:00" in Beijing.
 func zhipuTime(s string) *time.Time {
@@ -379,7 +379,7 @@ func zcodeCallH(ctx context.Context, method, u, auth string, hdr map[string]stri
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return err
 	}

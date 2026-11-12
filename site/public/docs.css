@@ -154,6 +154,17 @@ pre .s { color: var(--ink2); }
 .url .v { color: var(--ink2); }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; margin: 0 0 20px; background: var(--card); }
+/* the contributors page's list (credits.mjs renderWall) */
+/* fixed columns: one long word in a release's line can't widen the table past a phone */
+.cw { table-layout: fixed; }
+.cw th:first-child { width: 11em; }
+@media (max-width: 600px) { .cw th:first-child { width: 8em; } }
+.cw td, .cw td:first-child { white-space: normal; overflow-wrap: anywhere; }
+.cw ul { margin: 0; padding: 0; list-style: none; }
+.cw li { margin: 0 0 4px; }
+.cw details summary { cursor: pointer; color: var(--ink2); font-size: 13px; }
+.cw details ul { margin-top: 4px; }
+.cw-via { color: var(--ink3); font-size: 12px; font-weight: 400; }
 table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }

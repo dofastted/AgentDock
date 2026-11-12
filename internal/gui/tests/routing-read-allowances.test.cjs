@@ -38,7 +38,8 @@ function serve(lang, order, asks, held) {
     }
     if (url.pathname === "/api/usage/quotas") {
       const asked = url.searchParams.get("asked") === "1";
-      asks.push(asked);
+      // the button's read is of every account, a saved Claude one's too (#5380)
+      asks.push(asked && url.searchParams.get("all") === "1" ? "all" : asked);
       if (!asked) return json(card(40));
       await held; // the vendor takes its time
       return json(card(70));
@@ -88,14 +89,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           try {
             const page = await ctx.newPage();
             page.setDefaultTimeout(5000);
+            page.setDefaultNavigationTimeout(60000);
             const errors = [], asks = [];
             let release;
             const held = new Promise((y) => { release = y; });
             page.on("pageerror", (e) => errors.push(e.message));
             await page.route("**/*", serve(lang, [acct], asks, held));
             await page.goto("http://magpie.test/?view=routing");
-            const act = page.locator(".rt-act", { hasText: "work@example.com" }).first();
-            await act.locator(".wins span").filter({ hasText: w.before }).waitFor();
+            const tip = (want) => page.waitForFunction((want) => [...document.querySelectorAll(".rt-act")].some((e) => e.textContent.includes("work@example.com") && (e.querySelector(".st")?.title || "").includes(want)), want);
+            await tip(w.before);
             const b = page.locator("#rtReadAllowances");
             await b.waitFor({ state: "visible" });
             assert.equal(await b.getAttribute("title"), w.title);
@@ -109,11 +111,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const box = await b.boundingBox();
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             await page.waitForFunction(() => document.querySelector("#rtReadAllowances").classList.contains("busy"));
-            assert.equal(asks.filter(Boolean).length, 1, "one asked read");
+            assert.deepEqual(asks.filter(Boolean), ["all"], "one asked read, of every account");
             // a second click while it turns asks nothing more
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             release();
-            await act.locator(".wins span").filter({ hasText: w.after }).waitFor();
+            await tip(w.after);
             await page.waitForFunction(() => !document.querySelector("#rtReadAllowances").classList.contains("busy"));
             assert.equal(await page.locator("#view-routing").evaluate((v) => v.scrollTop), top, "the click moved the page");
             // and nothing reads again by itself
@@ -133,6 +135,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     const page = await (await browser.newContext({ viewport: { width: 1100, height: 760 }, reducedMotion: "reduce" })).newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     await page.route("**/*", serve("en", [key], [], Promise.resolve()));
     await page.goto("http://magpie.test/?view=routing");
     await page.locator(".rt-act", { hasText: "main" }).first().waitFor();

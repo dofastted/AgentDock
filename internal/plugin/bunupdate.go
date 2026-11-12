@@ -18,12 +18,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/steady"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -130,7 +130,7 @@ func inUseLocked() string {
 // envBunVersion is what each $MAGPIE_BUN said it is, asked once.
 var envBunVersion = map[string]string{}
 
-var bunVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+var bunVersionRe = lazyre.New(`^\d+\.\d+\.\d+$`)
 
 // bunReported is the version a bun says it is, "" when it won't say.
 func bunReported(exe string) string {
@@ -310,11 +310,12 @@ func KeepBunUpdated(ctx context.Context) {
 		case <-t.C:
 		}
 		if len(Load().Plugins) > 0 && HasBun() {
-			cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-			if _, err := CheckBun(cctx); err != nil {
+			// no bound on the whole: a slow download still moving
+			// finishes, and one that stops sending is ended by
+			// downloadStall (#5572)
+			if _, err := CheckBun(ctx); err != nil {
 				log.Printf("plugins: looking for a newer Bun: %s", err)
 			}
-			cancel()
 		}
 		t.Reset(bunEvery)
 	}

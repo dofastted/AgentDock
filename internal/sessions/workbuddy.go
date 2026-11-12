@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // WorkBuddy (Tencent's desktop agent) keeps its sessions much as Claude
@@ -40,6 +40,27 @@ func WorkBuddyDir() string {
 // a session's own <id>.jsonl, and a subagent's under <id>/subagents/.
 func workbuddyFiles() []file { return buddyFiles("workbuddy", WorkBuddyDir()) }
 
+// WorkBuddyAIDir is WorkBuddy AI's folder, the international build's
+// (www.workbuddy.ai): ~/.workbuddy-ai, its cli/product.json's
+// dataFolderName, as internal/agent's workbuddy.go wires it.
+func WorkBuddyAIDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".workbuddy-ai")
+}
+
+// workbuddyAIFiles are WorkBuddy AI's sessions, kept as the China build
+// keeps its own, in its own folder: listed under its own agent, not
+// WorkBuddy's, so someone signed in to both apps finds each one's
+// (maxleebeta on Discord: the international build was missing from the
+// Sessions page's agents). None when its folder is WorkBuddy's (a link),
+// which workbuddyFiles reads already.
+func workbuddyAIFiles() []file {
+	if sameFolder(WorkBuddyAIDir(), WorkBuddyDir()) {
+		return nil
+	}
+	return buddyFiles("workbuddy-ai", WorkBuddyAIDir())
+}
+
 // codebuddyFiles are the same under CodeBuddy Code's projects/: the CLI keeps
 // them as its desktop sibling does, one agent's folder apart (#1779). None
 // when its folder is WorkBuddy's, which workbuddyFiles reads already.
@@ -69,12 +90,17 @@ func sameFolder(a, b string) bool {
 }
 
 // isBuddy is whether agent keeps its sessions the way WorkBuddy does: its
-// own, or CodeBuddy Code's.
-func isBuddy(agent string) bool { return agent == "workbuddy" || agent == "codebuddy" }
+// own, WorkBuddy AI's, or CodeBuddy Code's.
+func isBuddy(agent string) bool {
+	return agent == "workbuddy" || agent == "workbuddy-ai" || agent == "codebuddy"
+}
 
 // buddyFiles are the sessions under projects/ in dir, as agent's: WorkBuddy's,
 // or CodeBuddy Code's, which keeps them the same way.
 func buddyFiles(agent, dir string) []file {
+	if !Reads(agent) {
+		return nil
+	}
 	var out []file
 	walkLinked(filepath.Join(dir, "projects"), func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
@@ -148,14 +174,14 @@ var (
 	wbTitle = []byte(`-title"`)
 	wbUser  = []byte(`"role":"user"`)
 	wbCwd   = []byte(`"cwd":"`)
-	wbScene = regexp.MustCompile(`^@[\w-]+:\S*$`)
+	wbScene = lazyre.New(`^@[\w-]+:\S*$`)
 )
 
 func workbuddyLine(s *state, b []byte, main bool) {
 	at := numTS(b)
 	s.saw(at, main)
 	want := bytes.Contains(b, wbUsage) ||
-		main && (bytes.Contains(b, wbTitle) || s.First == "" && bytes.Contains(b, wbUser)) ||
+		main && (bytes.Contains(b, wbTitle) || s.more().First == "" && bytes.Contains(b, wbUser)) ||
 		s.Cwd == "" && bytes.Contains(b, wbCwd)
 	if !want {
 		return
@@ -178,15 +204,15 @@ func workbuddyLine(s *state, b []byte, main bool) {
 	case "custom-title":
 		// named by the user: before the one WorkBuddy made
 		if main && l.CustomTitle != "" {
-			s.Custom = title(l.CustomTitle)
+			s.own().Custom = title(l.CustomTitle)
 		}
 	case "ai-title":
 		if main && l.AITitle != "" {
-			s.Named = title(l.AITitle)
+			s.own().Named = title(l.AITitle)
 		}
 	case "message":
-		if main && l.Role == "user" && s.First == "" {
-			s.First = wbPrompt(l.Content)
+		if main && l.Role == "user" && s.more().First == "" {
+			s.own().First = wbPrompt(l.Content)
 		}
 	}
 	u := p.Usage

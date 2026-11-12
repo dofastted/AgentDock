@@ -10,11 +10,11 @@ const { reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const words = {
-  en: { name: "Intent classifier timeout", head: "Replies", sec: (n) => `${n} s`, sub: "A slow classifier may need longer" },
-  zh: { name: "意图判断超时", head: "回复", sec: (n) => `${n} 秒`, sub: "较慢的判断模型可能需要更长时间" },
-  "zh-TW": { name: "意圖判斷逾時", head: "回覆", sec: (n) => `${n} 秒`, sub: "較慢的判斷模型可能需要更長時間" },
-  ja: { name: "インテント判定のタイムアウト", head: "応答", sec: (n) => `${n} 秒`, sub: "遅い分類モデル" },
-  de: { name: "Zeitlimit für den Absicht-Klassifikator", head: "Antworten", sec: (n) => `${n} s`, sub: "Ein langsamer Klassifikator" },
+  en: { name: "Intent classifier timeout", head: "Routing", sec: (n) => `${n} s`, sub: "A slow classifier may need longer" },
+  zh: { name: "意图判断超时", head: "路由", sec: (n) => `${n} 秒`, sub: "较慢的判断模型可能需要更长时间" },
+  "zh-TW": { name: "意圖判斷逾時", head: "路由", sec: (n) => `${n} 秒`, sub: "較慢的判斷模型可能需要更長時間" },
+  ja: { name: "インテント判定のタイムアウト", head: "ルーティング", sec: (n) => `${n} 秒`, sub: "遅い分類モデル" },
+  de: { name: "Zeitlimit für den Absicht-Klassifikator", head: "Weiterleitung", sec: (n) => `${n} s`, sub: "Ein langsamer Klassifikator" },
 };
 
 function serve(lang, saved, own) {
@@ -47,13 +47,14 @@ async function open(engine, lang, width, saved, own, t) {
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width, height: 900 } })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, saved, own));
   await watchSettingsReads(page);
   await page.goto("http://magpie.test/?view=settings&tab=models");
   await settingsDrawn(page); // rows found are the ones that stay (#1659)
-  const row = page.locator("#replyList #classifyTimeoutRow");
+  const row = page.locator("#routeList #classifyTimeoutRow");
   await row.waitFor();
   return { page, row, errors };
 }
@@ -74,14 +75,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }
       assert.equal(await row.locator(".name").textContent(), w.name);
       assert((await row.locator(".sub").textContent()).includes(w.sub));
-      for (const part of [".name", ".sub", ".segs"]) {
+      // its explanation rests out of sight, shown whole in the row's hover card
+      // (settings-hints.test.cjs)
+      assert.equal(await row.locator(".sub").first().evaluate((e) => getComputedStyle(e).getPropertyValue("--hint").trim()), "1", "the explanation shows at rest");
+      for (const part of [".name", ".segs"]) {
         const fit = await row.locator(part).first().evaluate((e) => {
           const r = e.getBoundingClientRect();
           return e.scrollWidth <= e.clientWidth + 1 && r.width > 0 && r.right <= innerWidth + 1;
         });
         assert(fit, `${part} fits at ${width}`);
       }
-      assert.equal(await page.locator("#replyList").evaluate((l) => l.previousElementSibling.textContent.trim()), w.head);
+      assert.equal(await page.locator("#routeList").evaluate((l) => l.previousElementSibling.textContent.trim()), w.head);
       assert.deepEqual(await row.locator(".segs button").allTextContents(), [8, 15, 30, 60].map(w.sec));
       assert.equal(await row.locator(".segs button[aria-pressed=true]").textContent(), w.sec(8), "8 s at first");
 

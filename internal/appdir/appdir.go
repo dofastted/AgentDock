@@ -27,7 +27,13 @@
 // there is as likely another app's or the user's own. Taking one showed a
 // user who had never asked for portable an empty magpie (#989), and wrote
 // magpie's files into a Downloads\data folder a Windows user's archiver
-// empties, so a provider just added was gone (tangle778 on X).
+// empties, so a provider just added was gone (tangle778 on X). Where the
+// system keeps Downloads, Desktop or Documents off home (moved to D:\ or
+// OneDrive on Windows, ~/下载 on Linux) only a data folder holding none of
+// magpie's files is passed over: before v0.1.2648 those folders weren't
+// judged at all, so a data folder there holding magpie's files is one this
+// user's magpie has been keeping its files in, and an update never moves
+// them back to an installed folder from long ago (jwaitq on Discord).
 //
 // The decision is made once, from the executable as it was when magpie
 // started: an update moving the running copy aside (into .magpie-update on
@@ -126,15 +132,26 @@ func Passed(exe string) string {
 // magpie portable there has its files in data and never ran it installed,
 // and keeps it portable; a ".portable" marker beside it makes it portable
 // whatever is there.
+//
+// A data folder in the place the system keeps a user folder moved off home
+// (movedFolder) is passed over only when it holds none of magpie's files.
+// Releases before v0.1.2648 took any data folder there, so one holding
+// magpie's files is where this magpie has kept them, maybe for months,
+// while an installed folder with files of its own is from before then:
+// judging it as in home\Downloads moved a user back to that old setup on
+// updating (jwaitq on Discord).
 func shared(dir, data string) bool {
-	if !sharedFolder(dir) {
-		return false
+	switch {
+	case sharedFolder(dir):
+		if !hasFiles(data) {
+			return true
+		}
+		in := installed()
+		return in != "" && hasFiles(in)
+	case movedFolder(dir):
+		return !hasFiles(data)
 	}
-	if !hasFiles(data) {
-		return true
-	}
-	in := installed()
-	return in != "" && hasFiles(in)
+	return false
 }
 
 // hasFiles says whether dir holds magpie's own files.
@@ -149,7 +166,7 @@ func hasFiles(dir string) bool {
 
 // sharedFolder says whether dir is a folder every app or download shares:
 // /Applications and ~/Applications on a Mac, and the home folder, its
-// Downloads, Desktop and Documents everywhere. Tests change it.
+// Downloads, Desktop and Documents everywhere, under home. Tests change it.
 var sharedFolder = func(dir string) bool {
 	var dirs []string
 	if runtime.GOOS == "darwin" {
@@ -157,13 +174,32 @@ var sharedFolder = func(dir string) bool {
 	}
 	if h, err := Home(); err == nil {
 		dirs = append(dirs, h)
-		for _, d := range []string{"Downloads", "Desktop", "Documents"} {
+		for _, d := range []string{DownloadsFolder, DesktopFolder, DocumentsFolder} {
 			dirs = append(dirs, filepath.Join(h, d))
 		}
 		if runtime.GOOS == "darwin" {
 			dirs = append(dirs, filepath.Join(h, "Applications"))
 		}
 	}
+	return sameAny(dir, dirs)
+}
+
+// movedFolder says whether dir is where the system keeps the user's
+// Downloads, Desktop or Documents (userFolder), moved off home or not.
+var movedFolder = func(dir string) bool {
+	var dirs []string
+	for _, d := range []string{DownloadsFolder, DesktopFolder, DocumentsFolder} {
+		if p := userFolder(d); p != "" {
+			dirs = append(dirs, p)
+		}
+	}
+	return sameAny(dir, dirs)
+}
+
+// userFolder is UserFolder; tests change it.
+var userFolder = UserFolder
+
+func sameAny(dir string, dirs []string) bool {
 	for _, d := range dirs {
 		if strings.EqualFold(filepath.Clean(dir), filepath.Clean(d)) {
 			return true
@@ -228,9 +264,9 @@ func Config() string {
 		return p
 	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); rooted(x) {
-		return filepath.Join(x, "magpie")
+		return Join(x, "magpie")
 	}
-	return filepath.Join(mustHome(), ".config", "magpie")
+	return Join(Join(mustHome(), ".config"), "magpie")
 }
 
 // Redirected is the folder magpie keeps its files in when it is opened
@@ -257,12 +293,43 @@ func Redirected() string {
 // catalog, exchange rates, market lists).
 func Cache() string {
 	if p := Portable(); p != "" {
-		return filepath.Join(p, "cache")
+		return Join(p, "cache")
 	}
 	if x := os.Getenv("XDG_CACHE_HOME"); rooted(x) {
+		return Join(x, "magpie")
+	}
+	return Join(Join(mustHome(), ".cache"), "magpie")
+}
+
+// Logs is the folder the desktop app writes its log in, where each system
+// keeps an app's logs: ~/Library/Logs/magpie on a Mac (beside the launch
+// agent's serve.log, `magpie daemon install`), %LOCALAPPDATA%\magpie\logs
+// on Windows, and $XDG_STATE_HOME/magpie (~/.local/state/magpie) elsewhere;
+// portable, data/logs. A user asked for magpie's log finds it there
+// (rayem1w on X: the app opened from the Finder had written none).
+func Logs() string {
+	return logsOn(runtime.GOOS)
+}
+
+// logsOn is Logs as it is on goos, for tests of every system's folder.
+func logsOn(goos string) string {
+	if p := Portable(); p != "" {
+		return filepath.Join(p, "logs")
+	}
+	switch goos {
+	case "darwin":
+		return filepath.Join(mustHome(), "Library", "Logs", "magpie")
+	case "windows":
+		local := os.Getenv("LOCALAPPDATA")
+		if !rooted(local) {
+			local = filepath.Join(mustHome(), "AppData", "Local")
+		}
+		return filepath.Join(local, "magpie", "logs")
+	}
+	if x := os.Getenv("XDG_STATE_HOME"); rooted(x) {
 		return filepath.Join(x, "magpie")
 	}
-	return filepath.Join(mustHome(), ".cache", "magpie")
+	return filepath.Join(mustHome(), ".local", "state", "magpie")
 }
 
 // WebView is the folder the Windows webview (WebView2) keeps its profile
@@ -270,9 +337,36 @@ func Cache() string {
 // default. Installed, that default is %APPDATA%\<exe name>, as it always
 // was, so nothing kept there is lost; portable, it is data\webview2, so a
 // portable magpie leaves no magpie.exe folder in the user's AppData (#508).
+// A Windows magpie installed from a download under another name
+// (update.Settle) keeps the profile it had there: the WebViewNote beside
+// it names that folder.
 func WebView() string {
 	if p := Portable(); p != "" {
 		return filepath.Join(p, "webview2")
+	}
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return noted(filepath.Join(filepath.Dir(exe), WebViewNote))
+}
+
+// WebViewNote is the file beside an installed Windows magpie naming the
+// webview profile it keeps, the one it had where it was downloaded.
+const WebViewNote = "webview-profile"
+
+// noted is the absolute folder the note at path names, "" when there is
+// no such note.
+func noted(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if p := strings.TrimSpace(string(b)); filepath.IsAbs(p) {
+		return p
 	}
 	return ""
 }

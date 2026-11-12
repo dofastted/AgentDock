@@ -63,6 +63,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 440, height: 760 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const now = Date.now(), D = 24 * H;
@@ -203,6 +204,26 @@ test("quotaEta: said only from a falling run of this cycle, never for one that i
   assert.equal(eta(line(past, [-5, 60], [-4, 50], [-3, 40]), now), null);
 });
 
+test("quotaCycle: an early reset starts the cycle though the card's reset has milliseconds history doesn't (steven_4422)", async () => {
+  const source = await fs.readFile(path.join(assets, "app.js"), "utf8");
+  const piece = (from, to) => source.slice(source.indexOf(from), source.indexOf("\n}\n", source.indexOf(to)) + 2);
+  const quotaCycle = vm.runInNewContext(piece("function quotaCycleBreak(a, b) {", "function quotaCycleBreak(a, b) {") + "\n" +
+    piece("const quotaCyclesRead", "function quotaRecordedCycles(l) {") + "\n" + piece("function quotaCycle(l, now) {", "function quotaCycle(l, now) {") + "; quotaCycle");
+  const T = (s) => Date.parse(s);
+  const start = T("2026-11-04T10:40:00Z"), reset = T("2026-11-11T10:40:00Z");
+  // a weekly window refilled early at 02:00 on the 9th, its deadline kept
+  const points = [["2026-11-08T12:00:00Z", 30], ["2026-11-09T01:50:00Z", 20], ["2026-11-09T02:05:00Z", 100], ["2026-11-09T12:00:00Z", 90]]
+    .map(([at, left]) => ({ at: T(at), left, start, reset }));
+  const now = T("2026-11-09T13:00:00Z");
+  for (const resetsAt of ["2026-11-11T10:40:00Z", "2026-11-11T10:40:00.437Z", "2026-11-11T10:40:02Z"]) {
+    const c = quotaCycle({ window: { resetsAt }, points }, now);
+    assert.equal(new Date(c.start).toISOString(), "2026-11-09T02:05:00.000Z", resetsAt);
+  }
+  // a deadline the card moved by a day is another cycle: the vendor's start, carried along
+  const c = quotaCycle({ window: { resetsAt: "2026-11-12T10:40:00Z" }, points }, now);
+  assert.equal(new Date(c.start).toISOString(), "2026-11-05T10:40:00.000Z");
+});
+
 test("quota curve distinguishes fixed refills, rolling recovery and clock rounding", async () => {
   const source = await fs.readFile(path.join(assets, "app.js"), "utf8");
   const start = source.indexOf("function quotaCycleBreak(a, b) {");
@@ -273,6 +294,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await (await browser.newContext({ viewport, reducedMotion: "reduce" })).newPage();
         pages.push([name, page]);
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, theme, url.includes("mode=panel"), over || data));
         await page.goto(url);
@@ -475,6 +497,7 @@ async function colorblindPage(browser, lang, data, colorblind) {
   const context = await browser.newContext({ viewport: { width: 900, height: 640 }, reducedMotion: "reduce" });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const base = serve(lang, "light", false, data);
@@ -685,6 +708,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     const page = await (await browser.newContext({ viewport: { width: 440, height: 760 }, reducedMotion: "reduce" })).newPage();
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const now = Date.now(), D = 24 * H;
     const data = fixtures(now);
     data.quotas = [data.quotas[0]];

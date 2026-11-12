@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -348,5 +349,116 @@ func TestOwnKeyValue(t *testing.T) {
 	}
 	if keys, _ := List(); keys[1].Masked != "…" {
 		t.Fatal("a short key shows its end", keys[1].Masked, short)
+	}
+}
+
+// Authenticate tells the sharing key magpie made itself (the one it writes
+// into this computer's own agents) from every other gateway key, so a
+// plugin's ctx.origin can tell the owner's agents from a friend's key
+// (plugins#526): marked LAN, named by LANKeyID only, or the older
+// settings-only key the fallback takes.
+func TestAuthenticateTellsTheDefaultKey(t *testing.T) {
+	t.Run("made by ConfigureLAN", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		friend, err := Update("add-key", Change{Name: "Friend"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		brought, err := Update("add-key", Change{Name: "Brought", Secret: "a-much-longer-key-of-my-own"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ConfigureLAN(true, false); err != nil {
+			t.Fatal(err)
+		}
+		if who, ok := Authenticate(LANSecret()); !ok || !who.Default {
+			t.Fatal("the default sharing key isn't Default", who, ok)
+		}
+		for _, k := range []string{friend, brought} {
+			if who, ok := Authenticate(k); !ok || who.Default {
+				t.Fatal("a named key reads as the default one", who, ok)
+			}
+		}
+	})
+	t.Run("named by LANKeyID only", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		s := settings.Load()
+		s.LANKeyID = "lan"
+		if err := settings.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		if err := save([]Key{{ID: "lan", Name: "Desk", Secret: Prefix + "lan"}, {ID: "other", Name: "Other", Secret: Prefix + "other"}}); err != nil {
+			t.Fatal(err)
+		}
+		if who, ok := Authenticate(Prefix + "lan"); !ok || !who.Default {
+			t.Fatal(who, ok)
+		}
+		if who, ok := Authenticate(Prefix + "other"); !ok || who.Default {
+			t.Fatal(who, ok)
+		}
+	})
+	t.Run("older magpie's settings key", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		s := settings.Load()
+		s.LAN, s.LANKey = true, "sk-magpie-legacy-lan-secret"
+		if err := settings.Save(s); err != nil {
+			t.Fatal(err)
+		}
+		if who, ok := Authenticate(s.LANKey); !ok || !who.Default {
+			t.Fatal(who, ok)
+		}
+	})
+}
+
+// A key magpie made can be given a value of the user's own when it is
+// rotated (isaac_bai on Discord: one easy to remember and pass on),
+// checked as add-key's is, and never a key magpie sends a provider.
+func TestRotateToOwnValue(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	made, err := Update("add-key", Change{Name: "Family"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update("add-key", Change{Name: "Other", Secret: "other-key-of-mine"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "plan", Name: "Plan", Key: "upstream-first-key", Keys: []provider.KeyAccount{{Key: "upstream-second-key"}}, Chat: "http://127.0.0.1:1/v1", Models: []string{"m1"}}); err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := List()
+	id := keys[0].ID
+	for _, bad := range []string{"short", "has a space in it", "非ascii-key-value", "sk-magpie-key-mine-1234", "other-key-of-mine", "upstream-first-key", "upstream-second-key", strings.Repeat("k", 257)} {
+		if _, err := Update("rotate-key", Change{Key: id, Secret: bad}); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+	if who, ok := Authenticate(made); !ok || who.KeyName != "Family" {
+		t.Fatal("a refused value changed the key", who, ok)
+	}
+	const own = "family-easy-to-share"
+	got, err := Update("rotate-key", Change{Key: id, Secret: " " + own + "\n"})
+	if err != nil || got != own {
+		t.Fatal(got, err)
+	}
+	if who, ok := Authenticate(own); !ok || who.KeyName != "Family" || who.KeyID != id {
+		t.Fatal(who, ok)
+	}
+	if _, ok := Authenticate(made); ok || !Named(own) {
+		t.Fatal("the old value still works, or the new one isn't named")
+	}
+	if keys, _ := List(); keys[0].Masked != "…hare" || keys[0].Secret != "" {
+		t.Fatal(keys[0])
+	}
+	// its own value again is no other key's
+	if _, err := Update("rotate-key", Change{Key: id, Secret: own}); err != nil {
+		t.Fatal(err)
+	}
+	// none: magpie makes one again
+	if again, err := Update("rotate-key", Change{Key: id}); err != nil || !strings.HasPrefix(again, Prefix) {
+		t.Fatal(again, err)
+	}
+	// a new key can't take a provider's key either
+	if _, err := Update("add-key", Change{Name: "Leak", Secret: "upstream-first-key"}); err == nil {
+		t.Fatal("add-key took a provider's key")
 	}
 }

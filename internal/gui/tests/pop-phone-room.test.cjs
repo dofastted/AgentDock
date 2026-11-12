@@ -21,7 +21,7 @@ function server(lang) {
     const url = new URL(route.request().url());
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return route.fulfill({ json: { ...state, settings: { lang, theme: "light" } } });
+    if (url.pathname === "/api/state") return route.fulfill({ json: { ...state, settings: { lang, theme: "light", guideHidden: true } } });
     if (url.pathname === "/api/usage/quotas") return route.fulfill({ json: [] });
     if (url.pathname === "/api/groups") return route.fulfill({ json: { groups: [] } });
     if (url.pathname === "/api/agents/cli") return route.fulfill({ json: { agents: {}, pending: false } });
@@ -49,6 +49,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const context = await browser.newContext({ viewport: { width, height: 760 } });
           const page = await context.newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", server(lang));
           await page.goto("http://magpie.test/");

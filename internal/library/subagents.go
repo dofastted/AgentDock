@@ -9,14 +9,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Subagents (#2283) are agents of their own the main agent hands a task
@@ -26,7 +28,7 @@ import (
 // from the agent's source or binary):
 //
 //	Claude Code     <claude dir>/agents/<name>.md      name, description, skills, mcpServers; the prompt below
-//	Codex           <codex home>/agents/<name>.toml    name, description, developer_instructions
+//	Codex           <codex home>/agents/<name>.toml    name, description, model, developer_instructions
 //	OpenCode        <config>/agents/<name>.md          description, mode: subagent; named by its file
 //	Gemini CLI      ~/.gemini/agents/<name>.md         name, description
 //	Qwen Code       <qwen home>/agents/<name>.md       name, description
@@ -37,19 +39,29 @@ import (
 //
 // Only Claude Code takes a subagent's skills, and only Claude Code and
 // Droid its servers by name; every other agent's subagents use whatever
-// the agent has (the page says so). What magpie wrote is recorded file
+// the agent has (the page says so). Only Codex is given a subagent's
+// model (luckymanjc on Discord): its role file is a config layer whose
+// model is laid over the one the lead names in spawn_agent
+// (codex-rs core/src/agent/child_config.rs, apply_spawn_agent_role after
+// apply_requested_spawn_agent_model_overrides), so the subagent's
+// requests carry it. Every other agent's subagent runs on the model that
+// agent picks for it (the page says so). What magpie wrote is recorded file
 // by file with its hash (Applied.Subagents): a file still as magpie wrote
 // it is magpie's to rewrite or remove, one the user changed is theirs from
 // then on, and a file by that name magpie didn't write is never touched.
 
 // Subagent is one the agents ticked for it are given.
 type Subagent struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Prompt      string   `json:"prompt"`
-	Skills      []string `json:"skills,omitempty"`
-	MCP         []string `json:"mcp,omitempty"`
-	Agents      []string `json:"agents"`
+	Name        string `json:"name"`
+	Bundle      string `json:"bundle,omitempty"` // the plugin it came with (plugin.go)
+	Description string `json:"description"`
+	Prompt      string `json:"prompt"`
+	// Model is the model or routing group the subagent runs on, as the
+	// agent names it; "" leaves it to the agent
+	Model  string   `json:"model,omitempty"`
+	Skills []string `json:"skills,omitempty"`
+	MCP    []string `json:"mcp,omitempty"`
+	Agents []string `json:"agents"`
 }
 
 // SubagentFile is a file magpie wrote for a subagent, and the hash of what
@@ -63,7 +75,7 @@ type SubagentFile struct {
 // subagentNameRe is a name every agent takes: Cursor's and CodeBuddy's
 // are lowercase letters, digits and -, Qwen Code's 2 to 50 characters
 // that neither start nor end with - (validateName in its subagents).
-var subagentNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$`)
+var subagentNameRe = lazyre.New(`^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$`)
 
 // reservedSubagents are names Qwen Code keeps for itself.
 var reservedSubagents = []string{"self", "system", "user", "model", "tool", "config", "default", "main"}
@@ -71,6 +83,7 @@ var reservedSubagents = []string{"self", "system", "user", "model", "tool", "con
 const (
 	maxSubagentDescription = 1000
 	maxSubagentPrompt      = 100_000
+	maxSubagentModel       = 200
 )
 
 // SubagentAgents are the agents a subagent can be given, in the order the
@@ -82,17 +95,22 @@ type subagentSpec struct {
 	dir string
 	ext string
 	// skills and mcp: the agent's file names the subagent's own; one
-	// without uses all the agent has
-	skills, mcp bool
-	render      func(s *Subagent, skills, mcp []string) []byte
+	// without uses all the agent has. model: it names the subagent's
+	// model; one without runs it on the model the agent picks
+	skills, mcp, model bool
+	render             func(s *Subagent, skills, mcp []string) []byte
 }
 
 func (sp *subagentSpec) path(name string) string { return filepath.Join(sp.dir, name+sp.ext) }
 
+// wslNoSubagents is why an agent in WSL is given no subagents, its distro
+// running or not.
+const wslNoSubagents = "magpie gives no subagents to an agent in WSL yet"
+
 func subagentSpecOf(t *Target) (*subagentSpec, string) {
 	a := t.Agent
 	if a.WSL != "" {
-		return nil, "magpie gives no subagents to an agent in WSL yet"
+		return nil, wslNoSubagents
 	}
 	md := func(dir string, keys func(s *Subagent, skills, mcp []string) [][2]string) *subagentSpec {
 		return &subagentSpec{dir: dir, ext: ".md", render: func(s *Subagent, skills, mcp []string) []byte {
@@ -118,7 +136,7 @@ func subagentSpecOf(t *Target) (*subagentSpec, string) {
 		sp.skills, sp.mcp = true, true
 		return sp, ""
 	case "codex":
-		return &subagentSpec{dir: filepath.Join(codexDir(), "agents"), ext: ".toml", render: codexRole}, ""
+		return &subagentSpec{dir: filepath.Join(codexDir(), "agents"), ext: ".toml", render: codexRole, model: true}, ""
 	case "opencode":
 		// named by its file; mode subagent is for the main agent to call
 		return md(filepath.Join(filepath.Dir(a.Path), "agents"), func(s *Subagent, _, _ []string) [][2]string {
@@ -184,13 +202,18 @@ func frontmatter(kv [][2]string, body string) []byte {
 
 // codexRole is an agent role file as Codex reads one from its agents
 // folder (codex-rs/agent-roles): name, description and its prompt as
-// developer_instructions, each required.
+// developer_instructions, each required, and the model it runs on when
+// one is set. The file is a config layer (RawAgentRoleFileToml flattens
+// ConfigToml), and its model is put over the lead's pick
+// (AgentRoleOverrides in core/src/agent/role.rs). A subagent with no
+// model is written as it was before there was one.
 func codexRole(s *Subagent, _, _ []string) []byte {
 	b, _ := toml.Marshal(struct {
 		Name                  string `toml:"name"`
 		Description           string `toml:"description"`
+		Model                 string `toml:"model,omitempty"`
 		DeveloperInstructions string `toml:"developer_instructions,multiline"`
-	}{s.Name, s.Description, strings.TrimRight(s.Prompt, "\n") + "\n"})
+	}{s.Name, s.Description, s.Model, strings.TrimRight(s.Prompt, "\n") + "\n"})
 	return b
 }
 
@@ -218,6 +241,9 @@ func (s *Subagent) check() error {
 	if len(s.Prompt) > maxSubagentPrompt {
 		return fmt.Errorf("a subagent's prompt is at most %d bytes", maxSubagentPrompt)
 	}
+	if len(s.Model) > maxSubagentModel || strings.ContainsFunc(s.Model, unicode.IsSpace) {
+		return fmt.Errorf("subagent model %q: a model's id, without spaces, of at most %d bytes", s.Model, maxSubagentModel)
+	}
 	for _, a := range s.Agents {
 		if base, _, _ := strings.Cut(a, "@wsl:"); !slices.Contains(SubagentAgents, base) {
 			return fmt.Errorf("%s can't be given subagents", a)
@@ -236,7 +262,7 @@ func (l *Library) subagent(name string) *Subagent {
 }
 
 // renderSubagent is s as an agent's file: of its skills and servers,
-// those the library still has.
+// those the library still has, a server turned off (ServerOn) left out.
 func (l *Library) renderSubagent(sp *subagentSpec, s *Subagent) []byte {
 	var skills, mcp []string
 	if sp.skills {
@@ -248,7 +274,7 @@ func (l *Library) renderSubagent(sp *subagentSpec, s *Subagent) []byte {
 	}
 	if sp.mcp {
 		for _, n := range s.MCP {
-			if l.server(n) != nil {
+			if x := l.server(n); x != nil && !x.Hidden {
 				mcp = append(mcp, n)
 			}
 		}
@@ -373,6 +399,7 @@ func SaveSubagent(old string, s Subagent) (*Result, error) {
 	s.Name = strings.TrimSpace(s.Name)
 	s.Description = strings.Join(strings.Fields(s.Description), " ")
 	s.Prompt = strings.TrimRight(strings.ReplaceAll(s.Prompt, "\r\n", "\n"), " \n\t")
+	s.Model = strings.TrimSpace(s.Model)
 	if err := s.check(); err != nil {
 		return nil, err
 	}
@@ -451,9 +478,17 @@ type SubagentAgentView struct {
 	// one that doesn't uses all the agent has
 	Skills bool `json:"skills,omitempty"`
 	MCP    bool `json:"mcp,omitempty"`
+	// Model: its subagents run on a model of their own when one is set;
+	// one that doesn't runs them on the model the agent picks
+	Model bool `json:"model,omitempty"`
 }
 
-func (l *Library) subagentsView(targets []*Target, of func(string) map[string]string) ([]SubagentView, []SubagentAgentView) {
+// subagentsView is the Subagents page for these agents, and those in
+// stopped WSL distros (asleep) that the page lists by what magpie last
+// knew of them (asleepView): greyed as while their distro runs, since
+// magpie gives no agent in WSL subagents yet, and nothing of theirs opened
+// (#3896, #4238).
+func (l *Library) subagentsView(targets []*Target, asleep []*agent.Agent, of func(string) map[string]string) ([]SubagentView, []SubagentAgentView) {
 	agents := []SubagentAgentView{}
 	for _, t := range targets {
 		if base, _, _ := strings.Cut(t.Agent.ID, "@wsl:"); !slices.Contains(SubagentAgents, base) {
@@ -462,9 +497,14 @@ func (l *Library) subagentsView(targets []*Target, of func(string) map[string]st
 		sp, why := subagentSpecOf(t)
 		av := SubagentAgentView{ID: t.Agent.ID, No: why, WSL: t.Agent.WSL != ""}
 		if sp != nil {
-			av.Dir, av.Skills, av.MCP = sp.dir, sp.skills, sp.mcp
+			av.Dir, av.Skills, av.MCP, av.Model = sp.dir, sp.skills, sp.mcp, sp.model
 		}
 		agents = append(agents, av)
+	}
+	for _, a := range asleep {
+		if base, _, _ := strings.Cut(a.ID, "@wsl:"); slices.Contains(SubagentAgents, base) && shapeOf(a) != nil {
+			agents = append(agents, SubagentAgentView{ID: a.ID, No: wslNoSubagents, WSL: true})
+		}
 	}
 	views := []SubagentView{}
 	for _, s := range l.Subagents {

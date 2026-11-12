@@ -59,7 +59,7 @@ function serve(lang, posts) {
 }
 
 const LANGS = ["en", "zh", "zh-TW", "ja", "de"];
-const TIP = "{p} has no URL for the API its list serves it on ({apis}), so agents aren't offered it. Add that URL, or set the API it is asked on in Names & levels.";
+const TIP = "{p} has no URL for the API its list serves it on ({apis}), so agents aren't offered it. Add that URL, or set the API it is asked on in Model settings.";
 const ALL_TIP = "Pick every model listed that this provider can serve (those the filter shows)";
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -78,6 +78,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const posts = [];

@@ -11,6 +11,13 @@ func isTitleKind(kind string) bool {
 	return kind == "thread_title" || kind == "thread_title_reconsideration" || kind == "title_generation"
 }
 
+// isCommitKind: the Codex app's commit message, pull request text and
+// both at once (commit_message, pull_request_message,
+// commit_pull_request_message), each asked for in a schema of its own
+func isCommitKind(kind string) bool {
+	return kind == "commit_message" || kind == "pull_request_message" || kind == "commit_pull_request_message"
+}
+
 func isDescriptionKind(kind string) bool {
 	return kind == "thread_description"
 }
@@ -32,6 +39,7 @@ func isPredictionKind(kind string) bool {
 // prompts or the rest of the metadata in the trace.
 type sessionMetadata struct {
 	Turn         string `json:"turn_id"`
+	Thread       string `json:"thread_id"`
 	Source       string `json:"thread_source"`
 	Parent       string `json:"parent_thread_id"`
 	Forked       string `json:"forked_from_thread_id"`
@@ -57,6 +65,7 @@ func requestSessionMetadata(h http.Header, body []byte) sessionMetadata {
 			}
 		} else if len(metadata) > 0 {
 			_ = json.Unmarshal(metadata["turn_id"], &m.Turn)
+			_ = json.Unmarshal(metadata["thread_id"], &m.Thread)
 			// Compatibility projections used by clients without the full blob.
 			_ = json.Unmarshal(metadata["thread_source"], &m.Source)
 			_ = json.Unmarshal(metadata["parent_thread_id"], &m.Parent)

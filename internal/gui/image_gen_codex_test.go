@@ -12,7 +12,7 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// #1865: Settings › Images lists a ChatGPT account's one GPT Image, marked
+// #1865: Settings › Models › Images lists a ChatGPT account's one GPT Image, marked
 // as the vendor's pick, and a gpt-image-2.5 saved when it was listed shows
 // as that entry while the saved value is kept as it is.
 func TestImageGenCodexOneEntry(t *testing.T) {
@@ -60,5 +60,17 @@ func TestImageGenCodexOneEntry(t *testing.T) {
 	}
 	if s := settingsState(); s.ImageGenShown != "" {
 		t.Fatalf("a listed pick is shown as %q", s.ImageGenShown)
+	}
+	// its editor's Image models says why it lists one (ChangQiu on
+	// Discord looked there for gpt-image-2.5)
+	p, err := provider.Find("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j := providerInfo(*p, nil); !j.DrawPicks || len(j.DrawIDs) != 1 {
+		t.Fatalf("editor's drawIds %v, drawPicks %v", j.DrawIDs, j.DrawPicks)
+	} else if j.DrawNames[j.DrawIDs[0]] != "GPT Image" {
+		// StarBits on X read the chip's gpt-image-2 as an old model
+		t.Fatalf("editor shows %q by %v", j.DrawIDs[0], j.DrawNames)
 	}
 }

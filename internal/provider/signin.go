@@ -343,6 +343,11 @@ func (s *signInFlow) begin() error {
 			return err
 		}
 	case "codex":
+		if s.site == CodexDeviceSite {
+			// a code entered on ChatGPT's device page: nothing comes back
+			// to this computer (codex_device_signin.go)
+			return startCodexDeviceSignIn(s)
+		}
 		// ChatGPT sends the browser back only to this one port. One that
 		// can't be had (Windows reserves it, or another program holds it)
 		// doesn't stop the sign-in: the page the browser ends on has the
@@ -753,16 +758,25 @@ func postToken(ctx context.Context, tokenURL, ctype string, body []byte, out any
 // postTokenAs is postToken asked with bearer, a token already had, when it
 // isn't "" (Google's IAM Credentials, which trades one for another).
 func postTokenAs(ctx context.Context, tokenURL, ctype, bearer string, body []byte, out any) error {
+	return postTokenWith(ctx, tokenURL, ctype, bearer, nil, body, out)
+}
+
+// postTokenWith is postTokenAs sent with the headers in h too (Codex's
+// own, codexClientHeaders).
+func postTokenWith(ctx context.Context, tokenURL, ctype, bearer string, h http.Header, body []byte, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(body))
 	if err != nil {
 		return err
+	}
+	for k, v := range h {
+		req.Header[k] = v
 	}
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Accept", "application/json")
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return err
 	}
@@ -819,7 +833,7 @@ func claudeLogin(c claudeCredentials, acct map[string]any) (savedLogin, error) {
 		return savedLogin{}, err
 	}
 	profile, _ := json.Marshal(acct)
-	return savedLogin{Agent: "claude", User: claudeUser(email, c.OAuth.SubscriptionType, acct), Plan: c.OAuth.SubscriptionType, Auth: auth, Profile: profile}, nil
+	return savedLogin{Agent: "claude", User: claudeUser(email, c.OAuth.SubscriptionType, acct), Plan: c.OAuth.plan(), Auth: auth, Profile: profile}, nil
 }
 
 func codexExchange(ctx context.Context, code, verifier, redirect string) (savedLogin, error) {
@@ -830,7 +844,10 @@ func codexExchange(ctx context.Context, code, verifier, redirect string) (savedL
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := postToken(ctx, codexTokenURL, "application/x-www-form-urlencoded", []byte(form.Encode()), &tok); err != nil {
+	// sent as Codex sends it (codex-rs OAuthClient::exchange_code)
+	h := http.Header{}
+	codexClientHeaders(h, codexVersion())
+	if err := postTokenWith(ctx, codexTokenURL, "application/x-www-form-urlencoded", "", h, []byte(form.Encode()), &tok); err != nil {
 		return savedLogin{}, err
 	}
 	if tok.AccessToken == "" || tok.RefreshToken == "" || tok.IDToken == "" {
@@ -876,11 +893,34 @@ func addLogin(l savedLogin) (using bool, err error) {
 	}()
 	loginsMu.Lock()
 	defer loginsMu.Unlock()
+	if l.Agent == "claude" {
+		// the sign-in Claude Code has is read, kept and maybe written
+		// over below: not while it refreshes it (#4532)
+		release, err := claudeRefreshLocks()
+		if err != nil {
+			return false, err
+		}
+		defer release()
+		forgetClaudeCredential()
+	}
 	l.Seen = time.Now().UTC().Truncate(time.Second)
 	live, signedIn := liveLogin(l.Agent)
 	ls := readLogins()
 	l.User = codexName(ls, l)
 	using = !signedIn || sameLogin(live, l)
+	if l.Agent == "claude" && claudeSetupToken(l.Auth) != "" {
+		// Claude Code itself can't be signed in to a setup-token: the
+		// account is magpie's alone, its own sign-in left as it is
+		using = false
+	}
+	if l.AccessOnly {
+		// kept access token only: Codex would renew it, so it is magpie's
+		// alone, and never the one Codex holds here or in another folder
+		if signedIn && (sameLogin(live, l) || sameRefresh(live.Auth, l.Auth)) || codexHeldFolder(ls, l) != "" {
+			return false, errAccessOnlyHeld
+		}
+		using = false
+	}
 	if first := claudeStandIn(ls); !signedIn && l.Agent == "claude" && first != "" {
 		// logged out of Claude Code with accounts in magpie: it stays so,
 		// as the user left it (a claude.ai sign-in beside magpie's token
@@ -898,11 +938,27 @@ func addLogin(l savedLogin) (using bool, err error) {
 		live.Seen = l.Seen
 		ls = upsertLogin(ls, live)
 	}
+	// signed in again to an account Codex keeps in another of its folders
+	// (CODEX_HOME=…, charliepu on Discord): the new tokens go there, where
+	// Codex and magpie both read it, or the next look would read the old
+	// ones back over them
+	held := ""
+	if l.Agent == "codex" && !using && !l.AccessOnly {
+		held = codexHeldFolder(ls, l)
+		l.Home = held
+	}
 	// a second account is in use beside the first straight away, as a
 	// second key is: it takes over when the first runs out
 	l.On = !using
-	if err := writeLogins(upsertLogin(ls, l)); err != nil {
-		return false, err
+	// the credential is stored first: a keychain write that fails (the
+	// login keychain out of reach over ssh, #4563) leaves logins.json as
+	// it was, the account not kept, so signing in again or importing the
+	// same file another time isn't told it is already there
+	if held != "" {
+		if err := saveCodexLogin(held, l.Auth); err != nil {
+			return false, err
+		}
+		forgetCodexSignInGone(held)
 	}
 	if using {
 		switch l.Agent {
@@ -916,6 +972,9 @@ func addLogin(l savedLogin) (using bool, err error) {
 			return false, err
 		}
 	}
+	if err := writeLogins(upsertLogin(ls, l)); err != nil {
+		return false, err
+	}
 	if l.Agent == "claude" {
 		// signed in afresh: what Claude Code kept for it beside the
 		// agent's own is an older sign-in, and gives way
@@ -924,6 +983,20 @@ func addLogin(l savedLogin) (using bool, err error) {
 	loginsSeenAt.Store(0)
 	forgetAccountCaches()
 	return using, nil
+}
+
+// codexHeldFolder is the other Codex folder that holds l's account now,
+// as saved in ls (Home, codexHomeLogins): "" when none does.
+func codexHeldFolder(ls []savedLogin, l savedLogin) string {
+	for _, x := range ls {
+		if x.Agent != "codex" || x.Home == "" || !sameLogin(x, l) {
+			continue
+		}
+		if in, ok := codexLoginIn(x.Home); ok && sameLogin(in, l) {
+			return x.Home
+		}
+	}
+	return ""
 }
 
 // signInPage is what the browser shows at the end: magpie's, in its own

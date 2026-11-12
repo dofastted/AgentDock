@@ -15,11 +15,10 @@ import (
 // messages, $set/$patch and $rewindTo records. Both stores use the same message
 // schema. Message/tool timestamps are event boundaries, not measured latency.
 func geminiTraceFiles() []file {
-	home, _ := os.UserHomeDir()
-	if custom := appdir.Getenv("GEMINI_CLI_HOME"); custom != "" {
-		home = custom
+	if !Reads("gemini") {
+		return nil
 	}
-	root := filepath.Join(home, ".gemini", "tmp")
+	root := geminiTmpDir()
 	var out []file
 	for _, pattern := range []string{"*/chats/session-*.json", "*/chats/session-*.jsonl"} {
 		paths, _ := SessionGlob(filepath.Join(root, pattern))
@@ -31,6 +30,15 @@ func geminiTraceFiles() []file {
 		}
 	}
 	return out
+}
+
+// geminiTmpDir is where Gemini CLI keeps its chats.
+func geminiTmpDir() string {
+	home, _ := os.UserHomeDir()
+	if custom := appdir.Getenv("GEMINI_CLI_HOME"); custom != "" {
+		home = custom
+	}
+	return filepath.Join(home, ".gemini", "tmp")
 }
 
 type geminiTraceTool struct {
@@ -250,11 +258,11 @@ func (r *TraceReader) readGemini(f file, bodies bool, budget *int64) []TraceSpan
 		}
 	}
 	if cursor.offset == f.size {
-		cursor.size, cursor.mod = f.size, f.mod
+		cursor.size, cursor.mod = f.size, f.mod.Time()
 	}
 	// Wait for the current file batch to settle: text, tokens and toolCalls can
 	// be appended separately. Tool completions and earlier responses export now.
-	settled := f.mod.Before(time.Now().Add(-2 * time.Second))
+	settled := f.mod.Before(modOf(time.Now().Add(-2 * time.Second)))
 	snap.settled = settled
 	return r.observations(snap, snap.gemini.spans(bodies, settled))
 }

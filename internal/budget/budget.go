@@ -25,6 +25,15 @@
 //     hours and a week, as a subscription's): a request is let in only
 //     while every one has something left, and its reservation is held
 //     in each window.
+//   - A limit can count only some models' calls (access.Limit.Models,
+//     zola_xynb on X): "<provider>/<model>" or "<provider>/*", matched
+//     against the provider and model that answered each call. A request
+//     that names such a model is refused here once that limit is spent,
+//     and holds its reservation there; a routing group's, or a fallback's,
+//     goes on to the models outside it, as the gateway leaves a spent
+//     limit's models out of every route's candidates (Spent). A group's
+//     request holds no reservation in a model's limit, so parallel
+//     requests through groups can go over it by about one call each.
 //   - Only requests that came with a gateway key are limited: from
 //     another computer one is required; on this one a request without one
 //     (or with a token that is no key) isn't limited.
@@ -47,7 +56,11 @@ import (
 
 // sums is what a key's calls came to in a window.
 type sums struct {
-	start                                time.Time
+	start time.Time
+	// scope is the limit's access.Limit.Scope, "" for the whole key, and
+	// models its patterns with each model's other ids (scopeModels)
+	scope                                string
+	models                               []string
 	calls                                int
 	input, output, cacheRead, cacheWrite int64
 	cost                                 float64
@@ -64,6 +77,38 @@ func (s *sums) add(r usage.Record, cost float64, priced bool) {
 	if !priced {
 		s.unpriced++
 	}
+}
+
+// counts says r is a call of the models s counts: every call, for the
+// whole key.
+func (s *sums) counts(r usage.Record) bool {
+	return s.scope == "" || access.ModelAllowed(s.models, r.Provider+"/"+r.Model)
+}
+
+// scopeModels is the patterns l counts by: its own, and for a model the
+// user lists by an id of their own (provider.SetModelID) the provider's
+// id of it and back, as calls are recorded by the provider's.
+func scopeModels(l *access.Limit) []string {
+	out := slices.Clone(l.Models)
+	for _, m := range l.Models {
+		if strings.Contains(m, "*") {
+			continue
+		}
+		pid, model, ok := strings.Cut(m, "/")
+		if !ok {
+			continue
+		}
+		p, err := provider.Find(pid)
+		if err != nil {
+			continue
+		}
+		for _, o := range []string{p.OwnModelID(model), p.ListedModelID(model)} {
+			if o != model {
+				out = append(out, pid+"/"+o)
+			}
+		}
+	}
+	return out
 }
 
 func (s *sums) tokens(l *access.Limit) int64 {
@@ -84,7 +129,8 @@ type held struct {
 // finishes after the next one has started.
 type window struct {
 	key   string
-	start int64 // the window's start as Unix seconds
+	start int64  // the window's start as Unix seconds
+	scope string // the limit's models (access.Limit.Scope), "" for the whole key
 }
 
 var state = struct {
@@ -97,31 +143,36 @@ func slot(keyID string) string { return usage.Path() + "\x00" + keyID }
 
 // counts reports whether r is a call a key's budget counts.
 // A call an app reported itself (#1874) never counts: it didn't go through
-// magpie, and may be a backfill of calls long past.
-func counts(r usage.Record) bool { return !r.IsRejected() && !r.IsReported() && r.Computer == "" }
+// magpie, and may be a backfill of calls long past. Nor does an MCP tool
+// call (usage.SourceMCP): the model requests it made are calls of their own.
+func counts(r usage.Record) bool {
+	return !r.IsRejected() && !r.IsReported() && !r.IsProbe() && r.Computer == ""
+}
 
-// sumsFor is keyID's sums for each window starting at starts, read from
-// usage.jsonl the first time; those of windows no limit counts in now
-// are let go. A window two limits share (a day and a week on a Monday,
-// a day and a month on the 1st) is kept once, as Append adds a call to
-// each one kept (#2942). Called with state held.
-func sumsFor(keyID string, starts []time.Time) []*sums {
+// sumsFor is keyID's sums for each of its limits ls, in the window each
+// starts at starts, read from usage.jsonl the first time; those of
+// windows no limit counts in now are let go. A window two limits of the
+// same models share (a day and a week on a Monday, a day and a month on
+// the 1st) is kept once, as Append adds a call to each one kept (#2942).
+// Called with state held.
+func sumsFor(keyID string, ls []*access.Limit, starts []time.Time) []*sums {
 	k := slot(keyID)
 	kept := state.sums[k]
 	out := make([]*sums, len(starts))
 	var next []*sums
-	at := func(ss []*sums, start time.Time) int {
-		return slices.IndexFunc(ss, func(s *sums) bool { return s.start.Equal(start) })
+	at := func(ss []*sums, start time.Time, scope string) int {
+		return slices.IndexFunc(ss, func(s *sums) bool { return s.start.Equal(start) && s.scope == scope })
 	}
 	for i, start := range starts {
-		if j := at(next, start); j >= 0 {
+		scope := ls[i].Scope()
+		if j := at(next, start, scope); j >= 0 {
 			out[i] = next[j]
 			continue
 		}
-		if j := at(kept, start); j >= 0 {
+		if j := at(kept, start, scope); j >= 0 {
 			out[i] = kept[j]
 		} else {
-			out[i] = read(keyID, start)
+			out[i] = read(keyID, start, ls[i])
 		}
 		next = append(next, out[i])
 	}
@@ -129,11 +180,16 @@ func sumsFor(keyID string, starts []time.Time) []*sums {
 	return out
 }
 
-func read(keyID string, start time.Time) *sums {
-	s := &sums{start: start}
+// read is what keyID's calls of l's models came to from start.
+func read(keyID string, start time.Time, l *access.Limit) *sums {
+	s := &sums{start: start, scope: l.Scope()}
+	if l.Scoped() {
+		s.models = scopeModels(l)
+	}
 	cost := usage.NewCoster()
 	usage.Visit(start, func(r usage.Record) {
-		if r.CallerKeyID == keyID && counts(r) && !r.Time.Before(start) {
+		// a key issued under keyID spends from its limits too
+		if (r.CallerKeyID == keyID || r.CallerIssuerID == keyID) && counts(r) && !r.Time.Before(start) && s.counts(r) {
 			c, ok := cost(r)
 			s.add(r, c, ok)
 		}
@@ -147,6 +203,9 @@ func Forget() {
 	defer state.Unlock()
 	state.sums = map[string][]*sums{}
 	state.held = map[window]*held{}
+	kept.Lock()
+	clear(kept.of)
+	kept.Unlock()
 }
 
 // Append writes rec to usage.jsonl and, for a key's call, counts it
@@ -163,14 +222,24 @@ func Append(rec usage.Record) {
 		rec.Time = time.Now()
 	}
 	usage.Append(rec)
-	kept := state.sums[slot(rec.CallerKeyID)]
-	if len(kept) == 0 || !counts(rec) {
+	if !counts(rec) {
 		return
 	}
-	c, ok := usage.NewCoster()(rec)
-	for _, s := range kept {
-		if !rec.Time.Before(s.start) {
-			s.add(rec, c, ok)
+	var cost func(usage.Record) (float64, bool)
+	// the call counts for its key, and for the key that one was issued under
+	for _, id := range []string{rec.CallerKeyID, rec.CallerIssuerID} {
+		kept := state.sums[slot(id)]
+		if id == "" || len(kept) == 0 {
+			continue
+		}
+		if cost == nil {
+			cost = usage.NewCoster()
+		}
+		c, ok := cost(rec)
+		for _, s := range kept {
+			if !rec.Time.Before(s.start) && s.counts(rec) {
+				s.add(rec, c, ok)
+			}
 		}
 	}
 }
@@ -194,6 +263,8 @@ type Status struct {
 	TokenLimit   int64   `json:"tokenLimit,omitempty"`
 	CostLimit    float64 `json:"costLimit,omitempty"`
 	CacheReads   bool    `json:"cacheReads,omitempty"`
+	// Models are the models the limit counts, none for the whole key
+	Models []string `json:"models,omitempty"`
 	// TokensLeft and CostLeft are what is left of each cap, 0 at most
 	TokensLeft int64   `json:"tokensLeft"`
 	CostLeft   float64 `json:"costLeft"`
@@ -203,7 +274,7 @@ type Status struct {
 
 func status(keyID string, l *access.Limit, s *sums, h *held, reset time.Time) Status {
 	st := Status{Period: l.Period, Days: l.Days, Hours: l.Hours, Start: s.start, Reset: reset, Calls: s.calls, Tokens: s.tokens(l), Cost: s.cost, Unpriced: s.unpriced,
-		TokenLimit: l.Tokens, CostLimit: l.Cost, CacheReads: l.CacheReads}
+		TokenLimit: l.Tokens, CostLimit: l.Cost, CacheReads: l.CacheReads, Models: l.Models}
 	if h != nil {
 		st.InFlight, st.Reserved, st.ReservedCost = h.n, h.tokens, h.cost
 	}
@@ -233,32 +304,171 @@ func Of(k access.Key, now time.Time) *Status {
 // order k keeps them; none for a key with no limit. A window two
 // limits share is read once.
 func All(k access.Key, now time.Time) []Status {
-	ls := k.Limits()
-	var out []Status
-	read1 := map[int64]*sums{}
-	for _, l := range ls {
-		start, reset := l.Window(now)
-		s := read1[start.Unix()]
-		if s == nil {
-			s = read(k.ID, start)
-			read1[start.Unix()] = s
+	return AllOf([]access.Key{k}, now)[0]
+}
+
+// AllOf is All for each of keys, in their order, from one pass over the
+// ledger, and from what the last pass counted: the Gateway page asked for
+// every key's limits and read a month of the log again for each window of
+// each key, on every poll, which timed out behind a proxy for a user with
+// 12,000 calls a day (aiandcloud on X). A window's full blocks of the log
+// are counted once and kept (usage.VisitFrom); each call counts the rows
+// after them. The gateway's own count (sumsFor) is the one a limit is
+// held by, and still reads the file on its own.
+func AllOf(keys []access.Key, now time.Time) [][]Status {
+	type want struct {
+		w      window
+		prefix sums // the full blocks' rows
+		cur    usage.Cursor
+		total  *sums // and the rows after them
+	}
+	out := make([][]Status, len(keys))
+	wants := make([][]*want, len(keys))
+	byKey := map[string][]*want{} // by the key a call is recorded under, or issued under
+	var all []*want
+	for i, k := range keys {
+		seen := map[window]*want{}
+		for _, l := range k.Limits() {
+			start, _ := l.Window(now)
+			w := window{slot(k.ID), start.Unix(), l.Scope()}
+			x := seen[w]
+			if x == nil {
+				x = &want{w: w}
+				x.prefix = sums{start: start, scope: l.Scope()}
+				if l.Scoped() {
+					x.prefix.models = scopeModels(l)
+				}
+				kept.Lock()
+				// window keys a start by its second: what was kept is
+				// another limit's when that one started in the same
+				// second (a 10-day limit made a 5-hour one at once)
+				if e, ok := kept.of[w]; ok && e.prefix.start.Equal(start) {
+					x.prefix, x.cur = e.prefix, e.cur
+				}
+				kept.Unlock()
+				seen[w] = x
+				byKey[k.ID] = append(byKey[k.ID], x)
+				all = append(all, x)
+			}
+			wants[i] = append(wants[i], x)
 		}
-		state.Lock()
-		h := state.held[window{slot(k.ID), start.Unix()}]
-		out = append(out, status(k.ID, l, s, h, reset))
-		state.Unlock()
+	}
+	if len(all) > 0 {
+		cost := usage.NewCoster()
+		// the windows that stopped at the same place read together
+		for len(all) > 0 {
+			cur := all[0].cur
+			var group, rest []*want
+			for _, x := range all {
+				if x.cur == cur {
+					group = append(group, x)
+				} else {
+					rest = append(rest, x)
+				}
+			}
+			all = rest
+			since := group[0].prefix.start
+			for _, x := range group {
+				if x.prefix.start.Before(since) {
+					since = x.prefix.start
+				}
+			}
+			ofGroup := map[string][]*want{}
+			for _, x := range group {
+				for id, ws := range byKey {
+					if slices.Contains(ws, x) {
+						ofGroup[id] = append(ofGroup[id], x)
+					}
+				}
+			}
+			count := func(into func(*want) *sums) func(usage.Record) {
+				return func(r usage.Record) {
+					ws := ofGroup[r.CallerKeyID]
+					if r.CallerIssuerID != "" && r.CallerIssuerID != r.CallerKeyID {
+						ws = append(slices.Clone(ws), ofGroup[r.CallerIssuerID]...)
+					}
+					if len(ws) == 0 || !counts(r) {
+						return
+					}
+					var c float64
+					var ok, priced bool
+					for _, x := range ws {
+						// a key issued under keyID spends from its limits too
+						if s := into(x); !r.Time.Before(s.start) && s.counts(r) {
+							if !priced {
+								c, ok = cost(r)
+								priced = true
+							}
+							s.add(r, c, ok)
+						}
+					}
+				}
+			}
+			next := usage.VisitFrom(since, cur,
+				func() {
+					for _, x := range group {
+						x.prefix = sums{start: x.prefix.start, scope: x.prefix.scope, models: x.prefix.models}
+					}
+				},
+				count(func(x *want) *sums { return &x.prefix }),
+				count(func(x *want) *sums {
+					if x.total == nil {
+						c := x.prefix
+						x.total = &c
+					}
+					return x.total
+				}))
+			for _, x := range group {
+				x.cur = next
+				if x.total == nil {
+					c := x.prefix
+					x.total = &c
+				}
+				kept.Lock()
+				if len(kept.of) > 1024 {
+					clear(kept.of)
+				}
+				kept.of[x.w] = keptSums{prefix: x.prefix, cur: next}
+				kept.Unlock()
+			}
+		}
+	}
+	state.Lock()
+	defer state.Unlock()
+	for i, k := range keys {
+		for j, l := range k.Limits() {
+			x := wants[i][j]
+			_, reset := l.Window(now)
+			out[i] = append(out[i], status(k.ID, l, x.total, state.held[x.w], reset))
+		}
 	}
 	return out
 }
 
+// kept is what AllOf counted of each window's full blocks of the log.
+var kept = struct {
+	sync.Mutex
+	of map[window]keptSums
+}{of: map[window]keptSums{}}
+
+type keptSums struct {
+	prefix sums
+	cur    usage.Cursor
+}
+
 // Binding is the one of a key's statuses that holds it most: of those
 // spent, the one that resets last, as the key is refused until then;
-// else the one with the most of a cap used. Nil for none.
+// else the one with the most of a cap used. Nil for none. A limit of
+// some models holds the key only when it has no limit of the whole key:
+// one spent leaves the key's other models served, and a magpie using this
+// one as a remote reads this one as the key's.
 func Binding(all []Status) *Status {
+	whole := slices.ContainsFunc(all, func(st Status) bool { return len(st.Models) == 0 })
 	var b *Status
 	for i := range all {
 		st := &all[i]
 		switch {
+		case whole && len(st.Models) > 0:
 		case b == nil:
 			b = st
 		case st.Spent != b.Spent:
@@ -310,8 +520,15 @@ func (r *Refusal) Error() string {
 	if !r.Spent {
 		what += fmt.Sprintf(", with %d requests in flight holding the rest", r.InFlight)
 	}
-	return fmt.Sprintf("magpie gateway key %q has used %s for this %s; it resets at %s",
-		r.Key, what, (&access.Limit{Period: r.Period, Days: r.Days, Hours: r.Hours}).Per(), r.Reset.Format("2006-01-02 15:04 MST"))
+	on := ""
+	if len(r.Models) > 0 {
+		on = " on " + strings.Join(r.Models, ", ")
+	}
+	if r.Period == "total" {
+		return fmt.Sprintf("magpie gateway key %q has used %s%s of its total limit; it stays refused until the limit is reset or raised", r.Key, what, on)
+	}
+	return fmt.Sprintf("magpie gateway key %q has used %s%s for this %s; it resets at %s",
+		r.Key, what, on, (&access.Limit{Period: r.Period, Days: r.Days, Hours: r.Hours}).Per(), r.Reset.Format("2006-01-02 15:04 MST"))
 }
 
 // RetryAfter is how long until the window resets, in whole seconds.
@@ -334,28 +551,49 @@ func (Limiter) Reserve(who access.Identity, body int64, model string, now time.T
 	return release, nil
 }
 
+func (Limiter) Spent(who access.Identity, now time.Time) []access.SpentScope { return Spent(who, now) }
+
 // Reserve lets a request of who's in, holding a reservation for it until
 // the release it returns is called, or refuses it. body is the request's
 // size in bytes (-1 unknown) and model the model it named, for a cost cap
 // before the key has a price of its own this window.
 func Reserve(who access.Identity, body int64, model string, now time.Time) (release func(), refused *Refusal) {
-	ls := who.Limits()
-	if who.KeyID == "" || len(ls) == 0 {
-		return func() {}, nil
+	if who.Issuer == nil {
+		return reserve(who, body, model, now)
 	}
-	starts := make([]time.Time, len(ls))
-	resets := make([]time.Time, len(ls))
-	for i, l := range ls {
-		starts[i], resets[i] = l.Window(now)
+	// an issued key's request is held to its own limits and to its
+	// issuer's, which count what every key issued under it spends
+	own, refused := reserve(who, body, model, now)
+	if refused != nil {
+		return nil, refused
+	}
+	up, refused := reserve(*who.Issuer, body, model, now)
+	if refused != nil {
+		own()
+		return nil, refused
+	}
+	return func() { own(); up() }, nil
+}
+
+func reserve(who access.Identity, body int64, model string, now time.Time) (release func(), refused *Refusal) {
+	// a limit of some models holds a request only when it names one of
+	// them; one through a routing group is held by the gateway leaving
+	// the spent ones' models out of its candidates (Spent)
+	served := servedAs(model)
+	if who.KeyID == "" || len(who.Limits()) == 0 {
+		return func() {}, nil
 	}
 	state.Lock()
 	defer state.Unlock()
-	ss := sumsFor(who.KeyID, starts)
-	heldAt := func(start time.Time) *held { return state.held[window{slot(who.KeyID), start.Unix()}] }
+	ls, starts, resets, ss := windowsOf(who, now, func(l *access.Limit) bool { return !l.Scoped() || scopeHas(l, served) })
+	if len(ls) == 0 {
+		return func() {}, nil
+	}
+	heldAt := func(i int) *held { return state.held[window{slot(who.KeyID), starts[i].Unix(), ls[i].Scope()}] }
 	// every limit is asked: of those with nothing left, the one that
 	// resets last is the one the client is told, as it is refused until then
 	for i, l := range ls {
-		s, h := ss[i], heldAt(starts[i])
+		s, h := ss[i], heldAt(i)
 		var ht int64
 		var hc float64
 		if h != nil {
@@ -380,7 +618,7 @@ func Reserve(who access.Identity, body int64, model string, now time.Time) (rele
 	}
 	var holds []hold
 	for i, l := range ls {
-		k := window{slot(who.KeyID), starts[i].Unix()}
+		k := window{slot(who.KeyID), starts[i].Unix(), l.Scope()}
 		j := slices.IndexFunc(holds, func(x hold) bool { return x.k == k })
 		if j < 0 {
 			s := ss[i]
@@ -429,6 +667,102 @@ func Reserve(who access.Identity, body int64, model string, now time.Time) (rele
 	}, nil
 }
 
+// servedAs is the ids a request for model would be answered by, as
+// "<provider>/<model>" with the provider's id of it and the user's own:
+// none for a routing group, an auto/ model or a name magpie doesn't serve,
+// whose models routing decides.
+func servedAs(model string) []string {
+	if model == "" || provider.IsGroupRef(model) {
+		return nil
+	}
+	if _, ok := provider.GroupFor(model); ok {
+		return nil
+	}
+	if _, ok := provider.AutoStandIn(model); ok {
+		return nil
+	}
+	p, m, ok := provider.Resolve(model)
+	if !ok {
+		return nil
+	}
+	out := []string{p.ID + "/" + m}
+	for _, o := range []string{p.OwnModelID(m), p.ListedModelID(m)} {
+		if o != m {
+			out = append(out, p.ID+"/"+o)
+		}
+	}
+	return out
+}
+
+// scopeHas says one of ids is among l's models.
+func scopeHas(l *access.Limit, ids []string) bool {
+	for _, id := range ids {
+		if access.ModelAllowed(l.Models, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// Spent is who's limits of some models that have nothing left now, its
+// own key's and the one it was issued under's: the gateway leaves their
+// models out of every route's candidates for the request (access.Identity
+// .Spent), each said with the refusal a request naming one is told.
+func Spent(who access.Identity, now time.Time) []access.SpentScope {
+	out := spentOf(who, now)
+	if who.Issuer != nil {
+		out = append(out, spentOf(*who.Issuer, now)...)
+	}
+	return out
+}
+
+func spentOf(who access.Identity, now time.Time) []access.SpentScope {
+	if who.KeyID == "" || !slices.ContainsFunc(who.Limits(), (*access.Limit).Scoped) {
+		return nil
+	}
+	state.Lock()
+	defer state.Unlock()
+	ls, starts, resets, ss := windowsOf(who, now, (*access.Limit).Scoped)
+	var out []access.SpentScope
+	for i, l := range ls {
+		s, h := ss[i], state.held[window{slot(who.KeyID), starts[i].Unix(), l.Scope()}]
+		var ht int64
+		var hc float64
+		if h != nil {
+			ht, hc = h.tokens, h.cost
+		}
+		if (l.Tokens > 0 && s.tokens(l)+ht >= l.Tokens) || (l.Cost > 0 && s.cost+hc >= l.Cost) {
+			r := &Refusal{Status: status(who.KeyID, l, s, h, resets[i]), Key: who.KeyName}
+			out = append(out, access.SpentScope{Models: s.models, Reset: resets[i], Why: r.Error()})
+		}
+	}
+	return out
+}
+
+// windowsOf is who's limits that keep holds, each with its window's start
+// and reset and its sums. The sums of every limit are asked for, the ones
+// left out too: sumsFor lets go of a window no limit asked for counts in,
+// and a request of one model would read another's limit's again from the
+// ledger on the next. Called with state held.
+func windowsOf(who access.Identity, now time.Time, keep func(*access.Limit) bool) (ls []*access.Limit, starts, resets []time.Time, ss []*sums) {
+	all := who.Limits()
+	allStarts := make([]time.Time, len(all))
+	allResets := make([]time.Time, len(all))
+	for i, l := range all {
+		allStarts[i], allResets[i] = l.Window(now)
+	}
+	allSums := sumsFor(who.KeyID, all, allStarts)
+	for i, l := range all {
+		if keep(l) {
+			ls = append(ls, l)
+			starts = append(starts, allStarts[i])
+			resets = append(resets, allResets[i])
+			ss = append(ss, allSums[i])
+		}
+	}
+	return ls, starts, resets, ss
+}
+
 // priceOf is the input price per token of model when it names its
 // provider ("provider/model").
 func priceOf(model string) (float64, bool) {
@@ -440,7 +774,8 @@ func priceOf(model string) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return pr.Input / 1e6, true
+	// the call is made now, at this hour's price (Price.In)
+	return pr.In(time.Now()).Input / 1e6, true
 }
 
 // ModelOf is the model a JSON request body names, "" for none.

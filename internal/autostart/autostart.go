@@ -48,7 +48,8 @@ func Enabled() State {
 	return On
 }
 
-// Set has magpie open at login, or not, as this copy of it.
+// Set has magpie open at login, or not, as this copy of it; on Linux,
+// where a package's own autostart entry starts magpie, as that package's.
 func Set(on bool) error {
 	if !on {
 		return disable()
@@ -84,4 +85,34 @@ func self() (string, error) {
 		return "", errors.New("move magpie to Applications first, then turn this on")
 	}
 	return exe, nil
+}
+
+// Repoint has the record that opens magpie at login open to instead, when
+// it opens from: the Windows app installed itself from where it was
+// downloaded (update.Settle). Nothing else in it changes, so a record the
+// user switched off in Task Manager stays off, and none is made when there
+// was none.
+func Repoint(from, to string) error { return repoint(from, to) }
+
+// repointed is the Windows Run value v opening to in place of from, with
+// its arguments kept; ok is false when v doesn't open from.
+func repointed(v, from, to string) (string, bool) {
+	v = strings.TrimSpace(v)
+	var exe, rest string
+	if strings.HasPrefix(v, `"`) {
+		i := strings.Index(v[1:], `"`)
+		if i < 0 {
+			return "", false
+		}
+		exe, rest = v[1:1+i], v[2+i:]
+	} else {
+		exe, rest, _ = strings.Cut(v, " ")
+		if rest != "" {
+			rest = " " + rest
+		}
+	}
+	if exe == "" || !strings.EqualFold(filepath.Clean(exe), filepath.Clean(from)) {
+		return "", false
+	}
+	return `"` + to + `"` + rest, true
 }

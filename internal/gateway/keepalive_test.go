@@ -30,9 +30,17 @@ func keepFast(t *testing.T, gap, every, longest time.Duration) {
 // (#2169, #2711, #2737). The client must hear something it counts all along: Codex's
 // timeout counts events, never a comment, so a Responses or Anthropic
 // client is kept alive with events, a Chat one with comments.
+//
+// An Anthropic client's pings are spaced pingEvery apart (here 100ms),
+// with comments between: Claude Code counts only 30 pings in a row as
+// life, so a ping on every provider keepalive (here each 20ms, ~75 in
+// all) spent them early and let its watchdog fire later (youyo.p).
 func TestTranslatedStreamKeepsClientAlive(t *testing.T) {
 	keepFast(t, 10*time.Millisecond, keepaliveEvery, keepaliveLongest)
 	const quietFor, idleFor = 1500 * time.Millisecond, 500 * time.Millisecond
+	pe := pingEvery
+	pingEvery = 100 * time.Millisecond
+	t.Cleanup(func() { pingEvery = pe })
 	for _, c := range []struct {
 		name, path, body, done, ping string // done: the reply's last event
 		upChat                       bool
@@ -169,49 +177,123 @@ func TestTranslatedStreamKeepsClientAlive(t *testing.T) {
 			if empty > 0 {
 				t.Fatalf("%d events with no data", empty)
 			}
+			// one each pingEvery over quietFor, and room for the first
+			// and a slow scheduler's catch-up
+			if most := int(quietFor/pingEvery) + 5; c.ping == `"type":"ping"` && pings > most {
+				t.Fatalf("%d pings in %v, want at most %d (one each %v)", pings, quietFor, most, pingEvery)
+			}
 		})
 	}
 }
 
-// TestTranslatedSilenceStillTimesOut: a provider that says nothing at all
-// isn't covered for; the client's idle timeout still ends the wait.
-func TestTranslatedSilenceStillTimesOut(t *testing.T) {
-	keepFast(t, 10*time.Millisecond, keepaliveEvery, keepaliveLongest)
-	fresh(t)
-	release := make(chan struct{})
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: "+`{"id":"c1","model":"m1","choices":[{"index":0,"delta":{"content":"progress"},"finish_reason":null}]}`+"\n\n")
-		w.(http.Flusher).Flush()
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	}))
-	defer up.Close()
-	defer close(release)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "fixture", Models: []string{"m1"}, Chat: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(New().Handler())
-	defer server.Close()
-	// The client's idle timeout is over the body: it starts once the
-	// headers are in, so that a loaded machine's slow first byte isn't
-	// taken for it (#2248). 400ms is 40 keepalive gaps.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/responses", strings.NewReader(`{"model":"fake/m1","stream":true,"input":"hi"}`))
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	idle := time.AfterFunc(400*time.Millisecond, cancel)
-	defer idle.Stop()
-	b, _ := io.ReadAll(res.Body)
-	if n := strings.Count(string(b), `"type":"response.in_progress"`); n > 1 {
-		t.Fatalf("a silent provider was covered for: %d in_progress events\n%s", n, b)
+// TestTranslatedSilenceKeptAliveForABound: a provider that begins its
+// reply and then says nothing at all, not even a comment, as a relay does
+// that sends the rest of a long reply in one burst at its end (youyo.p on
+// Discord: Claude Code on claude-opus-5-5 at effort max, a custom
+// provider's /v1/responses, the request canceled some 357s in). The
+// client is kept alive in its own protocol, with what its idle timeout
+// counts: a ping for an Anthropic client, a response.in_progress for a
+// Responses one, a comment for a Chat one. It is kept so only for
+// translatedQuietLongest of silence (here 1s), after which the client's
+// own idle timeout ends the wait. Before, the client was sent only
+// comments, which neither Claude Code's event watchdog nor Codex counts,
+// for keepaliveLongest.
+func TestTranslatedSilenceKeptAliveForABound(t *testing.T) {
+	const every, bound = 20 * time.Millisecond, time.Second
+	keepFast(t, 10*time.Millisecond, every, 100*time.Millisecond)
+	k, w, q, p, l := keepHeldAfter, watchEvery, agentQuietMost, pingEvery, translatedQuietLongest
+	keepHeldAfter, watchEvery, agentQuietMost, pingEvery, translatedQuietLongest = 30*time.Millisecond, 10*time.Millisecond, 200*time.Millisecond, every, bound
+	t.Cleanup(func() { keepHeldAfter, watchEvery, agentQuietMost, pingEvery, translatedQuietLongest = k, w, q, p, l })
+	for _, c := range []struct {
+		name, path, body, alive string
+		upChat                  bool // the provider speaks Chat, else Responses
+	}{
+		{"anthropic_from_responses", "/v1/messages", `{"model":"fake/m1","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, `data: {"type":"ping"}`, false},
+		{"responses_from_chat", "/v1/responses", `{"model":"fake/m1","stream":true,"input":"hi"}`, `"type":"response.in_progress"`, true},
+		{"chat_from_responses", "/v1/chat/completions", `{"model":"fake/m1","stream":true,"messages":[{"role":"user","content":"hi"}]}`, ": keepalive", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fresh(t)
+			release := make(chan struct{})
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				// the reply begins, then nothing comes on the open stream
+				if c.upChat {
+					io.WriteString(w, "data: "+`{"id":"c1","model":"m1","choices":[{"index":0,"delta":{"content":"progress"},"finish_reason":null}]}`+"\n\n")
+				} else {
+					io.WriteString(w, "event: response.created\ndata: "+`{"type":"response.created","response":{"id":"r1","model":"m1"}}`+"\n\n")
+					io.WriteString(w, "event: response.output_text.delta\ndata: "+`{"type":"response.output_text.delta","delta":"progress"}`+"\n\n")
+				}
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+			}))
+			defer up.Close()
+			defer close(release)
+			p := provider.Provider{ID: "fake", Name: "Fake", Key: "fixture", Models: []string{"m1"}}
+			if c.upChat {
+				p.Chat = up.URL + "/v1"
+			} else {
+				p.Responses = up.URL + "/v1"
+			}
+			if err := provider.Save(p); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(New().Handler())
+			defer server.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+c.path, strings.NewReader(c.body))
+			req.Header.Set("Content-Type", "application/json")
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			lines := make(chan string, 1024)
+			go func() {
+				defer close(lines)
+				sc := bufio.NewScanner(res.Body)
+				for sc.Scan() {
+					lines <- sc.Text()
+				}
+			}()
+			// Kept alive: the client hears 10 of what it counts, which at
+			// one each 20ms takes 200ms of the 1s bound. A loaded machine
+			// may take longer, so it is waited for, up to 20s.
+			count := func(until <-chan time.Time, enough int) int {
+				n := 0
+				for {
+					select {
+					case line, ok := <-lines:
+						if !ok {
+							return n
+						}
+						if strings.Contains(line, c.alive) {
+							if n++; n == enough {
+								return n
+							}
+						}
+					case <-until:
+						return n
+					}
+				}
+			}
+			if n := count(time.After(20*time.Second), 10); n < 10 {
+				t.Fatalf("a silent provider's client heard %d of %q, want it kept alive", n, c.alive)
+			}
+			// Let go: one each 20ms for the bound is at most ~55 more
+			// (the bound, and the held stream's 100ms of comments after
+			// it). Unbounded, the 4s after would hold ~200.
+			n := count(time.After(4*time.Second), -1)
+			t.Logf("%d more of %q after the first 10", n, c.alive)
+			if n > 100 {
+				t.Fatalf("the client was kept alive %d more times, long past the provider's %v of silence", n, bound)
+			}
+		})
 	}
 }
 
@@ -242,7 +324,9 @@ func TestRelayKeepsClientAlive(t *testing.T) {
 	if len(parts) != 2 || !strings.Contains(body, "message_stop") {
 		t.Fatalf("reply incomplete:\n%s", body)
 	}
-	before, after := strings.Count(parts[0], `"type":"ping"`), strings.Count(parts[1], `"type":"ping"`)
+	// a ping or, within pingEvery of the last, a comment
+	alive := func(s string) int { return strings.Count(s, `"type":"ping"`) + strings.Count(s, ": keepalive") }
+	before, after := alive(parts[0]), alive(parts[1])
 	t.Logf("pings in a 150ms gap: %d, in a 600ms gap (200ms kept): %d", before, after)
 	if before < 3 {
 		t.Fatalf("a quiet reply wasn't kept alive: %d pings in 150ms", before)
@@ -275,5 +359,177 @@ func TestTraceKeepsInflight(t *testing.T) {
 	}
 	if n := len(s.Trace(context.Background(), 0, 0).Routes); n != 2*traceKeep {
 		t.Fatalf("%d routes kept, want %d", n, 2*traceKeep)
+	}
+}
+
+// Anthropic's SDKs fail a stream with any event before message_start
+// ("Unexpected event order, got ping before message_start"), and Anthropic
+// sends none, so a keepalive before it is a comment; after it a ping, at
+// most one each pingEvery, comments in between.
+func TestAnthropicKeepaliveBeforeStartIsAComment(t *testing.T) {
+	was := pingEvery
+	pingEvery = time.Hour
+	t.Cleanup(func() { pingEvery = was })
+	rec := httptest.NewRecorder()
+	e := &anthropicEncoder{w: newSSEWriter(rec), model: "m"}
+	e.keepalive()
+	e.keepalive()
+	if body := rec.Body.String(); strings.Contains(body, "event:") || !strings.Contains(body, ": keepalive") {
+		t.Fatalf("before message_start: %q", body)
+	}
+	e.event(Event{Kind: KStart, MsgID: "msg_1", Model: "m"})
+	e.keepalive()
+	e.keepalive()
+	body := rec.Body.String()
+	if !strings.HasPrefix(strings.TrimPrefix(body[strings.Index(body, "event:"):], "event: "), "message_start") {
+		t.Fatalf("an event before message_start: %q", body)
+	}
+	if n := strings.Count(body, `"type":"ping"`); n != 1 {
+		t.Fatalf("%d pings within one pingEvery after message_start: %q", n, body)
+	}
+}
+
+// TestQueuedUpstreamKeepsResponsesClientAlive: a Chat provider that sends
+// its 200 and then only SSE comments, no event of its reply, for far
+// longer than agentQuietMost, keepaliveLongest and translatedQuietLongest
+// before it answers. The Qoder plugin does this while Qoder's queue (code
+// 10605) holds a request, for up to the hour Qoder's own client waits
+// (plugins#807). A Responses client, whose idle timeout counts events and
+// never a comment (Codex, 300s), must hear an event within its timeout
+// all along: the held stream flows at agentQuietMost, and each comment
+// after is response.in_progress, the provider's comments renewing
+// translatedQuietLongest. Times are scaled: Codex's 300s is idleFor,
+// agentQuietMost's 4 minutes is 200ms.
+func TestQueuedUpstreamKeepsResponsesClientAlive(t *testing.T) {
+	keepFast(t, 10*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond)
+	k, w, q, l := keepHeldAfter, watchEvery, agentQuietMost, translatedQuietLongest
+	keepHeldAfter, watchEvery, agentQuietMost, translatedQuietLongest = 30*time.Millisecond, 10*time.Millisecond, 200*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { keepHeldAfter, watchEvery, agentQuietMost, translatedQuietLongest = k, w, q, l })
+	const idleFor = 600 * time.Millisecond
+	fresh(t)
+	release := make(chan struct{})
+	var comments atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f := w.(http.Flusher)
+		f.Flush()
+		tick := time.NewTicker(20 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-tick.C:
+				if _, err := io.WriteString(w, ": queued in Qoder\n\n"); err != nil {
+					return
+				}
+				comments.Add(1)
+				f.Flush()
+			case <-release:
+				io.WriteString(w, "data: "+`{"id":"c1","model":"m1","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`+"\n\n")
+				io.WriteString(w, "data: "+`{"id":"c1","model":"m1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\ndata: [DONE]\n\n")
+				f.Flush()
+				return
+			}
+		}
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "fixture", Models: []string{"m1"}, Chat: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New().Handler())
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/responses", strings.NewReader(`{"model":"fake/m1","stream":true,"input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	lines := make(chan string, 4096)
+	go func() {
+		defer close(lines)
+		sc := bufio.NewScanner(res.Body)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+	}()
+	// the queue holds the request until the client has heard 40 events of
+	// its own (40 x 20ms, several times every bound above); each must come
+	// within idleFor of the one before
+	idle := time.NewTimer(idleFor)
+	defer idle.Stop()
+	events, released, completed, text := 0, false, false, false
+	for !completed {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				t.Fatalf("the stream ended after %d events, completed=%v", events, completed)
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			idle.Reset(idleFor)
+			events++
+			if strings.Contains(line, `"delta":"hello"`) {
+				text = true
+			}
+			if strings.Contains(line, `"type":"response.completed"`) {
+				completed = true
+			}
+			if events >= 40 && !released {
+				released = true
+				close(release)
+			}
+		case <-idle.C:
+			t.Fatalf("the client heard no event for %v after %d (upstream comments %d)", idleFor, events, comments.Load())
+		}
+	}
+	if !released || !text {
+		t.Fatalf("released=%v text=%v after %d events", released, text, events)
+	}
+	t.Logf("events=%d upstream_comments=%d", events, comments.Load())
+}
+
+// A translated reply's reader can outlive the request that started it: a
+// model test (probeTranslated) returns at the first word and leaves the
+// reader to see the cancel. The reader read keepaliveEvery itself, so a
+// later test's keepFast wrote it with no order between the two, and the
+// race detector failed TestQueuedStreamKeptAliveForTheMinute on CI
+// (#5973). The interval is read on the request's goroutine now; under
+// -race this test fails on the old code.
+func TestTranslatedReaderReadsNoKeepaliveLater(t *testing.T) {
+	fresh(t)
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(up.Close)
+	t.Cleanup(func() { close(release) })
+	p := provider.Provider{ID: "q", Name: "Q", Key: "k", Models: []string{"m"}, Chat: up.URL + "/v1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	events, code, msg := New().askTranslated(p, provider.Chat, "m", http.Header{}, http.Header{})(ctx, &Request{MaxTokens: 16, Messages: []Message{{Role: "user", Parts: []Part{{Kind: Text, Text: "hi"}}}}})
+	if events == nil {
+		t.Fatalf("asked: %d %s", code, msg)
+	}
+	for ev := range events {
+		if ev.Kind == KText {
+			break
+		}
+	}
+	// the reader is still running, as a model test leaves it
+	keepFast(t, 10*time.Millisecond, 20*time.Millisecond, keepaliveLongest)
+	cancel()
+	for range events {
 	}
 }

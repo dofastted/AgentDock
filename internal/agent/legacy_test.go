@@ -132,6 +132,7 @@ func TestMoveCursorEfforts(t *testing.T) {
 		}
 	}
 	write(`{"defaultProvider": "magpie", "defaultModel": "curs/grok-4.7-low", "theme": "dark"}`)
+	setUpInMagpie("pi")
 	moveEfforts("curs", base)
 	for k, want := range map[string]string{"defaultProvider": "magpie", "defaultModel": "curs/grok-4.7", "defaultThinkingLevel": "low", "theme": "dark"} {
 		if v, _ := edit.GetJSON(pi, k); v != want {
@@ -148,5 +149,44 @@ func TestMoveCursorEfforts(t *testing.T) {
 	moveEfforts("curs", base)
 	if v, _ := edit.GetJSON(pi, "defaultModel"); v != "curs/gone-low" {
 		t.Errorf("model %q", v)
+	}
+	// a provider named magpie the user wrote by hand is theirs: left as it is
+	stash(map[string]string{"pi.connect.was": ""})
+	mine := `{"defaultProvider": "magpie", "defaultModel": "curs/grok-4.7-low"}`
+	write(mine)
+	moveEfforts("curs", base)
+	if b, _ := os.ReadFile(pi); string(b) != mine {
+		t.Errorf("hand-wired Pi moved:\n%s", b)
+	}
+}
+
+// RenameLegacy reads a thinking level as it is: Pi's effort field, read
+// against the models Pi is offered, had the whole catalog built for it at
+// every start (~52 MB with a real account's providers), though a level is
+// never a dial/ model.
+func TestRenameLegacyBuildsNoModels(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"deepseek-flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"defaultProvider": "magpie", "defaultModel": "deepseek/deepseek-flash", "defaultThinkingLevel": "high"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	builtModels.Lock()
+	builtModels.m = nil
+	builtModels.Unlock()
+	RenameLegacy()
+	builtModels.Lock()
+	defer builtModels.Unlock()
+	for k := range builtModels.m {
+		t.Errorf("RenameLegacy built %s's models", k)
 	}
 }

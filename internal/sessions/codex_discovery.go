@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -99,12 +100,22 @@ func sameCodexSnapshot(a, b os.FileInfo) bool {
 // Only a proven decoded prefix is a redundant copy. A shared thread/name
 // alone cannot establish ownership of divergent logs or distinct segments.
 func distinctCodexFiles(files []file) []file {
-	groups := map[string][]int{}
+	// a name's first file, and the rest of its files, which few names
+	// have: a slice made for every name was ~45 MB of a minute of the
+	// page's polls (#2278)
+	first := nameFirsts()
+	defer putNameFirsts(first)
+	var more map[string][]int
 	keep := make([]bool, len(files))
 	for i, f := range files {
 		keep[i] = true
 		name := strings.TrimSuffix(filepath.Base(f.path), zstSuffix)
-		for _, j := range groups[name] {
+		j0, seen := first[name]
+		if !seen {
+			first[name] = i
+			continue
+		}
+		for _, j := range slices.Concat([]int{j0}, more[name]) {
 			if !keep[j] {
 				continue
 			}
@@ -118,15 +129,40 @@ func distinctCodexFiles(files []file) []file {
 				break
 			}
 		}
-		groups[name] = append(groups[name], i)
+		if more == nil {
+			more = map[string][]int{}
+		}
+		more[name] = append(more[name], i)
 	}
-	out := files[:0]
+	// files may be a list kept and read elsewhere: one left out is left
+	// out of a copy, and files is given back when none is
+	if !slices.Contains(keep, false) {
+		return files
+	}
+	out := make([]file, 0, len(files)-1)
 	for i, f := range files {
 		if keep[i] {
 			out = append(out, f)
 		}
 	}
 	return out
+}
+
+// nameFirstSets are distinctCodexFiles' sets of names, kept on a shelf from
+// poll to poll as pathSets are: made new for ~13k rollouts, each was ~0.4
+// MB of every Sessions poll (#2278).
+var nameFirstSets shelf[map[string]int]
+
+func nameFirsts() map[string]int {
+	if m, ok := nameFirstSets.take(nil); ok {
+		return m
+	}
+	return map[string]int{}
+}
+
+func putNameFirsts(m map[string]int) {
+	clear(m)
+	nameFirstSets.give(m, nil)
 }
 
 func codexCopyRelation(first, second string) int {

@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -39,7 +41,7 @@ import (
 // the bucket behind it. A var so tests can point it elsewhere.
 var grokCLIBases = []string{"https://x.ai/cli", "https://storage.googleapis.com/grok-build-public-artifacts/cli"}
 
-var grokVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?$`)
+var grokVersionRe = lazyre.New(`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?$`)
 
 // grokMaxBinary bounds what is unpacked, as the installer bounds it.
 const grokMaxBinary = 512 << 20
@@ -172,8 +174,14 @@ func grokOpen(ctx context.Context, u string) (*http.Response, error) {
 	return res, nil
 }
 
-// grokDownload writes what u has to path, unpacked when gzipped.
+// grokDownload writes what u has to path, unpacked when gzipped, once
+// more over HTTP/1.1 when the connection broke off
+// (netproxy.AgainOverHTTP1).
 func grokDownload(ctx context.Context, u, path string, gzipped bool) error {
+	return netproxy.AgainOverHTTP1(ctx, func(ctx context.Context) error { return grokDownloadOnce(ctx, u, path, gzipped) })
+}
+
+func grokDownloadOnce(ctx context.Context, u, path string, gzipped bool) error {
 	res, err := grokOpen(ctx, u)
 	if err != nil {
 		return err

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Add to magpie · magpie 文档</title>
+<title>Add to magpie：一个链接把你的模型加进每个 Agent · magpie 文档</title>
 <meta name="description" content="导入链接：给用户一个链接，你的模型就出现在他们用的每个 Agent 里。链接格式、参数、链接生成器和 Add to magpie 按钮。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/import">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/import">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/import">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/import">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/import">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Add to magpie">
 <meta property="og:description" content="一个链接，把你的模型送进用户的每个 Agent。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/import">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Add to magpie",
+   "description": "导入链接：给用户一个链接，你的模型就出现在他们用的每个 Agent 里。链接格式、参数、链接生成器和 Add to magpie 按钮。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/import",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Add to magpie",
+     "item": "https://usemagpie.ai/docs/zh/import"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -133,15 +193,19 @@
       <tr><td><code>website</code></td><td>你的网站（https），显示在供应商页面上。</td></tr>
       <tr><td><code>keys</code></td><td>用户创建密钥的页面（https）。链接里没有密钥时，对话框会链接到这里。</td></tr>
       <tr><td><code>icon</code></td><td>你自己的图标（https）：PNG、JPEG、GIF、WebP、ICO 或 SVG，最大 1&nbsp;MB。用户确认导入后，magpie 只下载一次，存在供应商旁边。不填时，magpie 显示 <code>catalog</code> 对应厂商的 logo，或一个默认图标。</td></tr>
+      <tr><td><code>balance</code></td><td>查询这个密钥余额的地址（https），必须和某个 Base URL 同一个域名：magpie 会像发对话请求一样带上密钥去问。地址里的 <code>{key}</code> 会换成密钥。不填时，magpie 会读它认识的厂商的余额，中转站则去问 new-api 和 sub2api 查密钥余额的地址（<code>/api/usage/token</code>、<code>/v1/usage</code>）；你的余额接口在别处时再填。</td></tr>
+      <tr><td><code>balance_path</code></td><td>金额在 JSON 回复里的位置：点分路径，列表项用序号（<code>data.balance</code>、<code>balance_infos.0.total_balance</code>），也可以按你自己的单位做运算（<code>$ data.quota / 500000</code>）。前面加 <code>$</code> 或 <code>¥</code> 表示币种，后面加 <code>%</code> 表示按 1 为 100% 显示；多个金额用 <code>;</code> 隔开，每个可以带 <code>标签:</code>。需要同时给 <code>balance</code>。</td></tr>
+      <tr><td><code>balance_method</code></td><td><code>GET</code>（默认）或不带请求体的 <code>POST</code>。需要同时给 <code>balance</code>。</td></tr>
       <tr><td><code>preset</code><span class="req">或 name</span></td><td>预设 id；使用它的地址、目录和页面，可以用 <code>name</code> 改名。</td></tr>
       <tr><td><code>region</code></td><td>预设有多个区域时，指定用哪个。</td></tr>
     </table></div>
     <p>不用预设时，<code>chat</code>、<code>responses</code>、<code>anthropic</code>、<code>gemini</code> 至少要填一个；你支持几种 API 就填几个，每个 Agent 会用它原生支持的那一种。Base URL 必须是 <b>https</b>，只有指向 <code>localhost</code>、回环地址、内网地址和 <code>*.local</code> 时可以用 http，因为本地模型服务通常不配 TLS。地址里不能带查询参数、# 片段或账号密码。</p>
+    <p>链接不能为余额设置别的请求头或令牌：整个账号的访问令牌比单个密钥更值钱，而 URL 会留在浏览器历史里。需要令牌的余额查询，请在供应商编辑页里设置。</p>
 
     <h3 id="presets">预设</h3>
     <p>magpie 已经内置的厂商。<code>magpie presets</code> 会打印当前的列表。</p>
     <div class="chips">
-      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
+      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>longcat</code></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>qwencloud</code><span>ap-southeast-1 · us-east-1 · eu-central-1 · ap-northeast-1 · cn-hongkong · cn-beijing</span></span><span class="chip"><code>qwencloud-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>voyage</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>vercel</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
     </div>
     <p>有预设的厂商只需带上密钥：<code>magpie://import?preset=deepseek&amp;key=sk-…</code>。想加入列表？<a href="https://github.com/yetone/magpie/issues">提个 issue</a>。</p>
 
@@ -164,6 +228,9 @@
         <label class="m-custom">网站 <i>可选</i><input name="website" placeholder="https://acme.example"></label>
         <label class="m-custom">密钥页面 <i>可选</i><input name="keys" placeholder="https://acme.example/keys"></label>
         <label class="m-custom">图标 <i>可选，https</i><input name="icon" placeholder="https://acme.example/logo.svg"></label>
+        <label class="m-custom">余额地址 <i>可选，与 Base URL 同域名</i><input name="balance" class="mono" placeholder="https://api.acme.example/v1/dashboard/balance"></label>
+        <label class="m-custom">余额字段 <i>可选</i><input name="balance_path" class="mono" placeholder="data.balance"></label>
+        <label class="m-custom">余额请求方式<select name="balance_method"><option value="">GET</option><option value="POST">POST</option></select></label>
       </form>
       <div class="out">
         <div class="row"><span>网页链接</span><code id="o-web"></code><button class="copy" data-copy="o-web">复制</button></div>
@@ -238,6 +305,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
       <li><b>只接受 https。</b>除了本机和局域网，一律拒绝 http；<code>file:</code>、URL 里带账号密码以及其他协议直接拒绝。</li>
       <li><b>只读一次。</b>在应用里，链接内容只交给窗口一次；刷新后对话框不会再出现。</li>
       <li><b>图标是下载的，不是嵌入的。</b><code>icon=</code> 地址由 magpie 下载，只在用户确认导入之后，只走 https，只存进它自己的图标目录，最大 1&nbsp;MB，并校验类型。magpie 经 usemagpie.ai 的图标代理去取，所以你的服务器只看到 Cloudflare 的地址，看不到用户的 IP；请求从 Cloudflare 发出，碰不到用户本机和内网。回环或内网的域名在发出请求前就被拒绝。页面和对话框从不直接加载远程图片。</li>
+      <li><b>余额只在你的域名上查。</b><code>balance=</code> 的域名不是链接里某个 Base URL 的，整条链接会被拒绝，所以密钥不会发到它的请求本来不去的地方。用户添加供应商之后才会去查。</li>
       <li><b>密钥不经过服务器。</b>网页链接把参数放在 # 片段里。密钥最终只存在 <code>~/.config/magpie/providers.json</code>，只有用户本人可读。</li>
     </ul>
     <div class="note"><b>链接里的密钥就是机密。</b>只在该用户本人能看到的页面上把密钥放进链接，最好是专门给 magpie 生成、可以随时吊销的密钥。绝不要把共享密钥放进公开链接。</div>
@@ -265,8 +333,18 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>
@@ -294,9 +372,9 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     ["anthropic", "Anthropic"], ["openai", "OpenAI"], ["google", "Google Gemini"], ["deepseek", "DeepSeek"], ["xai", "xAI"],
     ["moonshot", "Kimi"], ["moonshot-cn", "Kimi（中国）"], ["kimi-code", "Kimi Code"], ["kimi-code-cn", "Kimi Code（中国）"], ["zhipu", "智谱 GLM"],
     ["zai", "Z.ai"], ["minimax", "MiniMax"], ["minimax-cn", "MiniMax（中国）"], ["stepfun", "阶跃星辰"], ["stepfun-cn", "阶跃星辰（中国）"],
-    ["xiaomi", "小米 MiMo"], ["baidu-qianfan", "百度千帆"], ["tencent-cloud", "腾讯云"],
-    ["huaweicloud", "华为云 MaaS"], ["volcengine", "火山方舟"], ["qwen", "通义千问"], ["qwen-cn", "通义千问（中国）"], ["qwen-token-plan", "通义千问 Token Plan"], ["bailian-token-plan", "阿里云百炼 Token Plan"],
-    ["mistral", "Mistral"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"],
+    ["xiaomi", "小米 MiMo"], ["longcat", "LongCat"], ["baidu-qianfan", "百度千帆"], ["tencent-cloud", "腾讯云"],
+    ["huaweicloud", "华为云 MaaS"], ["volcengine", "火山方舟"], ["qwen", "通义千问"], ["qwen-cn", "通义千问（中国）"], ["qwen-token-plan", "通义千问 Token Plan"], ["bailian-token-plan", "阿里云百炼 Token Plan"], ["qwencloud", "Qwen Cloud"], ["qwencloud-token-plan", "Qwen Cloud Token Plan"],
+    ["mistral", "Mistral"], ["voyage", "Voyage AI"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"], ["vercel", "Vercel AI Gateway"],
     ["opencode-go", "OpenCode Go"], ["clinepass", "ClinePass"], ["opencode-zen", "OpenCode Zen"], ["kilo", "Kilo Gateway"], ["commandcode", "Command Code"],
     ["together", "Together AI"], ["fireworks", "Fireworks"], ["siliconflow", "硅基流动"], ["nvidia", "NVIDIA NIM"], ["modelscope", "魔搭 ModelScope"],
     ["aihubmix", "AiHubMix"], ["pipellm", "PipeLLM"], ["302ai", "302.AI"], ["cherryin", "CherryIN"], ["yylx", "鱼鱼连线"],
@@ -312,6 +390,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     "tencent-cloud": [["", "套餐 · 中国"], ["cn", "按量 · 中国"], ["intl", "按量 · 国际"], ["enterprise", "企业版套餐 · 中国"], ["enterprise-intl", "企业版套餐 · 国际"]],
     "huaweicloud": [["", "Token Plan"], ["api", "按量付费"]],
     "volcengine": [["", "Coding Plan"], ["agent", "Agent Plan"], ["api", "按量付费"]],
+    "qwencloud": [["", "ap-southeast-1"], ["us-east-1", "us-east-1"], ["eu-central-1", "eu-central-1"], ["ap-northeast-1", "ap-northeast-1"], ["cn-hongkong", "cn-hongkong"], ["cn-beijing", "cn-beijing"]],
     "bedrock": [["", "us-east-1"], ["us-east-2", "us-east-2"], ["us-west-2", "us-west-2"], ["eu-central-1", "eu-central-1"], ["eu-west-1", "eu-west-1"], ["eu-west-3", "eu-west-3"], ["ap-northeast-1", "ap-northeast-1"], ["ap-southeast-1", "ap-southeast-1"], ["ap-southeast-2", "ap-southeast-2"], ["ap-south-1", "ap-south-1"]],
     "siliconflow": [["", "中国"], ["intl", "国际"]],
     "yylx": [["", "自动"], ["global", "海外"], ["cn", "中国大陆"]],
@@ -371,6 +450,18 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
           el("icon").classList.add("bad");
           errs.push("icon= 必须是 https 的图片地址，否则 magpie 会忽略它。");
         }
+      }
+      {
+        const v = put("balance");
+        let ok = !v;
+        if (v) try {
+          const u = new URL(v);
+          ok = u.protocol === "https:" && !u.username && !u.password && !u.hash
+            && ["chat", "responses", "anthropic", "gemini"].some((k) => { try { return new URL(el(k).value.trim()).host.toLowerCase() === u.host.toLowerCase(); } catch { return false; } });
+        } catch {}
+        el("balance").classList.toggle("bad", !ok);
+        if (!ok) errs.push("balance= 必须是 https 地址，且与某个 Base URL 同一个域名，否则 magpie 会拒绝这条链接。");
+        if (v) { put("balance_path"); put("balance_method"); }
       }
     }
     put("key");

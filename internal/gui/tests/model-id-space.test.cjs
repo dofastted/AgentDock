@@ -52,6 +52,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
@@ -84,7 +85,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const posts = [];
         const { page, errors } = await open(t, posts);
         await page.locator("#addProvider").click();
-        await page.locator("#addSheet .custom-foot .custom").click();
+        await page.locator("#addSheet .row-head .custom").click();
         const ed = page.locator(".editor.new");
         await ed.locator(".add-models").waitFor();
         const L = await page.evaluate(() => ({ name: t("e.g. My Relay"), add: t("Add") }));

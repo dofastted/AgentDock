@@ -80,6 +80,7 @@ type gRequest struct {
 		ResponseSchema     json.RawMessage `json:"responseSchema,omitempty"`
 		ResponseJSONSchema json.RawMessage `json:"responseJsonSchema,omitempty"`
 		ThinkingConfig     *gThinking      `json:"thinkingConfig,omitempty"`
+		ImageConfig        json.RawMessage `json:"imageConfig,omitempty"`
 	} `json:"generationConfig,omitempty"`
 }
 
@@ -105,6 +106,22 @@ func (tc *gThinking) effort() string {
 	return ""
 }
 
+// geminiBodyEffort is the reasoning a Gemini request's generationConfig
+// asks for through its thinkingConfig, as parseGemini reads it (#4529):
+// the level it names, else its budget as the level it is nearest. ""
+// when it asks for none, or there is no thinkingConfig.
+func geminiBodyEffort(body []byte) string {
+	var g struct {
+		GenerationConfig *struct {
+			ThinkingConfig *gThinking `json:"thinkingConfig"`
+		} `json:"generationConfig"`
+	}
+	if decodeJSON(geminiCamel(body), &g) != nil || g.GenerationConfig == nil || g.GenerationConfig.ThinkingConfig == nil {
+		return ""
+	}
+	return g.GenerationConfig.ThinkingConfig.effort()
+}
+
 // buildGemini is a generateContent body for an upstream that speaks Gemini
 // itself (Factory's /api/llm/g). The contents are the ones Code Assist
 // sends inside its envelope. systemInstruction has no role: droid sends
@@ -116,7 +133,7 @@ func buildGemini(r *Request, model string) ([]byte, error) {
 		return nil, err
 	}
 	req["model"] = model
-	return json.Marshal(req)
+	return marshalBody(req, "")
 }
 
 // geminiRequest is the request inside the Code Assist envelope that
@@ -136,6 +153,23 @@ func geminiRequest(r *Request, model, agent string) (map[string]any, error) {
 		delete(si, "role")
 	}
 	delete(wrap.Request, "stream")
+	// the rest of what a Gemini client asked, as it sent it (#3937): the
+	// Gemini API and Vertex AI speak the request's own shape, so their
+	// generationConfig carries what magpie doesn't read beside what it
+	// rebuilt — magpie's word for a field it sets stands (a draw model's
+	// responseModalities).
+	if len(r.GenConfig) > 0 {
+		gen, ok := wrap.Request["generationConfig"].(map[string]any)
+		if !ok {
+			gen = map[string]any{}
+			wrap.Request["generationConfig"] = gen
+		}
+		for k, v := range r.GenConfig {
+			if _, set := gen[k]; !set {
+				gen[k] = json.RawMessage(v)
+			}
+		}
+	}
 	return wrap.Request, nil
 }
 
@@ -212,6 +246,18 @@ func snakeToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
+// genReadOrBuilt are generationConfig's keys magpie reads itself or writes
+// its own of: they are rebuilt from the request when it is sent on
+// (buildCodeAssistSent), not carried as they came (#3937). candidateCount
+// is one too: magpie reads a reply as one answer (codeAssistDecoder runs every
+// candidate's parts into it), so a second candidate would be mixed into
+// the first.
+var genReadOrBuilt = map[string]bool{
+	"maxOutputTokens": true, "temperature": true, "topP": true, "stopSequences": true,
+	"responseMimeType": true, "responseSchema": true, "responseJsonSchema": true,
+	"thinkingConfig": true, "imageConfig": true, "candidateCount": true,
+}
+
 func parseGemini(body []byte) (*Request, error) {
 	body = geminiCamel(body)
 	var g gRequest
@@ -220,11 +266,19 @@ func parseGemini(body []byte) (*Request, error) {
 	}
 	r := &Request{Model: g.Model, Stream: g.Stream}
 	r.System = geminiText(g.SystemInstruction)
+	if r.System != "" {
+		r.systemParts = []string{r.System}
+	}
 	if gc := g.GenerationConfig; gc != nil {
 		r.MaxTokens, r.Temp, r.TopP, r.Stop = gc.MaxOutputTokens, gc.Temperature, gc.TopP, gc.StopSequences
 		if tc := gc.ThinkingConfig; tc != nil {
 			r.Effort = tc.effort()
 			r.Thinking = r.Effort != ""
+		}
+		// the size and shape of the image asked for, which only an
+		// upstream that speaks Gemini takes (#3820)
+		if ic := gc.ImageConfig; len(ic) > 0 && string(ic) != "null" {
+			r.ImageConfig = ic
 		}
 		// structured output, asked for in the upstream's own field
 		// (Format) and in words as well: a Gemini client doesn't know
@@ -240,6 +294,22 @@ func parseGemini(body []byte) (*Request, error) {
 				r.System += "\n\n"
 			}
 			r.System += ask + "."
+		}
+		// the rest of what the client asked, carried for a Gemini upstream
+		// as it was sent (#3937). The body was spelled in camelCase on its
+		// way in (geminiCamel).
+		var raw struct {
+			GenerationConfig map[string]json.RawMessage `json:"generationConfig"`
+		}
+		if json.Unmarshal(body, &raw) == nil {
+			for k, v := range raw.GenerationConfig {
+				if !genReadOrBuilt[k] && len(v) > 0 && string(v) != "null" {
+					if r.GenConfig == nil {
+						r.GenConfig = make(map[string]json.RawMessage, len(raw.GenerationConfig))
+					}
+					r.GenConfig[k] = v
+				}
+			}
 		}
 	}
 	// function results carry the call's id when the client kept it; older

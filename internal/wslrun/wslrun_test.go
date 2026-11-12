@@ -1,12 +1,15 @@
 package wslrun
 
 import (
+	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf16"
 
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -67,6 +70,21 @@ func TestParseProbe(t *testing.T) {
 	}
 	if s := probeScript("claude"); !strings.Contains(s, `echo "uid:$(id -u)"`) {
 		t.Fatalf("probe doesn't print the user: %s", s)
+	}
+
+	// the user's home, where its Claude Code keeps its transcripts, as
+	// Windows reads it (claudetui)
+	for out, home := range map[string]string{"home:/home/me\n": "/home/me", "home:/root\r\n": "/root", "home:\n": "", "": ""} {
+		tool, _ = parseProbe("d", "bin:/usr/bin/claude\n"+out)
+		if tool.Home != home {
+			t.Errorf("%q: Home = %q, want %q", out, tool.Home, home)
+		}
+	}
+	if s := probeScript("claude"); !strings.Contains(s, `echo "home:$HOME"`) {
+		t.Fatalf("probe doesn't print the home: %s", s)
+	}
+	if w := (Tool{Distro: "Ubuntu"}).Windows("/home/me/.claude/projects"); w != `\\wsl$\Ubuntu\home\me\.claude\projects` {
+		t.Fatalf("Windows = %q", w)
 	}
 
 	// no claude in the distro (the probe skips Windows' own under /mnt)
@@ -329,5 +347,25 @@ func TestFindWithDetectionOff(t *testing.T) {
 	}
 	if tool, ok := Find("claude"); !ok || tool.Distro != "Ubuntu" {
 		t.Fatalf("Find with detection on = %+v %v", tool, ok)
+	}
+}
+
+// #4872: Run, and a Tool's commands (Claude Code in a distro, its
+// pseudo-console helper's line), are refused at proc with detection off.
+func TestRunRefusedWhenOff(t *testing.T) {
+	t.Cleanup(func() { settings.Save(settings.Settings{}) })
+	if err := settings.Save(settings.Settings{NoWSLAgents: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(5*time.Second, "-l", "--running", "-q"); !errors.Is(err, proc.ErrWSLOff) {
+		t.Fatalf("detection off, Run ran wsl.exe: %v", err)
+	}
+	tool := Tool{Distro: "Ubuntu", Path: "/home/me/.local/bin/claude", Mount: "/mnt/"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, c := range []*exec.Cmd{tool.Command(ctx, "-v"), tool.Probe(ctx, "-v")} {
+		if !errors.Is(c.Err, proc.ErrWSLOff) {
+			t.Fatalf("detection off, %q not refused: %v", c.Args, c.Err)
+		}
 	}
 }

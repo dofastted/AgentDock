@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>本地脱敏 · magpie 文档</title>
+<title>本地脱敏：发给大模型前遮掉密钥和个人信息 · magpie 文档</title>
 <meta name="description" content="怎么打开 magpie 的本地脱敏：请求离开电脑前会遮掉什么、回复里怎么还原、怎么确认生效，以及它的限制。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/masking">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/masking">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/masking">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/masking">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/masking">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="本地脱敏">
 <meta property="og:description" content="密钥、密码和个人信息留在你的电脑上：请求发出前脱敏，回复里还原。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/masking">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "本地脱敏",
+   "description": "怎么打开 magpie 的本地脱敏：请求离开电脑前会遮掉什么、回复里怎么还原、怎么确认生效，以及它的限制。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/masking",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "本地脱敏",
+     "item": "https://usemagpie.ai/docs/zh/masking"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -92,7 +152,7 @@
       <li><b>打开页面</b>进入 <span class="ui">设置</span> → <span class="ui">隐私</span>。</li>
       <li><b>脱敏密钥</b>在 <span class="ui">要遮什么</span> 下把 <span class="ui">脱敏密钥</span> 设为 <span class="ui">开启</span>：API Key、私钥、Token 和密码。</li>
       <li><b>个人信息（按需）</b>把 <span class="ui">脱敏个人信息</span> 设为 <span class="ui">开启</span>，邮箱、手机号、身份证号和银行卡号也一并脱敏。打开后，下面会列出其他各类个人信息，每类有自己的开关。</li>
-      <li><b>自定义词</b>在 <span class="ui">脱敏词</span> 里填不想让厂商看到的人名、项目代号或主机名，用逗号分隔。<span class="ui">脱敏词不区分大小写</span> 打开后，<em>Nightjar</em> 也会遮掉 <em>NIGHTJAR</em>。magpie 不认识的密钥（比如你自己网关的 key）加到 <span class="ui">自定义脱敏规则</span>：填它的开头，或一个正则表达式。</li>
+      <li><b>自定义词</b>在 <span class="ui">脱敏词</span> 里填不想让厂商看到的人名、项目代号或主机名，每行一个（粘贴用逗号隔开的几个词，会各占一行）。<span class="ui">脱敏词不区分大小写</span> 打开后，<em>Nightjar</em> 也会遮掉 <em>NIGHTJAR</em>。magpie 不认识的密钥（比如你自己网关的 key）加到 <span class="ui">自定义脱敏规则</span>：填它的开头，或一个正则表达式。</li>
       <li><b>试一试</b>把一段文字粘到 <span class="ui">试一试</span>，就能看到厂商实际会收到什么。粘进去的内容不会保存。</li>
     </ol>
     <p>改动从下一个请求开始生效，不用重启，Agent 那边也不用改。实际做脱敏的是内置插件 <span class="ui">隐私遮盖</span>（<code>redact</code>，在 <span class="ui">设置</span> → <span class="ui">插件</span>），只要设置里要求了任何脱敏，它就是开着的。</p>
@@ -110,10 +170,10 @@
     <h2 id="what"><a class="anchor" href="#what">会遮掉什么</a></h2>
     <div class="table-wrap"><table>
       <tr><th>开关</th><th>能找到什么</th></tr>
-      <tr><td><span class="ui">脱敏密钥</span></td><td>私钥块（<code>-----BEGIN … PRIVATE KEY-----</code>）。按格式识别的 API Key：<code>sk-…</code>（OpenAI、Anthropic、OpenRouter）、<code>ghp_</code>/<code>github_pat_</code>、<code>glpat-</code>、<code>AIza…</code>、<code>xox…-</code>、<code>sk_live_</code>、<code>AKIA</code>/<code>ASIA</code>、<code>hf_</code>、<code>gsk_</code>、<code>xai-</code>、<code>npm_</code>、<code>pypi-</code>、<code>dop_v1_</code>、<code>SG.</code>，以及 <code>oc_sk_…</code> 这类中转站的 key。JWT。<code>user:password@host</code> 里的密码。<code>.env</code> 和配置文件里以密钥命名的字段的值：<code>DB_PASSWORD=…</code>、<code>api_key: …</code>、<code>client_secret</code>、<code>token</code>、<code>credential</code>。以及你的 <span class="ui">自定义脱敏规则</span>。</td></tr>
-      <tr><td><span class="ui">脱敏个人信息</span></td><td>邮箱、中国大陆手机号、校验位对得上的身份证号和银行卡号。默认也开着的：美国社会安全号、护照号（跟在 <em>passport</em>、护照或パスポート后面）、IBAN、生日（旁边有 <em>birthday</em>、<em>DOB</em> 或「生日」，且是一年以前的日期，所以今天的日期不动）、MAC 地址、序列号（跟在 <em>S/N</em> 后面）。默认关闭、需要自己打开的（Agent 几乎每个请求都会带）：主目录里的用户名、用户名和主机名（<code>user@host</code>）、公网 IP 地址、云存储桶。</td></tr>
-      <tr><td><span class="ui">脱敏词</span></td><td>你填的每个词，精确匹配，换成 <code>{{TERM_…}}</code>。</td></tr>
-      <tr><td><span class="ui">用本地模型查找</span></td><td>在 <span class="ui">怎么找</span> 下面。一个在这台电脑上运行的模型能找出规则找不到的东西：自由文本里的人名、地址。需要先打开 <span class="ui">脱敏密钥</span> 或 <span class="ui">脱敏个人信息</span>，找到的内容按同样的开关处理。旁边的菜单选择模型：AstrLink Guard（中英文，下载 39 MB，代码里很少误判；默认）或 OpenAI 的 Privacy Filter（1.6 GB，可用 GPU，代码里会遮盖更多普通值）。</td></tr>
+      <tr><td><span class="ui">脱敏密钥</span></td><td>私钥块（<code>-----BEGIN … PRIVATE KEY-----</code>）。按格式识别的 API Key：<code>sk-…</code>（OpenAI、Anthropic、OpenRouter）、<code>ghp_</code>/<code>github_pat_</code>、<code>glpat-</code>、<code>AIza…</code>、<code>xox…-</code>、<code>sk_live_</code>、<code>AKIA</code>/<code>ASIA</code>、<code>hf_</code>、<code>gsk_</code>、<code>xai-</code>、<code>npm_</code>、<code>pypi-</code>、<code>dop_v1_</code>、<code>SG.</code>，以及 <code>oc_sk_…</code> 这类中转站的 key。JWT。<code>user:password@host</code> 里的密码。<code>.env</code> 和配置文件里以密钥命名的字段的值：<code>DB_PASSWORD=…</code>、<code>api_key: …</code>、<code>client_secret</code>、<code>token</code>、<code>credential</code>。以及你的 <span class="ui">自定义脱敏规则</span>。 钱包私钥按钱包导出的格式匹配：比特币 WIF、BIP32 <code>xprv</code>、以太坊和 TRON 的 <code>0x</code> 私钥、Solana 私钥与 <code>id.json</code> 密钥对、Sui <code>suiprivkey1…</code>、Aptos <code>ed25519-priv-0x…</code>、Stellar 种子、NEAR <code>ed25519:…</code>、Nostr <code>nsec1…</code>、age 身份、Zcash 扩展支出密钥，以及 <em>seed</em>、<em>助记词</em> 后面、每个词都在 BIP39 词表里的 12 到 25 个单词。没有固定前缀的私钥要先通过校验才会被替换：WIF 和 <code>xprv</code> 看校验和，Solana 私钥看后半段公钥，Stellar 种子看 CRC，所以 Solana 交易签名照原样发送。<code>0x</code> 私钥和交易哈希形状相同，只在私钥的名字后面才替换（<code>PRIVATE_KEY=</code>、<code>--private-key</code>、<code>new Wallet(…)</code>、私钥）；哈希、存储槽和 sha256 校验值照原样发送。交易所的 API key、secret 和 <code>passphrase</code> 按字段名替换。</td></tr>
+      <tr><td><span class="ui">脱敏个人信息</span></td><td>邮箱、中国大陆手机号（11 位的编号不算：在 <code>order_id</code> 下或跟在「订单号」后面的照原样发出）、校验位对得上的身份证号和银行卡号。默认也开着的：美国社会安全号、护照号（跟在 <em>passport</em>、护照或パスポート后面）、IBAN、生日（旁边有 <em>birthday</em>、<em>DOB</em> 或「生日」，且是一年以前的日期，所以今天的日期不动）、MAC 地址、序列号（跟在 <em>S/N</em> 后面）。默认关闭、需要自己打开的（Agent 几乎每个请求都会带）：主目录里的用户名（以一个每轮都相同的假名发出，模型看到的是正常的文件夹，而不是占位符）、用户名和主机名（<code>user@host</code>）、公网 IP 地址（以 <code>public-ip-kvxqmrtz</code> 这样的名字发出，模型仍知道这是公网地址，照常用它连接，命令里再换回真实地址）、云存储桶。钱包或合约地址（<code>0x</code> 加 40 位十六进制）是公开的，照原样发出；私钥照样脱敏。</td></tr>
+      <tr><td><span class="ui">脱敏词</span></td><td>你填的每个词，精确匹配，换成 <code>{{TERM_…}}</code>。填的是日期（比如 <em>1990-05-12</em>）时，同一天的各种写法都会遮掉：<em>1990/5/12</em>、<em>1990.05.12</em>、<em>1990年5月12日</em>、<em>19900512</em>、<em>May 12, 1990</em>；<em>13/05/1990</em> 这种日在前的写法只在日和月不会混淆时才算。别的日期和 <em>1990.5.12.1</em> 这样的版本号不会被遮。</td></tr>
+      <tr><td><span class="ui">用本地模型查找</span></td><td>在 <span class="ui">怎么找</span> 下面。一个在这台电脑上运行的模型能找出规则找不到的东西：自由文本里的人名、地址。除非你关掉，它默认打开：第一个要脱敏的请求开始下载 AstrLink Guard，下载完成前只用规则脱敏。需要先打开 <span class="ui">脱敏密钥</span> 或 <span class="ui">脱敏个人信息</span>，找到的内容按同样的开关处理。旁边的菜单选择模型：AstrLink Guard（中英文，下载 39 MB，代码里很少误判，在 Mac 上用神经网络引擎运行；默认）或 OpenAI 的 Privacy Filter（1.6 GB，可用 GPU，代码里会遮盖更多普通值）。下面的 <span class="ui">置信度阈值</span> 是模型要多确定才遮盖一个值：Privacy Filter 默认 0.5，AstrLink Guard 默认 0.8（发布者的值）。调高会少遮一些普通值，也会让更多真实的人名、地址原样发出去；模型之后的规则已经去掉了大部分误判，所以默认值是我们测下来漏掉真实信息最少的那一档。</td></tr>
     </table></div>
     <p>占位符是「类型 + 8 位带密钥的哈希」。同一个值每次得到同一个占位符，所以对话每一轮读起来都一样，厂商的提示词缓存也不会失效。原值只保存在内存里。</p>
 
@@ -151,8 +211,9 @@
       <li><b>思考内容保持厂商原样。</b>带签名的 thinking 块、Gemini 的 thoughts、Responses 的加密推理都由厂商签过名，原样发回，签名才对得上。里面只会替换请求其他地方已经遮掉的值。</li>
       <li><b>ID 和工具定义原样发送：</b>模型 ID、消息和调用 ID、UUID、工具名、MCP 服务名、工具 schema（其中的描述文字会脱敏），这样厂商和工具还能校验它们。</li>
       <li><b>图片和文件数据原样发送。</b>截图里的文字不会被遮。</li>
-      <li><b>失败即不发送。</b>脱敏已打开却运行不了（手动关掉了 <span class="ui">隐私遮盖</span> 插件，或本地模型开着但没响应），请求返回 503，说明什么都没发出，绝不会退回成不脱敏直接发送。</li>
-      <li><b>本地模型可以跳过。</b>供应商的每个地址都在本机或局域网（Ollama、LM Studio）时，打开它的 <span class="ui">请求不脱敏</span>，请求就原样发出；命令行是 <code>magpie provider set ollama unmasked=yes</code>。日志里保存的仍是脱敏后的内容。</li>
+      <li><b>失败即不发送。</b>脱敏已打开却运行不了（手动关掉了 <span class="ui">隐私遮盖</span> 插件，或你打开的本地模型没响应），请求返回 503，说明什么都没发出，绝不会退回成不脱敏直接发送。默认打开的模型没响应时，只用规则脱敏。</li>
+      <li><b>供应商可以跳过。</b>打开供应商的 <span class="ui">请求不脱敏</span>，它的请求就原样发出：本机或局域网的模型（Ollama、LM Studio），以及你选择的任何其他供应商，订阅和插件提供的供应商也可以。对不在本地的供应商打开时，编辑器会提示请求会不脱敏地发给它的服务商。可能回退到仍在脱敏的供应商的请求照样脱敏。命令行是 <code>magpie provider set ollama unmasked=yes</code>。</li>
+      <li><b>也可以把会被脱敏的请求改发给它。</b>在 <span class="ui">设置 › 隐私</span> 的 <span class="ui">命中脱敏时改用</span> 里选一个这样的模型。智能体的请求一旦命中脱敏规则，就原样发给它，它能按真实名称回答；没有要脱敏内容的请求照常发往原来的模型。这个模型失败时请求直接失败，绝不会脱敏后改发给云端厂商。默认关闭。</li>
       <li><b>模型只看到占位符。</b>它无法读懂或推理被遮掉的值，只能原样传递。需要模型读的值放进 <span class="ui">从不脱敏</span>。</li>
       <li><b>规则按格式匹配。</b>其他国家格式的电话号码、自由文本里的人名，需要 <span class="ui">用本地模型查找</span>，或者自己的 <span class="ui">脱敏词</span> 和 <span class="ui">自定义脱敏规则</span>。先用 <span class="ui">试一试</span> 测一下你自己的文本。</li>
     </ul>
@@ -171,10 +232,20 @@
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

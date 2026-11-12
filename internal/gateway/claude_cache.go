@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"hash"
@@ -22,12 +23,81 @@ type clientCache struct {
 	messages        int
 	droppedSystem   int
 	droppedMessages int
+	systemMarks     int // the system's marks, as the request has them
 	fresh           bool
-	report          func()
+	// pasted: the run is Claude Code's interactive mode, which is pasted
+	// the words with none of their marks (claudetui's userPieces), and
+	// keeps its own prompt caching (startRun): every mark but the tools'
+	// is dropped
+	pasted bool
+	// print: the run is claude -p though the interactive mode is on
+	// (Request.tuiRefused)
+	print bool
+	// kept: the run is claude -p for the marks' sake (keptByPrint)
+	kept   bool
+	report func()
+}
+
+// marksPrintAt is how much of a request's history its client's cache
+// marks keep before claude -p is cheaper than the interactive mode for it
+// (keptByPrint). The interactive mode is pasted the words with no marks,
+// and Claude Code marks only the end of what it is pasted, so a fresh run
+// writes everything after Claude Code's own prompt again, at 2x for an
+// hour's cache (about 0.1·S + 2·M a call, S its prompt and M the marked
+// history). -p is counted at about twice the five-hour allowance a token,
+// but keeps the client's marks, so a call reads what the last one wrote
+// and writes only what is new (about 2·(0.1·(S+M) + 2·D), D the new part).
+// With S ≈ 69K tokens and D ≈ 5K the two meet at M ≈ 15–20K tokens, about
+// 64KB of text (#5585, #5655).
+const marksPrintAt = 64 << 10
+
+// markedHistory is the bytes of req's messages up to the last part a
+// client's cache mark ends (Part.cache): what a run that keeps the marks
+// reads again instead of writing.
+func markedHistory(req *Request) int {
+	n, marked := 0, 0
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			n += len(p.Text) + len(p.Args) + len(p.Data)
+			if p.cache != "" {
+				marked = n
+			}
+		}
+	}
+	return marked
+}
+
+// keptByPrint is whether req runs as claude -p though the interactive
+// mode is on, for its client's cache marks: Claude Code's auto mode
+// classifier, asked afresh each call with the transcript so far, marking
+// more history than marksPrintAt. Pasted, each call wrote that history
+// again and read only Claude Code's own prompt (#5585, #5655); a
+// conversation's turns go on in their run, which keeps its own cache, and
+// stay in the interactive mode.
+func keptByPrint(req *Request) bool {
+	return req.clientCache != nil && autoModeClassifier(req) && markedHistory(req) >= marksPrintAt
+}
+
+// keptAsPrint reports whether the run is claude -p for the marks' sake.
+func (c *clientCache) keptAsPrint() bool {
+	return c != nil && c.kept
 }
 
 func wantsClientCache(r *http.Request, from provider.Protocol) bool {
 	return from == provider.Anthropic && r.Header.Get("X-Magpie-Cache-Marks") == "client"
+}
+
+// classifierClientCache reports whether a Messages body is Claude Code's
+// auto mode classifier carrying cache marks of its own. Desktop's
+// classifier marks its blocks but knows nothing of magpie's private header
+// (#3835): its marks are kept like an opted-in client's, validated as
+// theirs are. The bytes are looked at before the request is parsed, and
+// only a classifier-shaped body carrying a cache_control field is parsed
+// for its marks.
+func classifierClientCache(from provider.Protocol, body []byte) bool {
+	return from == provider.Anthropic &&
+		bytes.Contains(body, []byte("cache_control")) &&
+		autoModeClassifierAsk(body)
 }
 
 // selected reports the mapping as soon as run selection is known. Starting
@@ -37,6 +107,7 @@ func (c *clientCache) selected(fresh bool) {
 		return
 	}
 	c.fresh = fresh
+	c.pasted = claudeTUIOn() && !c.print
 	if c.report != nil {
 		c.report()
 	}
@@ -79,6 +150,62 @@ func cacheTTL(cc map[string]string) string {
 	return cc["ttl"]
 }
 
+// askedCacheTTL is the longest TTL a Messages request's own cache marks
+// ask for, on its tools, its system, its messages or the request itself,
+// "" for one that marks nothing. A Claude bridge run started for it keeps
+// its cache that long (runTTLFor): the client's Claude Code marks as its
+// user picked, an hour only when asked (Linka, a Docker magpie's relay
+// writing an hour's cache for a Mac set to 5m).
+func askedCacheTTL(a *aRequest) string {
+	ttl := ""
+	take := func(raw json.RawMessage) {
+		if len(raw) == 0 || ttl == "1h" {
+			return
+		}
+		var cc map[string]string
+		if json.Unmarshal(raw, &cc) != nil {
+			return
+		}
+		switch t := cacheTTL(cc); t {
+		case "5m", "1h":
+			if ttl == "" || t == "1h" {
+				ttl = t
+			}
+		}
+	}
+	take(a.CacheControl)
+	for _, t := range a.Tools {
+		take(t.CacheControl)
+	}
+	if bytes.Contains(a.System, cacheControlField) {
+		var system []struct {
+			CacheControl json.RawMessage `json:"cache_control"`
+		}
+		if json.Unmarshal(a.System, &system) == nil {
+			for _, b := range system {
+				take(b.CacheControl)
+			}
+		}
+	}
+	for _, m := range a.Messages {
+		if ttl == "1h" {
+			break
+		}
+		if !bytes.Contains(m.Content, cacheControlField) {
+			continue
+		}
+		var blocks []struct {
+			CacheControl json.RawMessage `json:"cache_control"`
+		}
+		if json.Unmarshal(m.Content, &blocks) == nil {
+			for _, b := range blocks {
+				take(b.CacheControl)
+			}
+		}
+	}
+	return ttl
+}
+
 func renderedCacheBlock(b aBlock) bool {
 	switch b.Type {
 	case "text":
@@ -87,7 +214,7 @@ func renderedCacheBlock(b aBlock) bool {
 		return b.Thinking != ""
 	case "redacted_thinking":
 		return false
-	case "image":
+	case "image", "video":
 		return b.Source != nil && (b.Source.Data != "" || b.Source.URL != "")
 	}
 	return true
@@ -95,6 +222,15 @@ func renderedCacheBlock(b aBlock) bool {
 
 func cacheMark(ttl string) map[string]string {
 	return map[string]string{"type": "ephemeral", "ttl": ttl}
+}
+
+// partMark is the mark of a client's own a rebuilt block keeps (#4571):
+// the ttl the parse read off the block, or none.
+func partMark(ttl string) map[string]string {
+	if ttl == "" {
+		return nil
+	}
+	return cacheMark(ttl)
 }
 
 func shorterTTL(a, b string) string {
@@ -152,6 +288,7 @@ func readClientCache(a aRequest) (*clientCache, error) {
 			return nil, err
 		}
 		if ttl != "" {
+			c.systemMarks++
 			prefix, _ := json.Marshal(system[:i+1])
 			end := len(stringOrText(prefix))
 			if end <= lastEnd {
@@ -224,12 +361,18 @@ func cacheDropped(w http.ResponseWriter, req *Request) {
 	if c.tools > 0 {
 		fields = append(fields, fmt.Sprintf("tools:%d", c.tools))
 	}
-	if c.droppedSystem > 0 {
-		fields = append(fields, fmt.Sprintf("system:%d", c.droppedSystem))
-	}
-	messages := c.messages
+	system, messages := c.droppedSystem, c.messages
 	if c.fresh {
 		messages = c.droppedMessages
+	}
+	if c.pasted {
+		system, messages = c.systemMarks, c.messages
+		if c.tail != "" {
+			messages++
+		}
+	}
+	if system > 0 {
+		fields = append(fields, fmt.Sprintf("system:%d", system))
 	}
 	if messages > 0 {
 		fields = append(fields, fmt.Sprintf("messages:%d", messages))
@@ -249,6 +392,17 @@ func cacheDropped(w http.ResponseWriter, req *Request) {
 type cachePrefix struct {
 	count int
 	floor string
+	// ttl is how long the run's Claude Code keeps its cache, as its
+	// first message's marks (claudeRunTTL); "" is a session saved before
+	// it was kept, an hour's
+	ttl string
+}
+
+func (p cachePrefix) runTTL() string {
+	if p.ttl == "" {
+		return "1h"
+	}
+	return p.ttl
 }
 
 func (p cachePrefix) accepts(tail string) bool {

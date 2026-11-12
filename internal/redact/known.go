@@ -137,6 +137,47 @@ func (o Options) coversKind(kind string) bool {
 	return false
 }
 
+// A value the model alone found is known at the score it had: it is
+// masked again as known only while the user's slider (Options.MinScore)
+// is at or below that. Moving the slider up did nothing to what the model
+// had found at a lower score, until magpie started again ("即使把匹配拉到
+// 0.95，也是一样行为", _kaichen on X, 10-28). One any other finder found
+// (a rule, the user's words or rules) is known whatever the slider says,
+// as it was.
+
+// ruleFound is a value's score where no model found it.
+const ruleFound = 2
+
+// scores are the values found, with the model's best score for each
+// (ruleFound where anything else found it); guarded by mu.
+var scores = map[string]float64{}
+
+// noteScores keeps what found's values in s were found at.
+func noteScores(s string, found []span) {
+	if len(found) == 0 {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(scores) >= maxValues {
+		// forgotten, a value is known whatever the slider says, as all
+		// were before
+		scores = map[string]float64{}
+	}
+	for _, f := range found {
+		if f.by == ByKnown || f.end-f.start < minKnown {
+			continue
+		}
+		v, sc := s[f.start:f.end], float64(ruleFound)
+		if f.by == ByModel && f.score > 0 {
+			sc = f.score
+		}
+		if old, ok := scores[v]; !ok || sc > old {
+			scores[v] = sc
+		}
+	}
+}
+
 // knownSpans are where s has a known value o masks (coversKind). Where two
 // start at the same place, the longer.
 func knownSpans(s string, o Options) []span {
@@ -158,13 +199,29 @@ func knownSpans(s string, o Options) []span {
 			if !o.coversKind(k.kind) {
 				continue
 			}
+			sc, scored := scores[k.v]
+			if scored && sc < o.MinScore {
+				continue // the model's alone, under the slider
+			}
+			if scored && sc < ruleFound && k.kind == "SECRET" && wordsOnly(k.v) && !assignedSecret(s, i) {
+				// words the model alone took for a secret, as modelFits
+				// lets go now: what a magpie before it had remembered
+				// (drizzle-orm, dniray on Discord, v0.1.1976)
+				continue
+			}
 			if best != nil && len(k.v) <= len(best.v) || !strings.HasPrefix(s[i:], k.v) || !standsAlone(k.kind, s, i, i+len(k.v)) {
+				continue
+			}
+			if packageAt(s, i, i+len(k.v)) {
+				// the module an import loads, a manifest's dependency:
+				// what masked it before had taken a package's name for a
+				// secret (dniray, v0.1.1965)
 				continue
 			}
 			best = &known[s[i:i+minKnown]][j]
 		}
 		if best != nil {
-			out = append(out, span{i, i + len(best.v), best.kind, ByKnown})
+			out = append(out, span{i, i + len(best.v), best.kind, ByKnown, 0, false})
 			i += len(best.v) - 1
 		}
 	}
@@ -172,7 +229,8 @@ func knownSpans(s string, o Options) []span {
 }
 
 // standsAlone says s[a:b] is the known value itself, not a piece of a
-// longer one: a number with no digit beside it, an email that is not part
+// longer one: a number with no letter or digit beside it (as the rules
+// take one: 9f13800138000abc is a hash's piece), an email that is not part
 // of a longer address (though a full stop may end the sentence after it),
 // a secret with no letter or digit against it (twelve hex digits a rule of
 // the user's took are also in the middle of a hash).
@@ -186,9 +244,7 @@ func standsAlone(kind, s string, a, b int) bool {
 	}
 	is := func(c byte, set string) bool { return c != 0 && strings.IndexByte(set, c) >= 0 }
 	switch kind {
-	case "PHONE", "BANK_CARD":
-		return !is(before, digits) && !is(after, digits)
-	case "ID_CARD", "IBAN", "SSN", "PASSPORT", "SERIAL":
+	case "PHONE", "BANK_CARD", "ID_CARD", "IBAN", "SSN", "PASSPORT", "SERIAL":
 		return !is(before, alnum) && !is(after, alnum)
 	case "IP", "MAC":
 		// not a piece of a longer address or a version: 1.2.3.45, 1.2.3.4.5
@@ -196,6 +252,8 @@ func standsAlone(kind, s string, a, b int) bool {
 			return false
 		}
 		return after != '.' || b+1 >= len(s) || !is(s[b+1], digits)
+	case "USERNAME":
+		return nameAlone(s, a, b)
 	case "EMAIL":
 		if is(before, alnum+"._%+-") || is(after, alnum+"_%+") {
 			return false
@@ -206,9 +264,11 @@ func standsAlone(kind, s string, a, b int) bool {
 	return !(is(before, alnum) && is(s[a], alnum)) && !(is(after, alnum) && is(s[b-1], alnum))
 }
 
-// A text sent before goes again as it went: the known values found in it
-// the first time it was masked are the ones masked in it from then on,
-// and a value that became known since is masked in new text only.
+// A text sent before goes again as it went: the model's finds in it and
+// the known values found in it the first time it was masked for a route
+// are the ones masked in it there from then on. A value that became known
+// since is masked in new text only, and so is one the model found in the
+// text only since.
 //
 // An agent sends its whole conversation on every turn, and a vendor
 // caches it by its bytes up to a mark (Anthropic's cache_control, the
@@ -218,28 +278,64 @@ func standsAlone(kind, s string, a, b int) bool {
 // the prefix changed at its first block, and a 400K-token conversation was
 // written to the cache whole instead of read (audie on Discord: cache_read
 // 0 and cache_write 412,081 to 426,782 on four turns, ten seconds apart).
-// Masking it there keeps nothing from the vendor, which was sent that text
-// as written already.
+// The local model did the same: a tool's output it hadn't read in the
+// request's wait (masking's defaultWait, pii.Partial) went with the rules'
+// masking alone, and the next turn, the model having read it, masked a
+// name in it, so everything from that message on was a new prompt to the
+// vendor (vvrfxyz on X: dsh's cache hits fell with masking on; replayed
+// on a Linux CPU, 12% of the history resent was rewritten).
 //
-// What is remembered is a hash of the text and of what o covers, and the
-// places of the known values in it; nothing of a value. A text no longer
-// remembered (sentEntries, or magpie started again) is masked with what is
-// known then.
-const sentEntries = 1 << 16
+// Masking it there keeps nothing from the vendor: the text went to it as
+// written. That holds only where it went, so what is remembered is kept
+// by Route, the providers the request could reach: on another route (the
+// user picked another model, a provider of its own) the text is masked
+// with what is known and found now. Within a route of several providers
+// (fallbacks, a routing group's members) the text goes to a member that
+// may not have had it, in the form any of them could have been sent it
+// the first time. A request with no route (a search's query, an
+// embedding's input: nothing a vendor caches) keeps the known values it
+// first went with, and has the model's finds of now.
+//
+// What is remembered is a hash of the route, the text and of what o
+// covers, and the places masked in it; nothing of a value. A text no
+// longer remembered (sentEntries, or magpie started again) is masked with
+// what is known and found then; a change to what o covers (a kind turned
+// on, the model's threshold, the model itself) is another text.
+const sentEntries = 1 << 17 // a text's model finds and its known values are two
 
-var sentKnown struct {
+// What sentSpans remembers of a text: the model's finds in it, or the
+// known values in it.
+const (
+	sentModel byte = iota + 1
+	sentKnown
+)
+
+var sentMemo struct {
 	sync.Mutex
 	cur, old map[[32]byte][]span
 }
 
-// sentKnownSpans is knownSpans for text going to a vendor: the same as the
-// first time s was masked under what o covers.
-func sentKnownSpans(s string, o Options) []span {
-	if !o.Secrets && !o.Personal || len(s) < minKnown {
-		return nil
+// sentSpans is find()'s spans (modelSpans or knownSpans, as what says) for
+// text going to a vendor: the same as the first time s was masked on
+// o.Route under what o covers.
+func sentSpans(what byte, s string, o Options, find func() []span) []span {
+	if !o.Secrets && !o.Personal || what == sentKnown && len(s) < minKnown {
+		if what == sentKnown {
+			return nil
+		}
+		return find()
+	}
+	if what == sentModel && (o.Model == nil || o.Route == "") {
+		// no model: nothing to remember. No route (a search's query, an
+		// embedding's input, nothing a vendor caches): what the model
+		// finds now, wherever it goes
+		return find()
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%t\x00%t\x00", o.Secrets, o.Personal)
+	fmt.Fprintf(h, "%d\x00%q\x00%t\x00%t\x00", what, o.Route, o.Secrets, o.Personal)
+	if what == sentModel {
+		fmt.Fprintf(h, "%t\x00%t\x00%g\x00", o.Model != nil, o.NamesByModel, o.MinScore)
+	}
 	kinds := make([]string, 0, len(o.Kinds))
 	for k, on := range o.Kinds {
 		kinds = append(kinds, fmt.Sprintf("%s=%t", k, on))
@@ -249,36 +345,37 @@ func sentKnownSpans(s string, o Options) []span {
 	h.Write([]byte(s))
 	var k [32]byte
 	h.Sum(k[:0])
-	sentKnown.Lock()
-	sp, ok := sentKnown.cur[k]
+	sentMemo.Lock()
+	sp, ok := sentMemo.cur[k]
 	if !ok {
-		if sp, ok = sentKnown.old[k]; ok {
-			sentKnownAdd(k, sp) // still in use: kept past the next turnover
+		if sp, ok = sentMemo.old[k]; ok {
+			sentAdd(k, sp) // still in use: kept past the next turnover
 		}
 	}
-	sentKnown.Unlock()
+	sentMemo.Unlock()
 	if ok {
 		return slices.Clone(sp)
 	}
-	sp = knownSpans(s, o)
-	sentKnown.Lock()
-	sentKnownAdd(k, slices.Clone(sp))
-	sentKnown.Unlock()
+	sp = find()
+	sentMemo.Lock()
+	sentAdd(k, slices.Clone(sp))
+	sentMemo.Unlock()
 	return sp
 }
 
-// sentKnownAdd is called with sentKnown held. Two generations, as
-// scrubMemo keeps: when the newer is full it becomes the older.
-func sentKnownAdd(k [32]byte, sp []span) {
-	if sentKnown.cur == nil || len(sentKnown.cur) >= sentEntries {
-		sentKnown.old, sentKnown.cur = sentKnown.cur, make(map[[32]byte][]span)
+// sentAdd is called with sentMemo held. Two generations, as scrubMemo
+// keeps: when the newer is full it becomes the older.
+func sentAdd(k [32]byte, sp []span) {
+	if sentMemo.cur == nil || len(sentMemo.cur) >= sentEntries {
+		sentMemo.old, sentMemo.cur = sentMemo.cur, make(map[[32]byte][]span)
 	}
-	sentKnown.cur[k] = sp
+	sentMemo.cur[k] = sp
 }
 
 // resetSent forgets the texts sent (a test starts from nothing).
 func resetSent() {
-	sentKnown.Lock()
-	defer sentKnown.Unlock()
-	sentKnown.cur, sentKnown.old = nil, nil
+	sentMemo.Lock()
+	defer sentMemo.Unlock()
+	sentMemo.cur, sentMemo.old = nil, nil
+	resetKept()
 }

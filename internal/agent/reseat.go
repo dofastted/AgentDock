@@ -1,10 +1,10 @@
 package agent
 
 import (
-	"regexp"
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -103,7 +103,7 @@ func Reseat(change func() error) ([]Move, error) {
 		}
 		var to Option
 		if f.Options != nil {
-			to = sameModel(f.Options(vals), p.ref)
+			to = sameModel(f.Options(vals), p.ref, p.a.ID)
 		}
 		m := Move{Agent: p.a.Name, Field: f.Label, From: p.ref, To: to.Ref}
 		// the same model elsewhere keeps the agent's suffix after it (omp's
@@ -146,26 +146,44 @@ func served(ref string) bool {
 // sameModel is the option for ref's model from another provider still
 // serving it: the same id, else one that differs only in how it is spelt
 // (claude-sonnet-4.5 and claude-sonnet-4-5-20250929). For a group magpie
-// found (group/auto-…), gone as found groups are turned off or its model
-// is down to one provider magpie has, it is that model from the first
-// provider still serving it; none for any other routing group, which is
-// nobody else's.
-func sameModel(opts []Option, ref string) Option {
+// found (group/auto-…), gone as found groups are turned off, a provider
+// is kept out of them, or its model is down to one provider magpie has, it
+// is that model from the agent's own subscription when it serves it (agent
+// is the agent's id; freefcw on X), else from the first provider still
+// serving it; none for any other routing group, which is nobody else's.
+func sameModel(opts []Option, ref, agent string) Option {
 	// a group's id carries Claude Code's [1m] mark as a model's does, and
 	// this ref comes from the agent's own settings
 	if gid, ok := provider.GroupIDOf(ref); ok {
 		if !strings.HasPrefix(gid, "auto-") {
 			return Option{}
 		}
+		// a provider the user keeps out of found groups last
+		// (provider.SetAutoGroupSkip): skipping it is what took the group
+		skip := provider.AutoGroupSkip()
+		var first, kept Option
 		for _, o := range opts {
 			if o.Ref == "" || provider.IsGroupRef(o.Ref) || !served(o.Ref) {
 				continue
 			}
-			if pid, m, _ := strings.Cut(o.Ref, "/"); provider.AutoGroupOf(pid, m) == gid {
+			pid, m, _ := strings.Cut(o.Ref, "/")
+			if provider.AutoGroupOf(pid, m) != gid {
+				continue
+			}
+			if provider.IsOwn(pid, agent) {
 				return o
 			}
+			if first.Ref == "" && !slices.Contains(skip, pid) {
+				first = o
+			}
+			if kept.Ref == "" {
+				kept = o
+			}
 		}
-		return Option{}
+		if first.Ref != "" {
+			return first
+		}
+		return kept
 	}
 	pid, model, ok := strings.Cut(ref, "/")
 	if !ok || pid+"/" == provider.GroupPrefix {
@@ -188,7 +206,7 @@ func sameModel(opts []Option, ref string) Option {
 	return alike
 }
 
-var dated = regexp.MustCompile(`-(\d{8}|\d{4}-\d{2}-\d{2})$`)
+var dated = lazyre.New(`-(\d{8}|\d{4}-\d{2}-\d{2})$`)
 
 // modelKey is a model id as providers agree on it: its last part, lower
 // case, with dots and underscores as dashes and no date.

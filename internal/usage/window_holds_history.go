@@ -71,7 +71,7 @@ func HistoricalWindowHolds(cards []provider.SubscriptionQuota, hist []provider.Q
 		past = append(past, a)
 	}
 	s := readLogSnapshot()
-	return windowHolds(snapshots, to, s.firstOwn, apiPricer(), provider.UsageRenames(), dryRuns(snapshots, past, to), func(fn func(Record)) {
+	return windowHolds(snapshots, to, s.firstOwn, apiPricer(), provider.UsageRenames(), provider.SamePlanAccounts(), dryRuns(snapshots, past, to), func(fn func(Record)) {
 		s.visit(since, func(r Record) {
 			if r.Time.Before(to) {
 				fn(r)
@@ -99,7 +99,7 @@ func withRecordedWindowStarts(cards []provider.SubscriptionQuota, hist []provide
 					continue
 				}
 				for _, l := range h.Lines {
-					if l.Name != w.Name {
+					if l.Name != w.LineName() {
 						continue
 					}
 					var observed time.Time

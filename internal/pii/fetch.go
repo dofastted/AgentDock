@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/source"
 )
 
@@ -33,11 +34,17 @@ var dl dlState
 
 // client has no timeout: the model takes minutes on a slow line. A
 // download that stops getting bytes is ended by stall instead, and one
-// whose server doesn't answer by the header timeout.
+// whose server doesn't answer by the header timeout. It goes through
+// magpie's proxy (netproxy.Func: the one set in magpie, else the
+// system's), like every other request magpie makes: cloned from
+// http.DefaultTransport when this package loads, before netproxy.Install
+// set its Proxy, it went direct, and in China huggingface.co answered with
+// a *.facebook.com certificate (hh0592821 on Discord).
 var client = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = netproxy.Func
 	t.ResponseHeaderTimeout = 60 * time.Second
-	return &http.Client{Transport: t}
+	return &http.Client{Transport: netproxy.Dispatch(t)}
 }()
 
 // stallAfter is how long a download waits for its next byte.
@@ -153,19 +160,25 @@ func upgrade() {
 		return
 	}
 	defer upgrading.Store(false)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	if err := ensureServe(ctx); err != nil {
+	// no bound on the whole, as the model's download has none: get's
+	// stall timer ends one that stops sending (#5572)
+	if err := ensureServe(context.Background()); err != nil {
 		return
 	}
 	stopWhenFree()
 	removeOld()
 }
 
-// removeOld deletes oldTags' pf-serve.
+// removeOld deletes oldTags' pf-serve, and serveTag's for a system
+// other than target (an Intel one under Rosetta).
 func removeOld() {
 	for _, tag := range oldTags {
-		os.RemoveAll(tagDir(tag))
+		for _, d := range tagDirs(tag) {
+			os.RemoveAll(d)
+		}
+	}
+	for _, d := range tagDirs(serveTag)[1:] {
+		os.RemoveAll(d)
 	}
 }
 
@@ -222,6 +235,13 @@ func unzipTo(f *zip.File, path string) error {
 	return out.Close()
 }
 
+// Fetch is fetch for another package's pinned file (memembed's model):
+// through magpie's proxy, taken up where a stopped one left off, and
+// renamed into place only when its sha256 is want.
+func Fetch(ctx context.Context, url, path string, size int64, want string, done *atomic.Int64) error {
+	return fetch(ctx, url, path, size, want, done)
+}
+
 // fetch downloads url to path through path+".part", taking up a part
 // already there with a Range request, and renames it to path only when
 // its sha256 is want (and its size size, unless that is -1). done counts
@@ -241,6 +261,16 @@ func fetch(ctx context.Context, url, path string, size int64, want string, done 
 	}
 	if size < 0 || have < size {
 		got, err := get(ctx, url, part, have, done)
+		if err != nil && ctx.Err() == nil && netproxy.BrokeOff(err) {
+			// once more over HTTP/1.1, from what is on disk: a proxy
+			// that cuts HTTP/2 streams part way carries HTTP/1.1 whole
+			// (netproxy.OverHTTP1)
+			have = 0
+			if fi, serr := os.Stat(part); serr == nil {
+				have = fi.Size()
+			}
+			got, err = get(netproxy.OverHTTP1(ctx), url, part, have, done)
+		}
 		if err != nil {
 			return err
 		}

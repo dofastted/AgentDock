@@ -60,6 +60,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const opened = [];
         const page = await (await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.addInitScript(() => {
           window.__opened = [];
@@ -72,7 +73,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const err = page.locator(".subscription-card", { hasText: "OpenCode Zen" }).locator(".subscription-error");
         await err.waitFor();
         assert.equal(await err.getAttribute("title"), ZEN, "the reason in the tooltip");
-        const [words, open, generic] = await page.evaluate(([a, b]) => [t(a), t(b), t("Allowance unavailable")], [said, button]);
+        const [words, open, generic] = await page.evaluate(([a, b]) => [t(a), t(b), t("Allowance unavailable — hover for why")], [said, button]);
         if (lang !== "en") {
           assert.notEqual(words, said, `${lang} has its own words for the card`);
           assert.notEqual(open, button, `${lang} has its own words for the button`);

@@ -68,10 +68,18 @@ func IsGroupRef(ref string) bool {
 // back to it before key limits, routing and the usage log see it, so the
 // two ids of one group are one.
 func CanonicalRef(ref string) string {
+	if !strings.HasPrefix(strings.TrimSpace(ref), AutoPrefix) {
+		return ref
+	}
+	return canonicalRef(ref, autoRefsOn())
+}
+
+// canonicalRef uses the ownership read by its caller, without reading settings.
+func canonicalRef(ref string, enabled bool) string {
 	s := strings.TrimSpace(ref)
 	s, marked := strings.CutSuffix(s, "[1m]")
 	m, ok := strings.CutPrefix(s, AutoPrefix)
-	if !ok || strings.TrimSpace(m) == "" || !autoRefsOn() {
+	if !ok || strings.TrimSpace(m) == "" || !enabled {
 		return ref
 	}
 	level := ""
@@ -94,7 +102,7 @@ func CanonicalRef(ref string) string {
 // as group/auto-<slug>, so its members, off and fast lists, weights, rules
 // and classifier name it by one id. g's lists are its own (Group.own).
 func (g *Group) canonicalRefs() {
-	for _, l := range [][]string{g.Members, g.Off, g.Fast} {
+	for _, l := range [][]string{g.Members, g.Off, g.Fast, g.Ultra} {
 		for i, v := range l {
 			l[i] = CanonicalRef(v)
 		}
@@ -105,6 +113,7 @@ func (g *Group) canonicalRefs() {
 			g.Weights[c] = v
 		}
 	}
+	g.EffortMaps = renamedEffortMaps(g.EffortMaps, CanonicalRef)
 	for i := range g.Rules {
 		g.Rules[i].MapUses(CanonicalRef)
 	}
@@ -129,25 +138,58 @@ func (g Group) Ref() string {
 }
 
 // PublicRef is the id agents are given for ref: a found group's
-// group/auto-<slug> as its auto/<model> (Group.Ref), its effort and [1m]
-// mark kept; any other ref as it is, a found group magpie has none of now
-// too.
+// group/auto-<slug>, or an auto/<model> spelt otherwise than it is listed
+// now (auto/glm-5-3-flash for auto/glm-5.3-flash), as its auto/<model>
+// (Group.Ref), its effort and [1m] mark kept; any other ref as it is, a
+// found group magpie has none of now too.
 func PublicRef(ref string) string {
 	s := strings.TrimSpace(ref)
+	if !strings.HasPrefix(s, AutoPrefix) && !strings.HasPrefix(s, GroupPrefix+"auto-") {
+		return ref
+	}
+	if !autoRefsOn() {
+		return ref
+	}
+	return publicRef(ref, func(gid string) string {
+		g, _ := groupOf(sharedGroups(), gid)
+		return g.Spelled
+	})
+}
+
+// PublicRefs snapshots the found groups' public spellings for a whole usage
+// read. The returned mapper reads no files or shared catalog; nil means the
+// public namespace is inactive or no found group has a public spelling.
+func PublicRefs() func(string) string {
+	groups := usageGroupNames()
+	if len(groups) == 0 {
+		return nil
+	}
+	return func(ref string) string {
+		return publicRef(ref, func(gid string) string { return groups[gid] })
+	}
+}
+
+// publicRef uses a group's spelling read by the caller. Usage takes a snapshot
+// before its locks, so naming each row never reads providers or settings.
+func publicRef(ref string, spelling func(string) string) string {
+	s := strings.TrimSpace(ref)
+	if strings.HasPrefix(s, AutoPrefix) {
+		s = canonicalRef(s, true)
+	}
 	s, marked := strings.CutSuffix(s, "[1m]")
 	gid, ok := strings.CutPrefix(s, GroupPrefix)
-	if !ok || !strings.HasPrefix(gid, "auto-") || !autoRefsOn() {
+	if !ok || !strings.HasPrefix(gid, "auto-") {
 		return ref
 	}
 	level := ""
 	if i := strings.LastIndex(gid, ":"); i > 0 {
 		gid, level = gid[:i], gid[i:]
 	}
-	g, ok := groupOf(Groups(), gid)
-	if !ok || g.Spelled == "" {
+	model := spelling(gid)
+	if model == "" {
 		return ref
 	}
-	out := g.Ref() + level
+	out := AutoPrefix + model + level
 	if marked {
 		out += "[1m]"
 	}
@@ -155,12 +197,18 @@ func PublicRef(ref string) string {
 }
 
 // spelledIn is how the model of a found group's id is spelt by a vendor
-// (Group.Spelled): of the members whose model merges into the group by its
-// own id (mergeKey), the first models.dev lists by that very spelling, else
-// the first; failing those, the model the user said a member is the same
-// as (settings' ModelSameAs). Without a vendor's prefix ("anthropic/").
-// "" for a group whose id is not auto-…, or none of whose members is its
-// model: one the user made, whatever it is called, stays group/<id>.
+// (Group.Spelled): the spelling models.dev gives the model most
+// (catalog.Spelling: glm-5.3-flash whether the members serve glm-5-3-flash
+// or glm-5.3-flash, XYenon on Discord), so the id doesn't follow the
+// order the providers were added in, and the group's name is the one
+// models.dev gives that spelling (autoGroups). Failing that, of the
+// members whose model merges into the group by its own id (mergeKey), the
+// first models.dev lists by that very spelling, else the first; failing
+// those, the model the user said a member is the same as (settings'
+// ModelSameAs). Without a vendor's prefix ("anthropic/"). "" for a group
+// whose id is not auto-…, or none of whose members is its model: one the
+// user made, whatever it is called, stays group/<id>. Every spelling it
+// had before is still the group (CanonicalRef).
 func spelledIn(g Group, same map[string]string) string {
 	if !strings.HasPrefix(g.ID, "auto-") {
 		return ""
@@ -188,6 +236,11 @@ func spelledIn(g Group, same map[string]string) string {
 	// an id a relay lists as its display name ("GPT-6 Sol") is no id to
 	// put in an agent's config: the one vendors agree on is, below
 	spaced := func(s string) bool { return strings.ContainsFunc(s, unicode.IsSpace) }
+	for _, m := range slices.Concat(own, alike) {
+		if s := catalog.Spelling(m); s != "" && !spaced(s) && "auto-"+Slug(sameModel(s)) == g.ID {
+			return s
+		}
+	}
 	spacedOnly := len(own)+len(alike) > 0
 	own, alike = slices.DeleteFunc(own, spaced), slices.DeleteFunc(alike, spaced)
 	for _, s := range own {

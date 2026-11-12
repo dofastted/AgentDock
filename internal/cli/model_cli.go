@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -59,6 +60,24 @@ const modelUsage = `usage:
                                                  id of its own for a provider that has since been deleted,
                                                  and says when there was no name of its own to take away
   magpie model wires                             the names your vendors are asked for models by
+  magpie model id <provider/model>               the id magpie lists the model by, and the provider's own
+  magpie model id <provider/model> <id>          list the model by this id at that provider, e.g.
+                                                 relay-a/deepseek-v4.1-flash-1017 deepseek-v4.1-flash: agents,
+                                                 /v1/models, routing groups, the groups magpie finds, gateway keys
+                                                 and Usage all use it, and relay-a is still asked for
+                                                 deepseek-v4.1-flash-1017. One id is one model of a provider: the
+                                                 latest model given an id has it, and a model of the provider's
+                                                 own with that id is not listed while another is. A provider of
+                                                 your own (a key) only
+  magpie model id <provider/model> --reset       list it by the provider's own id again
+  magpie model ids                               the models you list by an id of your own
+  magpie model api <provider/model>... <api>     ask the model(s) on one API of the provider's: chat,
+                                                 responses, anthropic, gemini, or auto (--reset) for the
+                                                 vendor's list and every URL it has (magpie model api --help)
+  magpie model tier <provider/model> [fast|ultrafast|usual]
+                                                 the speed it is sent at: Codex's Fast or Ultrafast, for every
+                                                 agent with no fast pick of its own (magpie model tier --help)
+  magpie model apis [<provider>]                 the models you set an API for, or each of a provider's
   magpie model names                             the models you named or narrowed
   magpie model alias <model> <name>              count the model's usage under another model id in Usage,
                                                  Sessions and the usage summaries, e.g. deepseek-v4.1-flash
@@ -78,18 +97,29 @@ const modelUsage = `usage:
   magpie model enable <model> [<model>...]       take them off the disabled list, as written there
   magpie model disabled                          the disabled list, and the models each one turns off now
   magpie model suffix [on|own|off]               whether the agents' lists name each model with its provider
+  magpie model suffix <agent> [on|own|off|every] one agent's own, or every agent's again
                                                  (or "routing group") after it: on, as by default, "Sol · OpenAI";
                                                  own, a name you gave a model just as you wrote it, "Opus 5.5",
                                                  the others as on; off, "Sol" alone — but two a list would name
                                                  the same keep it
-  magpie model compact [on|off|<size>]           whether Codex and Claude Code compact a long conversation at
-                                                 272K: on, as by default, for a model of a longer window (in
-                                                 Claude Code, a Claude model runs to its own); off, at the
-                                                 model's whole window, 1M for a [1m] one; a size such as 500k
-                                                 compacts there instead. The app's Long conversations,
-                                                 in Codex's and Claude Code's settings on the Agents page,
+  magpie model compact [on|off|<size>]           whether Codex, Claude Code and Grok Build compact a long
+                                                 conversation at 272K: on, as by default, for a model of a
+                                                 longer window (in Claude Code, a Claude model runs to its
+                                                 own); off, at the model's whole window, 1M for a [1m] one; a
+                                                 size such as 500k compacts there instead. The app's Long
+                                                 conversations, in Codex's, Claude Code's and Grok Build's
+                                                 settings on the Agents page,
                                                  is the same switch; a provider's own Compact at (its
                                                  editor) comes before it
+  magpie model context-cap [<size>|off|all|own]  the longest context window any model is told, such as 200k:
+                                                 agents' lists and /v1/models say no more for every model
+                                                 that has no window of its own (magpie model context); a
+                                                 shorter or unknown window stays as it is. off takes it away;
+                                                 all also holds a window you set for a model or its
+                                                 provider (the shorter is told), own leaves those alone
+  magpie model compact <agent> [every|off|<size>] codex, claude or grok's own Long conversations: every
+                                                 follows the one above; off runs to the whole window; a
+                                                 size compacts there
 
   Each is looked for in this order: this model, then <provider id>/*, then the provider's own
   list, then models.dev. --reset removes only the first, and says so when a <provider id>/* value
@@ -128,6 +158,8 @@ func modelCmd(args []string) error {
 		return modelSuffix(args[1:])
 	case "compact", "full-context":
 		return modelCompact(args[1:])
+	case "context-cap", "ctx-cap":
+		return modelContextCap(args[1:])
 	case "context", "ctx":
 		return modelContext(args[1:])
 	case "output", "max-output":
@@ -138,6 +170,16 @@ func modelCmd(args []string) error {
 		return modelSpec(args[1:])
 	case "specs":
 		return modelSpecs()
+	case "id":
+		return modelID(args[1:])
+	case "api", "protocol":
+		return modelAPICmd(args[1:])
+	case "tier", "speed", "fast":
+		return modelTierCmd(args[1:])
+	case "apis", "protocols":
+		return modelAPIs(args[1:])
+	case "ids":
+		return modelIDs()
 	case "alias":
 		return modelUsageAlias(args[1:])
 	case "aliases":
@@ -646,6 +688,11 @@ func modelPrices() error {
 // providers' after them, all but the names the user gave (#92), or none
 // (#335), or sets it.
 func modelSuffix(args []string) error {
+	if len(args) > 0 && !slices.Contains([]string{"on", "yes", "true", "own", "mine", "off", "no", "false"}, strings.ToLower(args[0])) {
+		if a, err := agent.Find(args[0]); err == nil {
+			return agentSuffix(a, args[1:])
+		}
+	}
 	if len(args) == 0 {
 		switch provider.SuffixMode() {
 		case provider.SuffixOff:
@@ -681,16 +728,51 @@ func modelSuffix(args []string) error {
 	return nil
 }
 
+// agentSuffix says or sets an agent's own Provider in model names
+// (settings.AgentSuffix): every follows the one for every agent.
+func agentSuffix(a *agent.Agent, args []string) error {
+	id := a.ListsFor()
+	if len(args) == 0 {
+		mode := provider.SuffixModeFor(id)
+		if provider.AgentSuffix(id) == "" {
+			fmt.Println("every", muted.Render(fmt.Sprintf("· %s follows every agent's (%s) · magpie model suffix %s on|own|off", id, mode, id)))
+		} else {
+			fmt.Println(mode, muted.Render(fmt.Sprintf("· %s's own · magpie model suffix %s every", id, id)))
+		}
+		return nil
+	}
+	mode := ""
+	switch strings.ToLower(args[0]) {
+	case "every", "all", "default":
+	case "on", "yes", "true":
+		mode = provider.SuffixOn
+	case "own", "mine":
+		mode = provider.SuffixOwn
+	case "off", "no", "false":
+		mode = provider.SuffixOff
+	default:
+		return fmt.Errorf("magpie model suffix %s on|own|off|every, not %q", id, args[0])
+	}
+	if err := provider.SetAgentSuffix(id, mode); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), id+":", provider.SuffixModeFor(id), muted.Render(map[bool]string{true: "· as every agent's", false: "· its own"}[mode == ""]))
+	return nil
+}
+
 // modelCompact says whether long conversations are compacted at the
 // working window (settings.WorkingWindow) or the size the user gave, or
 // sets it: off is the app's Full window, every model run to its whole
 // window; a size is compacting there (#876).
 func modelCompact(args []string) error {
+	if len(args) > 0 && slices.Contains(settings.CompactAgents, args[0]) {
+		return agentCompact(args[0], args[1:])
+	}
 	if len(args) == 0 {
 		if s := settings.Load(); s.FullContext {
-			fmt.Println("off", muted.Render("· Codex and Claude Code run a conversation to the model's whole window · magpie model compact on"))
+			fmt.Println("off", muted.Render("· Codex, Claude Code and Grok Build run a conversation to the model's whole window · magpie model compact on"))
 		} else {
-			fmt.Println("on", muted.Render(fmt.Sprintf("· Codex and Claude Code compact at %dK on a longer window; in Claude Code a Claude model runs to its own · magpie model compact off", s.Compact()/1000)))
+			fmt.Println("on", muted.Render(fmt.Sprintf("· Codex, Claude Code and Grok Build compact at %dK on a longer window; in Claude Code a Claude model runs to its own · magpie model compact off", s.Compact()/1000)))
 		}
 		return nil
 	}
@@ -707,18 +789,106 @@ func modelCompact(args []string) error {
 		if err := provider.SetCompactAt(n); err != nil {
 			return err
 		}
-		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex and Claude Code compact at %dK on a longer window", settings.Load().Compact()/1000))
+		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex, Claude Code and Grok Build compact at %dK on a longer window", settings.Load().Compact()/1000))
 		return nil
 	}
 	if err := provider.SetFullContext(full); err != nil {
 		return err
 	}
 	if full {
-		fmt.Println(green.Render("✓"), "Codex and Claude Code run a conversation to the model's whole window", muted.Render("· every turn sends all of it"))
+		fmt.Println(green.Render("✓"), "Codex, Claude Code and Grok Build run a conversation to the model's whole window", muted.Render("· every turn sends all of it"))
 	} else {
-		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex and Claude Code compact at %dK again", settings.Load().Compact()/1000))
+		fmt.Println(green.Render("✓"), fmt.Sprintf("Codex, Claude Code and Grok Build compact at %dK again", settings.Load().Compact()/1000))
 	}
 	return nil
+}
+
+// modelContextCap says or sets the longest context window any model is told
+// (settings.ContextCap).
+func modelContextCap(args []string) error {
+	if len(args) == 0 {
+		if n := settings.Load().ContextCap; n > 0 {
+			fmt.Println(bold.Render(tokenCount(n)), muted.Render(map[bool]string{true: "· no model is told a longer window, one you set for it or its provider included · magpie model context-cap own", false: "· no model is told a longer window, unless you set one for it or its provider · magpie model context-cap all"}[settings.Load().ContextCapAll]), muted.Render("· magpie model context-cap off"))
+		} else {
+			fmt.Println("off", muted.Render("· every model takes its own window · magpie model context-cap <size>"))
+		}
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "all", "every":
+		if err := provider.SetContextCapAll(true); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "the longest context also holds a window you set for a model or a provider (the shorter is told)")
+		return nil
+	case "own", "unset":
+		if err := provider.SetContextCapAll(false); err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "the longest context holds only models with no window of your own")
+		return nil
+	}
+	var n int
+	switch v := strings.ToLower(args[0]); v {
+	case "off", "no", "none", "0":
+	default:
+		var err error
+		if n, err = provider.ParseTokens(v); err != nil || n <= 0 {
+			return fmt.Errorf("magpie model context-cap <size such as 200k>|off, not %q", args[0])
+		}
+	}
+	if err := provider.SetContextCap(n); err != nil {
+		return err
+	}
+	if n == 0 {
+		fmt.Println(green.Render("✓"), "every model takes its own window again")
+	} else {
+		fmt.Println(green.Render("✓"), "no model is told a window longer than", tokenCount(n), muted.Render("· one you set for a model or a provider stays"))
+	}
+	return nil
+}
+
+// agentCompact says or sets an agent's own Long conversations
+// (settings.AgentCompacts): every follows the one above for every agent,
+// off runs to the whole window, a size compacts there.
+func agentCompact(agent string, args []string) error {
+	if len(args) == 0 {
+		s := settings.Load()
+		own, has := s.AgentCompacts[agent]
+		switch a := s.ForAgent(agent); {
+		case !has:
+			fmt.Println("every", muted.Render(fmt.Sprintf("· %s follows every agent's (%s) · magpie model compact %s <size>|off", agent, compactWords(a), agent)))
+		case own.Full:
+			fmt.Println("off", muted.Render(fmt.Sprintf("· %s runs a conversation to the model's whole window · magpie model compact %s every", agent, agent)))
+		default:
+			fmt.Println(fmt.Sprintf("%dK", a.Compact()/1000), muted.Render(fmt.Sprintf("· %s's own · magpie model compact %s every", agent, agent)))
+		}
+		return nil
+	}
+	var c *settings.AgentCompact
+	switch strings.ToLower(args[0]) {
+	case "every", "all", "default":
+	case "off", "no", "false", "full":
+		c = &settings.AgentCompact{Full: true}
+	default:
+		n, err := provider.ParseTokens(args[0])
+		if err != nil || n <= 0 {
+			return fmt.Errorf("magpie model compact %s every|off|<size such as 500k>, not %q", agent, args[0])
+		}
+		c = &settings.AgentCompact{At: n}
+	}
+	if err := provider.SetAgentCompact(agent, c); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), agent+":", compactWords(settings.Load().ForAgent(agent)))
+	return nil
+}
+
+func compactWords(s settings.Settings) string {
+	if s.FullContext {
+		return "the model's whole window"
+	}
+	return fmt.Sprintf("compacts at %dK on a longer window", s.Compact()/1000)
 }
 
 func modelNames() error {

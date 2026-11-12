@@ -11,11 +11,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
+	"github.com/tidwall/jsonc"
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/steady"
 )
@@ -23,7 +23,11 @@ import (
 // Read returns the file contents, or (nil, nil) when the file does not exist.
 // A file unchanged since it was last read is not read again (the Agents
 // page looks at each agent's files many times over), and what is returned
-// is the caller's own to change.
+// is the caller's own to change. It is looked at even while a request
+// holds what was read (filememo.Hold), as what is read here is what a
+// write is made from: bytes held from a second ago would write back over
+// what another app wrote since. A look that only reads goes through
+// readHeld.
 //
 // A UTF-8 byte order mark at the start is not part of what is returned:
 // Windows tools (PowerShell's UTF8 encoding, Notepad, Claude Code channel
@@ -31,7 +35,19 @@ import (
 // which the agent reads through while a JSON or TOML parser refuses it
 // (#1534). WriteAtomic puts it back, see keepBOM.
 func Read(path string) ([]byte, error) {
-	b, err := filememo.Read("bytes", path, func(b []byte) ([]byte, error) { return b, nil })
+	return readThrough(path, filememo.ReadNow[[]byte])
+}
+
+// readHeld is Read for a look that writes nothing (GetJSON, GetTOMLTop):
+// while a request holds what was read, a file found unchanged within the
+// second is not looked at again (#1665: one catalog sync looked at an
+// agent's settings.json hundreds of times).
+func readHeld(path string) ([]byte, error) {
+	return readThrough(path, filememo.Read[[]byte])
+}
+
+func readThrough(path string, through func(string, string, func([]byte) ([]byte, error)) ([]byte, error)) ([]byte, error) {
+	b, err := through("bytes", path, func(b []byte) ([]byte, error) { return b, nil })
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -39,6 +55,21 @@ func Read(path string) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.Clone(TrimBOM(b)), nil
+}
+
+// jsonHeld is readHeld of a JSON or JSONC file made plain JSON (comments
+// and trailing commas blanked out), made once each time the file is read
+// and shared by every look, so read only. GetJSON copied the file and
+// converted it again on each look: 80 MB of what twenty window polls
+// allocated.
+func jsonHeld(path string) ([]byte, error) {
+	b, err := filememo.Read("plain json", path, func(b []byte) ([]byte, error) {
+		return jsonc.ToJSON(TrimBOM(b)), nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
 }
 
 // bom is the UTF-8 byte order mark.
@@ -95,9 +126,8 @@ func Filtered(f func(path string, data []byte) []byte, fn func() error) error {
 // preserved. When path is a symlink (a config kept in a dotfiles repo) the
 // file it points at is written and the link stays; a file with other hard
 // links is written in place, see writeInPlace. Once written, temp files
-// earlier writes of path left behind go, see removeStaleTemps.
+// earlier writes of path left behind go, see steady.RemoveStaleTemps.
 func WriteAtomic(path string, data []byte) error {
-	defer filememo.Forget() // read again, where a request holds it
 	path, err := Target(path)
 	if err != nil {
 		return err
@@ -106,13 +136,23 @@ func WriteAtomic(path string, data []byte) error {
 		data = (*f)(path, data)
 	}
 	data = keepBOM(path, data)
+	// A file that already holds these bytes is left alone: a new mtime
+	// wakes every watcher of it, and a rename swaps the file under an
+	// agent reading it, for nothing (#3870).
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+		return nil
+	}
+	// read again, where a request holds it; a file left alone above keeps
+	// what was held of every file (a catalog sync writes each agent's
+	// files each round, almost always as they are)
+	defer filememo.Forget()
 	if hardLinked(path) {
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err == nil {
 			if err := writeInPlace(f, data); err != nil {
 				return err
 			}
-			removeStaleTemps(path)
+			steady.RemoveStaleTemps(path)
 			return nil
 		}
 		// A file that can't be opened for writing (mode 0444, or read-only
@@ -129,6 +169,13 @@ func WriteAtomic(path string, data []byte) error {
 		mode = st.Mode().Perm()
 	}
 	dir := filepath.Dir(path)
+	// a folder an agent's variable names is never made again once gone
+	// (appdir.Gone): the agent no longer reads it
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		if err := appdir.Gone(dir); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -166,7 +213,7 @@ func WriteAtomic(path string, data []byte) error {
 		cleanup()
 		return err
 	}
-	removeStaleTemps(path)
+	steady.RemoveStaleTemps(path)
 	return nil
 }
 
@@ -226,41 +273,6 @@ func writeInPlace(f *os.File, data []byte) error {
 	}
 	_ = os.Remove(tmp.Name())
 	return nil
-}
-
-// staleTemp is how long a temp file beside a config goes untouched before
-// the next write of that config takes it for one a crash left. A write
-// takes milliseconds, so a temp file that old belongs to no write still
-// going on.
-const staleTemp = 10 * time.Minute
-
-// removeStaleTemps removes the temp files that earlier writes of path left
-// beside it when they crashed or failed part way, once a later write has
-// gone through: the file then holds newer text than any of them. One
-// younger than staleTemp stays, as another write may still be using it.
-// Should a write stall longer than that (a laptop asleep mid-write) and
-// lose its temp file here, its rename fails and leaves the file as it was,
-// or, writing in place, it only loses the spare copy of its text.
-func removeStaleTemps(path string) {
-	dir, prefix := filepath.Dir(path), "."+filepath.Base(path)+"."
-	es, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range es {
-		mid, ok := strings.CutPrefix(e.Name(), prefix)
-		if ok {
-			mid, ok = strings.CutSuffix(mid, ".tmp")
-		}
-		// os.CreateTemp puts digits for the *; anything else is another
-		// file's, say .models.yml.bak.1.tmp is models.yml.bak's
-		if !ok || mid == "" || strings.Trim(mid, "0123456789") != "" {
-			continue
-		}
-		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > staleTemp {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
 }
 
 // Target is the file a write to path should replace: path itself, or,

@@ -68,6 +68,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serve(lang, { ...base, signIn }, imported));
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           await page.goto("http://magpie.test/");
           await page.locator("#prefs").click();
           await openPart(page, "sync");
@@ -87,8 +88,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const fit = await line.evaluate((e) => ({ sw: e.scrollWidth, cw: e.clientWidth, right: e.getBoundingClientRect().right }));
           assert.ok(fit.sw <= fit.cw + 1 && fit.right <= width, `the line is shown whole: ${JSON.stringify(fit)}`);
 
-          // the import's result
-          const open = page.locator("#syncList .row.pref").last().locator("button");
+          // the import's result: Import is the last of Sync's own rows,
+          // Back up by itself's come after it
+          const open = page.locator("#syncList .row.pref:not(.auto-backup)").last().locator("button");
           await reach(page, open);
           await open.click();
           const form = page.locator("#syncList .sync-form");

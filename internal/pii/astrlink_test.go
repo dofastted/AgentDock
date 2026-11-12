@@ -2,6 +2,7 @@ package pii
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func TestChoose(t *testing.T) {
 		want string
 	}{
 		{"", false, AstrLinkGuard},            // a new user
-		{"", true, PrivacyFilter},             // had Privacy Filter on before there was a choice
+		{"", true, AstrLinkGuard},             // on, Privacy Filter not downloaded
 		{AstrLinkGuard, true, AstrLinkGuard},  // picked
 		{PrivacyFilter, false, PrivacyFilter}, // picked
 		{"something-else", false, AstrLinkGuard},
@@ -96,8 +97,8 @@ func TestChoose(t *testing.T) {
 			t.Errorf("Choose(%q, %v) = %q, want %q", c.name, c.on, got, c.want)
 		}
 	}
-	// Privacy Filter downloaded and turned off: turning the model on
-	// again uses it, rather than download another
+	// Privacy Filter downloaded: turned off, AstrLink Guard is the
+	// default; on, it masks until AstrLink Guard is downloaded
 	os.MkdirAll(dir(), 0o755)
 	os.WriteFile(modelPath(), make([]byte, 1), 0o644)
 	wasSize := modelSize
@@ -105,8 +106,11 @@ func TestChoose(t *testing.T) {
 	defer func() { modelSize = wasSize }()
 	os.MkdirAll(serveDir(), 0o755)
 	os.WriteFile(exe("pf-serve"), []byte("x"), 0o755)
-	if got := Choose("", false); got != PrivacyFilter {
-		t.Errorf("with Privacy Filter on disk, Choose = %q", got)
+	if got := Choose("", false); got != AstrLinkGuard {
+		t.Errorf("with Privacy Filter on disk and off, Choose = %q", got)
+	}
+	if got := Choose("", true); got != PrivacyFilter {
+		t.Errorf("with Privacy Filter on disk and on, Choose = %q", got)
 	}
 }
 
@@ -177,6 +181,44 @@ func TestGuardFindsUnderRedactsLabels(t *testing.T) {
 	}
 	if pst := Of(PrivacyFilter).Now(); pst.Model != PrivacyFilter || pst.Running {
 		t.Fatalf("Privacy Filter's Now = %+v", pst)
+	}
+}
+
+// backendFinder is a fakeFinder that says what reads it, as guard.Model
+// does.
+type backendFinder struct {
+	fakeFinder
+	via, device string
+	err         error
+}
+
+func (f backendFinder) Backend() (string, string, error) { return f.via, f.device, f.err }
+
+// Now names what reads AstrLink Guard: CoreML and the device its plan
+// picked while CoreML reads, the CPU with CoreML's error when that failed,
+// and the CPU where there is no CoreML (yyhhyyyyyy on Discord: Settings
+// said "on the CPU" while CoreML ran it).
+func TestGuardNowNamesItsBackend(t *testing.T) {
+	for _, c := range []struct {
+		via, device, err string
+	}{{"CoreML", "Neural Engine", ""}, {"CoreML", "GPU", ""}, {"CoreML", "", ""}, {"", "CPU", "prediction failed"}, {"", "CPU", ""}} {
+		t.Run(c.via+c.device+c.err, func(t *testing.T) {
+			guardSandbox(t)
+			fakeGuardFiles(t)
+			var reads atomic.Int32
+			f := backendFinder{fakeFinder: fakeFinder{map[string]string{}, &reads}, via: c.via, device: c.device}
+			if c.err != "" {
+				f.err = errors.New(c.err)
+			}
+			guardLoad = func(string) (spanFinder, error) { return f, nil }
+			if _, err := Of(AstrLinkGuard).Find(context.Background(), []string{"hi"}); err != nil {
+				t.Fatal(err)
+			}
+			st := Of(AstrLinkGuard).Now()
+			if !st.Running || st.Via != c.via || st.Device != c.device || st.GPUError != c.err || st.GPU {
+				t.Errorf("Now = %+v", st)
+			}
+		})
 	}
 }
 
@@ -322,5 +364,61 @@ func TestGuardFilesAreThePublishers(t *testing.T) {
 		if sums[f.path] != f.sha {
 			t.Errorf("%s: pinned %s, the publisher lists %q", f.path, f.sha, sums[f.path])
 		}
+	}
+}
+
+// panicFinder panics on a text holding "boom", as the tokenizer did on
+// #4553's stray byte, and reads every other.
+type panicFinder struct{ fakeFinder }
+
+func (f panicFinder) Find(text string) []guard.Span {
+	if strings.Contains(text, "boom") {
+		var s []int
+		_ = s[3] // the slice bounds of #4553's panic
+	}
+	return f.fakeFinder.Find(text)
+}
+
+// A model that panics reading one request fails that request, held back
+// as for a model that failed, instead of ending magpie from the read's
+// goroutine (#4553), and isn't counted as failed for the requests after
+// it, which it reads.
+func TestGuardPanicFailsOnlyItsRequest(t *testing.T) {
+	guardSandbox(t)
+	fakeGuardFiles(t)
+	var reads atomic.Int32
+	guardLoad = func(string) (spanFinder, error) {
+		return panicFinder{fakeFinder{map[string]string{"13800138000": "phone"}, &reads}}, nil
+	}
+	_, err := Of(AstrLinkGuard).Find(context.Background(), []string{"boom \xff"})
+	if err == nil || !strings.Contains(err.Error(), "failed reading this request") {
+		t.Fatalf("err = %v", err)
+	}
+	got, err := Of(AstrLinkGuard).Find(context.Background(), []string{"call 13800138000"})
+	if err != nil || len(got) != 1 || len(got[0]) != 1 || got[0][0].Label != "private_phone" {
+		t.Fatalf("the next request: %v, %v", got, err)
+	}
+	if st := Of(AstrLinkGuard).Now(); st.Failed != "" {
+		t.Fatalf("Now = %+v after one request's panic", st)
+	}
+}
+
+// Now says when AstrLink Guard runs under Rosetta, for Settings → Privacy
+// to say why it is slow (cdredfox on Discord: 150% of a core in the Intel
+// build on Apple silicon); Privacy Filter's pf-serve is Apple silicon's
+// there (target), so it says nothing.
+func TestGuardNowSaysRosetta(t *testing.T) {
+	guardSandbox(t)
+	was := translated
+	t.Cleanup(func() { translated = was })
+	for _, tr := range []bool{false, true} {
+		translated = func() bool { return tr }
+		if st := Of(AstrLinkGuard).Now(); st.Rosetta != tr {
+			t.Errorf("translated=%v: AstrLink Guard's Rosetta = %v", tr, st.Rosetta)
+		}
+	}
+	translated = func() bool { return true }
+	if st := Of(PrivacyFilter).Now(); st.Rosetta {
+		t.Error("Privacy Filter says Rosetta, though its pf-serve is Apple silicon's")
 	}
 }

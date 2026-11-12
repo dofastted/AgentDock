@@ -77,10 +77,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
 
     for (const [lang, w] of Object.entries(words)) await t.test(lang, async () => {
-      const context = await browser.newContext({ viewport: { width: 1100, height: 480 }, reducedMotion: "reduce" });
+      // 360 high: Allowances still runs past it since its warm-ups and
+      // check-in went to the providers' editors
+      const context = await browser.newContext({ viewport: { width: 1100, height: 360 }, reducedMotion: "reduce" });
       await context.addInitScript(() => { try { localStorage.setItem("magpie.settingsTab", "general"); localStorage.setItem("magpie.libTab", "mcp"); } catch {} });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang));
@@ -152,6 +155,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await context.addInitScript((layout) => { try { localStorage.setItem("magpie.settingsTab", "general"); localStorage.setItem("magpie.libTab", "mcp"); if (layout) localStorage.setItem("magpie.navLayout", layout); } catch {} }, layout);
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang));
@@ -163,8 +167,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator('#nav button[data-view="library"]').click();
       await page.locator(`${libv} .lib-row, ${libv} .row`).first().waitFor();
       const at = await toFoot(page, libv);
-      await page.locator(`${libv} .lib-tabs > button`).nth(1).click();
-      await page.waitForFunction(() => document.querySelectorAll("#view-library .lib-tabs > button")[1]?.classList.contains("on"));
+      await page.locator(`${libv} .lib-tabs > button`).nth(2).click();
+      await page.waitForFunction(() => document.querySelectorAll("#view-library .lib-tabs > button")[2]?.classList.contains("on"));
       await settle(page);
       const after = await top(page, libv);
       assert.ok(after > 100, `the strip's click left the Library where it was, not at its top: ${at} then ${after}`);

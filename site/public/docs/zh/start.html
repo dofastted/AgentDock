@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>快速上手 · magpie 文档</title>
+<title>快速上手：给 Claude Code、Codex 等每个 Agent 选模型 · magpie 文档</title>
 <meta name="description" content="magpie 的整体思路和配置方法：添加你已有的供应商，给每个 Agent 选模型，需要时再把多个账号组成路由组。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/start">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/start">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/start">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/start">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/start">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="magpie 快速上手">
 <meta property="og:description" content="添加你已有的供应商，给每个 Agent 选模型。一步步配置。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/start">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "快速上手",
+   "description": "magpie 的整体思路和配置方法：添加你已有的供应商，给每个 Agent 选模型，需要时再把多个账号组成路由组。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/start",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "快速上手",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -110,11 +170,11 @@
     </figure>
 
     <h3>订阅 · 登录即可，无需密钥</h3>
-    <p>Claude（Pro、Max、Team）、ChatGPT（Plus、Pro、Business）、Cursor、Grok（SuperGrok）、Copilot 和 Devin。点卡片后 magpie 会在浏览器里打开厂商自己的登录页，登录完成后账号立刻出现（Copilot 会给你一个验证码，在 GitHub 页面上输入）。订阅是在 magpie 里添加的，不需要先去别的 Agent 里登录。</p>
+    <p>Claude（Pro、Max、Team）、ChatGPT（Plus、Pro、Business）、Copilot、Gemini（Code Assist）和 Antigravity；Cursor、Grok（SuperGrok）、Devin 等在 <span class="ui">插件</span> 页添加。点卡片后 magpie 会在浏览器里打开厂商自己的登录页，登录完成后账号立刻出现（Copilot 会给你一个验证码，在 GitHub 页面上输入）。订阅是在 magpie 里添加的，不需要先去别的 Agent 里登录。</p>
     <ul>
       <li><b>多个账号。</b>再点一次 Claude 或 ChatGPT 卡片即可再加一个；它们都列在这个供应商下面，点一下就能切换使用哪个。</li>
       <li><b>已经登录过？</b>本机上已经登录的 Agent 也会作为供应商出现，显示为 <em>已登录 …</em>。</li>
-      <li><b>所有 Agent 都能用。</b>订阅里的模型在其他 Agent 的选择列表里写作 <code>claude/…</code>、<code>codex/…</code>、<code>copilot/…</code>。Claude 订阅的请求通过本机安装的 Claude Code 运行，所以请保留 Claude Code。</li>
+      <li><b>所有 Agent 都能用。</b>订阅里的模型在其他 Agent 的选择列表里写作 <code>claude/…</code>、<code>codex/…</code>、<code>copilot/…</code>、<code>antigravity/…</code>。比如想在 Codex 或 Claude Code 里用 Antigravity 的 Claude、Gemini 模型：在这里登录 Antigravity，再在 Agent 那一行选一个 <code>antigravity/…</code> 模型即可，不用别的配置。Google 可能封禁在 Antigravity 之外使用的 Antigravity 账号，请用丢了也不心疼的账号。Claude 订阅的请求通过本机安装的 Claude Code 运行，所以请保留 Claude Code。</li>
     </ul>
 
     <h3>供应商（厂商预设）</h3>
@@ -140,6 +200,7 @@
     <ul>
       <li><b>点模型</b>打开选择列表。模型分组显示：Agent 自带的、你的路由组、再是你添加的每个供应商。输入可以筛选，也可以直接输入列表里没有的模型 ID。</li>
       <li><b>推理强度</b>：Agent 有这个选项时（Codex 的 <em>推理强度</em>、Pi 的 <em>思考</em>），列表下方会出现滑块。</li>
+      <li><b>快速模式</b>：有快速模式的模型，在列表里那一行的星标旁有一个闪电按钮，选中的那一行和鼠标指着的那一行会显示。包括 ChatGPT（Codex）账号的 GPT 模型、OpenAI Key 的 GPT 和 o 系列模型、有快速版本的 Cursor 模型、Anthropic Key 的 Claude Opus，以及插件或另一个 magpie 说明支持 priority 的模型。点一下，这个 Agent 发给这个模型的每个请求都会用服务商的快速模式，更快，价格更高：不管 Agent 用哪种 API，都加上 <code>service_tier: "priority"</code>（和 Codex 自己的 <code>/fast</code> 发的一样），Claude 则是 <code>speed: "fast"</code>。ChatGPT 账号在这个模型上提供 Ultrafast 时，再点一下是 Ultrafast，再点一下恢复普通速度。每个 Agent 分开设置，这个模型的备用模型照常发送。路由组里每个成员那一行也有同样的开关。</li>
       <li><b>Claude Code 通过 magpie 使用模型时</b>，opus、sonnet、haiku 各档还可以单独指定模型；默认跟随主模型。</li>
     </ul>
     <p>选好的模型会写进 Agent 自己的配置文件。只改 magpie 需要的那几个键；注释、顺序、缩进都保留，写入是原子的。</p>
@@ -150,10 +211,12 @@
       <tr><td>OpenCode、MiMo Code、DevEco Code、Pi、Crush</td><td>一个 <code>magpie</code> 供应商条目，以及 <code>magpie/provider/model</code></td></tr>
       <tr><td>AtomCode</td><td><code>~/.atomcode/config.toml</code>：一个 <code>magpie</code> 供应商账号，以及目录中每个模型各自的条目</td></tr>
       <tr><td>Snow CLI</td><td><code>~/.snow/profiles/magpie.json</code>：一个 <code>magpie</code> 配置文件，并设为当前配置（Snow App 用“同步 Snow CLI API 配置”导入）</td></tr>
+      <tr><td>QwenPaw</td><td><code>~/.qwenpaw.secret/providers/custom/magpie.json</code> 中的 <code>magpie</code> 提供商，以及每个智能体 <code>agent.json</code> 里的 <code>active_model</code>。首次连接后需重启 QwenPaw</td></tr>
       <tr><td>Gemini CLI</td><td><code>GOOGLE_GEMINI_BASE_URL</code> 指向网关、API 密钥认证，以及模型</td></tr>
     </table></div>
     <p><b>已在运行的会话保持它启动时的模型。</b>Agent 启动时读取配置，所以改动从下一个会话生效。Codex 也在启动时生成模型列表：切换后请重启 Codex 应用和已打开的 <code>codex</code> 会话。</p>
     <div class="callout"><b>Paseo、编辑器插件等</b>替你运行 Claude Code 或 Codex 的前端，启动的是同一个 CLI，读的也是同一份 <code>~/.claude</code> 或 <code>~/.codex</code> 配置。在 magpie 里设一次模型，它们从下一个会话起也会用上。</div>
+    <div class="callout"><b><code>claude-magpie</code>：经 magpie 运行 Claude Code，<code>claude</code> 保持原样。</b>想让平常的 <code>claude</code> 继续用你自己的 Claude 账号、只在需要时才走 magpie，就不要连接 Claude Code，改用 <code>claude-magpie</code> 启动。它启动的是同一个 <code>claude</code>，只在这次会话里把 magpie 的设置（网关、模型和各档位）叠在你的设置之上，<code>~/.claude/settings.json</code> 不会被改写。所有参数都交给 Claude Code：<code>claude-magpie --resume</code>、<code>claude-magpie -p "…"</code>。在 <span class="ui">设置 › 命令行</span> 添加 <code>magpie</code> 命令时，magpie 会把它放在旁边；已经添加过的，运行一次 <code>magpie claude launcher add</code> 即可。<code>magpie claude run</code> 效果相同。在其中用 <code>/model</code> 选的模型会留给下一次 <code>claude-magpie</code>，你自己的 <code>claude</code> 保留原来的模型。magpie 需要在运行。</div>
 
     <h2 id="routing"><a class="anchor" href="#routing">3 · 可选：路由组</a></h2>
     <p>每个供应商只有一个账号时可以跳过这一步。等你有了多个——比如两个 ChatGPT 账号，或者同一个模型既有订阅又有密钥——再来设置。</p>
@@ -165,28 +228,31 @@
     </figure>
 
     <h3>一个供应商里的多个账号或密钥</h3>
-    <p>展开供应商那一行，勾选要用的每个账号或密钥。<span class="ui">路由</span> 决定请求怎么分给它们：<span class="ui">智能</span>（默认）、<span class="ui">按顺序</span>、<span class="ui">轮流</span>、<span class="ui">用量少的优先</span>、<span class="ui">重置前用完</span> 或 <span class="ui">速度优先</span>（最近回答最快的密钥先用）。<span class="ui">备用</span> 里列出这个供应商额度用完、被限流或不可用时改用的模型。</p>
+    <p>展开供应商那一行，勾选要用的每个账号或密钥。<span class="ui">路由</span> 决定请求怎么分给它们：<span class="ui">智能</span>（默认）、<span class="ui">按顺序</span>、<span class="ui">用完再换</span>（一个用完再换下一个，前面的恢复了也不切回去）、<span class="ui">轮流</span>、<span class="ui">用量少的优先</span>、<span class="ui">到期前用完</span>、<span class="ui">按权重</span>（每个账号或密钥按旁边设的权重分得请求，比如 Max 账号设 5、Pro 账号设 1）或 <span class="ui">速度优先</span>（最近回答最快的密钥先用）。<span class="ui">备用</span> 里列出这个供应商额度用完、被限流或不可用时改用的模型。</p>
 
     <h3>跨供应商的同一个模型</h3>
     <p>路由组是几个模型（来自一个或多个供应商），Agent 把它当作一个来选：<code>group/&lt;id&gt;</code>，在选择列表的 <em>路由组</em> 下面。两个供应商用同一个名字提供的模型会自动成组；在 <span class="ui">路由</span> 标签页点 <span class="ui">新建组</span> 可以把任意模型组到一起。排第一的模型决定这个组对外的能力。</p>
     <div class="callout"><b>不用手动建的组。</b>再加一个供应商，只要它提供的模型和已有的同名（比如 Claude 订阅和 Copilot 都有 Claude Opus，DeepSeek 官方 API 和 OpenRouter 都有 DeepSeek），magpie 就会自动把它们组成一个路由组：<code>auto/&lt;模型&gt;</code>（模型自己的 id，比如 <code>auto/claude-opus-4.6</code>；以前的 <code>group/auto-…</code> 也照样能用），包含所有提供这个模型的供应商。名字按各家不同的写法匹配（<code>deepseek/deepseek-chat</code> 和 <code>deepseek-chat</code> 算同一个）。给 Agent 选这个组，请求就会分摊到这些供应商上；不想要的可以用 <code>magpie group rm</code> 隐藏。</div>
+    <div class="callout"><b>给供应商的怪名字起个自己的 id。</b>有的供应商用自己的 id 提供模型，比如 <code>deepseek-v4.1-flash-1017</code>、<code>grok-4.6@500k</code>。在供应商编辑页的 <span class="ui">模型设置</span> 里，<span class="ui">等同于</span> 旁边的 <span class="ui">列为</span> 填上你想要的 id，再点 <span class="ui">保存</span>；或者运行 <code>magpie model id relay/grok-4.6@500k grok-4.6</code>。之后 magpie 列出、路由、把它和其他供应商的 <code>grok-4.6</code> 合进 <code>auto/grok-4.6</code> 组、限制网关密钥、记录用量，都用 <code>grok-4.6</code>，向供应商请求时仍然发 <code>grok-4.6@500k</code>。一个供应商里一个 id 只对应一个模型：最后设上的那个生效，期间供应商自己叫这个 id 的模型不再列出。<code>magpie model id relay/grok-4.6 --reset</code> 改回来，<code>magpie model ids</code> 列出全部。登录的订阅和插件的供应商也一样（<code>magpie model id cursor/deepseek-v41-flash-1017 deepseek-v4.1-flash</code>）：账号或插件收到的仍是它自己的 id。</div>
     <div class="table-wrap"><table>
       <tr><th>路由</th><th>谁排在前面</th></tr>
-      <tr><td>智能 <code>smart</code></td><td>默认。把成员的账号和 Key 放在一起排（组里的路由组算一个，见下文）：还有余量的订阅里，额度最先重置的排第一。看周额度的重置时间；只有 5 小时额度、没有周额度的账号（如 Claude Enterprise）看它的 5 小时重置，所以排在所有更晚重置的周额度前面。没有重置时间的积分（WorkBuddy 的积分包，各自到期）按剩余积分最早过期的时间算，所以积分最先过期的 WorkBuddy 账号排第一。失败后在休息的排最后。</td></tr>
+      <tr><td>智能 <code>smart</code></td><td>默认。把成员的账号和 Key 放在一起排（组里的路由组算一个，见下文）：还有余量的订阅里，额度最先重置的排第一。看周额度的重置时间；只有 5 小时额度、没有周额度的账号（如 Claude Enterprise）看它的 5 小时重置，所以排在所有更晚重置的周额度前面。没有重置时间的积分（WorkBuddy 的积分包，各自到期）按剩余积分最早过期的时间算，所以积分最先过期的 WorkBuddy 账号排第一；同时重置的账号（免费账号都在月底）再看剩余积分哪个先过期。失败后在休息的排最后。</td></tr>
       <tr><td>按顺序 <code>order</code></td><td>先用第一个模型，它答不了再换下一个。</td></tr>
+      <tr><td>用完再换 <code>drain</code></td><td>一个账号或 Key 用到额度用完，再换下一个，并一直用它：前面的额度恢复了也不会切回去。被限流或出错的只在休息期间跳过。</td></tr>
       <tr><td>轮流 <code>rotate</code></td><td>会话的每一轮交给下一个成员的账号或 Key，均摊负载。</td></tr>
       <tr><td>最少使用 <code>usage</code></td><td>剩余额度最多的账号或 Key 排第一。</td></tr>
-      <tr><td>重置前用完 <code>pace</code></td><td>每周剩余额度除以距重置的小时数，最高的账号排第一——重置时损失最多的那个——少让成员的周额度到重置时作废；只有 5 小时额度、没有周额度的账号（如 Claude Enterprise）按 5 小时窗口的剩余额度除以距它重置的小时数算，所以几乎总排第一。用到 90% 以上的等其他账号都答不了时才用。Key 按最近发给它的 token 数排。</td></tr>
+      <tr><td>到期前用完 <code>pace</code></td><td>每周剩余额度除以距重置的小时数，最高的账号排第一——重置时损失最多的那个——少让成员的周额度到重置时作废；只有 5 小时额度、没有周额度的账号（如 Claude Enterprise）按 5 小时窗口的剩余额度除以距它重置的小时数算，所以几乎总排第一。账号里有比重置更早过期的积分时（如 WorkBuddy 签到得的积分），按最先过期的那部分除以距过期的小时数算，比周额度的更高就按它排。用到 90% 以上的等其他账号都答不了时才用。Key 按最近发给它的 token 数排。</td></tr>
       <tr><td>按权重 <code>weight</code></td><td>每个模型按群组编辑器里它旁边设的权重（1 到 1000，不设为 1）分得请求：权重 3 的模型每拿三个，权重 1 的拿一个，均匀穿插而不是成批。每个模型按它自己提供方的路由用自己的账号或 Key，群组里的群组算一个成员。失败后歇着的那个退出这一轮；一个失败时，下一个模型接上。</td></tr>
       <tr><td>速度优先 <code>fast</code></td><td>最近回答这个模型最快的成员、账号或 Key 先用：看首字时间和输出速度，越新的回答算得越重。相差不到一成的保持原来的顺序。一小时内没测过的每五个请求分到一个，慢过一次的渠道还会再试；失败后歇着的排最后。只测流式回复，重启后重新测。</td></tr>
+      <tr><td>最便宜优先 <code>cheap</code></td><td>仅限路由组。此刻模型最便宜的成员先用，按 Usage 计费的方式算这个时段每百万输入、输出 token 的价格：你自己设的价格，否则用标价，再乘以提供方的价格倍率和分时倍率。DeepSeek 官方 API、Command Code 和 OpenCode Go 的 DeepSeek 模型在高峰时段（工作日 UTC 01:00–04:00 和 06:00–10:00）双倍计价，Ollama Cloud 的 DeepSeek V4.1 Flash 和 V4 Pro 则按它自己的高峰时段（工作日 UTC 12:00–18:00，其余时间半价），所以同一个 DeepSeek 模型挂在两个提供方上时，会交给这个时段更便宜的那个。价格相同的保持原来的顺序；不知道价格的排最后。</td></tr>
     </table></div>
     <div class="table-wrap"><table>
       <tr><th>会话保持</th><th>会话在回答过它的账号或 Key 上留多久</th></tr>
       <tr><td>自动 <code>auto</code></td><td>默认。一轮之内总是保持，跨轮则在厂商缓存还值得保留时保持。</td></tr>
-      <tr><td>整个会话 <code>session</code></td><td>整个会话，只要它还能回答。</td></tr>
+      <tr><td>整个会话 <code>session</code></td><td>整个会话，只要它还能回答。路由为智能、最少使用或到期前用完时，新会话交给当前会话最少的账号或 Key，同时开的几个会话各占一个。</td></tr>
       <tr><td>一轮之内 <code>turn</code></td><td>Agent 回传工具结果时不换；你再次发言时，路由重新决定。</td></tr>
       <tr><td>关闭 <code>off</code></td><td>每个请求都重新路由。</td></tr>
-      <tr><td>严格 <code>strict</code></td><td>绝不换到别的账号或密钥，即使超过其用量上限也一样：它被限流或额度用完时，错误直接交给 Agent。新会话照常路由。</td></tr>
+      <tr><td>严格 <code>strict</code></td><td>绝不换到别的账号或密钥，即使超过其用量上限也一样：它被限流或额度用完时，错误直接交给 Agent。新会话像“整个会话”一样分开。</td></tr>
     </table></div>
     <h3 id="rules">规则 · 把某类对话交给指定模型</h3>
     <p>路由组的 <span class="ui">规则</span> 把符合条件的一轮对话交给组里指定的模型：够长（<code>tokens ≥ N</code>）、带图片、要求推理（开启，或不低于某个强度）、来自某些 Agent，用户想做的事符合你描述的<em>意图</em>、Agent 正在压缩上下文，或者 Agent 在某些文件夹（项目）里工作。一条规则的条件要同时满足，所以可以写“在 ~/work/acme 里，并且够长”。每次你发新消息时从上往下检查，第一条命中的规则把它的模型排在最前，其余成员排在后面做故障转移。没有命中任何规则的一轮照组本来的方式路由，并保持在原来的账号上。</p>
@@ -205,8 +271,8 @@
     <p>路由组的成员也可以是另一个路由组：在 <span class="ui">添加模型</span> 的 <em>路由组</em> 分类里选它，或者在终端里用 <code>models+=group/&lt;id&gt;</code>。子组占据它在顺序里的位置，在自己的模型之间按自己的路由方式和规则分配。比如 Coder 可以是 <code>deepseek-v4-pro</code>，然后是 <em>Fast</em>，而 Fast 是几个便宜模型的顺序。Coder 的规则可以把一轮对话交给 <code>group/fast</code>，再由 Fast 自己的规则决定它里面哪个模型排第一。</p>
     <ul>
       <li><b>不会无限递归。</b>一个组不能包含它自己，无论是直接包含，还是经由它里面的组间接包含。Coder 已经包含 Fast 时，再把 Coder 放进 Fast 会被拒绝，选择器里也不会列出这样的组。最多嵌套 8 层。一个组被别的组包含时不能删除，要先从那个组里移除它。</li>
-      <li><b>每一层按自己的路由。</b>外层组不管用什么路由，都不会伸进它里面的组：智能、轮流、最少使用、重置前用完都把子组当作一个成员，拿子组自己会先用的那个账号或 Key 来比；排到它时，子组按自己的顺序整体尝试。Coder 设为智能、里面放 Claude（按顺序）和 GPT（按顺序）两个组时，比较的是 Claude 组的第一个和 GPT 组的第一个，不会把两组的账号混在一起排。</li>
-      <li><b>服务商自己的路由也一样。</b>一个模型的服务商把账号或 Key 设为按顺序、轮流、用量少的优先、重置前用完或按权重时，在任何路由组里都保持这个路由：组拿它会先用的那个账号或 Key 来比，排到它时按它自己的顺序整体尝试。保持默认“智能”的服务商，它的账号和组里其他账号放在一起排，额度最先重置的排第一，不管属于哪个服务商。</li>
+      <li><b>每一层按自己的路由。</b>外层组不管用什么路由，都不会伸进它里面的组：智能、轮流、最少使用、到期前用完都把子组当作一个成员，拿子组自己会先用的那个账号或 Key 来比；排到它时，子组按自己的顺序整体尝试。Coder 设为智能、里面放 Claude（按顺序）和 GPT（按顺序）两个组时，比较的是 Claude 组的第一个和 GPT 组的第一个，不会把两组的账号混在一起排。</li>
+      <li><b>服务商自己的路由也一样。</b>一个模型的服务商把账号或 Key 设为按顺序、轮流、用量少的优先、到期前用完或按权重时，在任何路由组里都保持这个路由：组拿它会先用的那个账号或 Key 来比，排到它时按它自己的顺序整体尝试。保持默认“智能”的服务商，它的账号和组里其他账号放在一起排，额度最先重置的排第一，不管属于哪个服务商。</li>
       <li><b>故障转移照常。</b>子组里的模型全部失败时，由外层组的下一个成员接手，和其他成员一样。</li>
       <li>同一个模型出现两次（单独一次，子组里一次）时只问一次，按它第一次出现的位置。</li>
     </ul>
@@ -229,6 +295,8 @@ magpie group rule add opus-anywhere use=deepseek/deepseek-v4-flash compact  <spa
 magpie group rule add opus-anywhere use=kimi/kimi-k2.6 folders=~/oss,<span class="s">"~/My Project"</span>  <span class="c"># 这些项目里的对话先发给它</span>
 magpie group rule add opus-anywhere pause=copilot/claude-opus-5.5 time=14:00-18:00 days=mon-fri  <span class="c"># 这段时间不用它</span>
 magpie group rule add opus-anywhere pause=claude/claude-opus-5-5 except-folders=~/big-task  <span class="c"># 只留给 ~/big-task 里的任务：其他文件夹不用它</span>
+magpie group rule add opus-anywhere use=deepseek/deepseek-v4-flash when=<span class="s">"effort is off"</span> when=<span class="s">"not subagent"</span>  <span class="c"># 关了推理、又不是子代理的请求</span>
+magpie group rule add opus-anywhere use=deepseek/deepseek-v4-flash when=<span class="s">"system matches ^你是对话标题命名"</span>  <span class="c"># 按系统提示词认出标题命名请求，不用模型判断</span>
 magpie group set coder models+=group/opus-anywhere  <span class="c"># 路由组里放路由组</span>
 magpie group rule opus-anywhere      <span class="c"># 查看规则；rule rm|mv &lt;n&gt;，rule classifier &lt;组&gt; &lt;模型&gt; 换判断模型</span>
 magpie group copy opus-anywhere <span class="s">"Opus test"</span>  <span class="c"># 复制一份：模型、路由方式和规则都一样，可单独修改</span>
@@ -255,16 +323,19 @@ magpie claude group/opus-anywhere    <span class="c"># 使用它</span></pre>
       <tr><td><code>magpie presets</code></td><td>magpie 内置的厂商预设</td></tr>
       <tr><td><code>magpie provider add deepseek sk-…</code></td><td>用密钥添加一个预设</td></tr>
       <tr><td><code>magpie accounts add codex</code></td><td>再登录一个 Claude 或 ChatGPT 订阅</td></tr>
+      <tr><td><code>magpie accounts switch claude next</code></td><td>把 Claude Code（或 <code>codex</code>）切到下一个还有额度的账号；都已过切换线时，切到剩得最多的那个</td></tr>
       <tr><td><code>magpie accounts discovery off</code></td><td>不读取智能体的登录信息（Claude Code 和 Codex 的文件、钥匙串）；<code>on</code> 重新读取</td></tr>
       <tr><td><code>magpie providers</code></td><td>你的供应商：地址、密钥、模型、谁在用</td></tr>
       <tr><td><code>magpie models</code></td><td>Agent 能选的所有模型，写作 <code>provider/model</code></td></tr>
       <tr><td><code>magpie claude codex/gpt-5.5</code></td><td>设置 Agent 的模型</td></tr>
+      <tr><td><code>claude-magpie</code></td><td>这一次会话经 magpie 运行 Claude Code，平常的 <code>claude</code> 仍用你的账号（<code>magpie claude run</code>；<code>magpie claude launcher add</code> 放到 PATH 上）</td></tr>
       <tr><td><code>magpie codex effort high</code></td><td>设置其他字段</td></tr>
       <tr><td><code>magpie codex default</code></td><td>恢复 Agent 自己的默认值，移除 magpie 的接入</td></tr>
       <tr><td><code>magpie save work</code> · <code>use work</code></td><td>保存、应用方案</td></tr>
       <tr><td><code>magpie usage 7d</code></td><td>按 Agent 和模型统计 token 与费用</td></tr>
       <tr><td><code>magpie tools</code> · <code>magpie tool generate_image "…" -o hero.png</code></td><td>列出并直接调用 magpie 通过 MCP 给 Agent 的工具（生图、识图、联网搜索、插件的工具）；生成的图片保存到文件</td></tr>
       <tr><td><code>magpie tray</code></td><td>只启动菜单栏图标</td></tr>
+      <tr><td><code>magpie log</code> · <code>magpie log -f</code></td><td>magpie 的日志在哪里，报告问题时附上；<code>-n 200</code> 打印应用日志的最后几行，<code>-f</code> 持续跟随</td></tr>
     </table></div>
 
     <h2 id="faq"><a class="anchor" href="#faq">常见问题</a></h2>
@@ -279,10 +350,25 @@ magpie claude group/opus-anywhere    <span class="c"># 使用它</span></pre>
     <h3>手动改 Agent 的配置会冲突吗？</h3>
     <p>不会。magpie 每次都重新读取文件，只动它设置的那几个键，你的其他设置和注释都会保留。用 <span class="ui">导入…</span> 带进来的供应商是一份拷贝：之后在 Agent 里的改动不会再同步过来。</p>
     <h3>没有梯子，安装或更新连不上 GitHub 怎么办？</h3>
-    <p>给安装脚本和 <code>magpie update</code> 加代理：<code>curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --proxy http://127.0.0.1:7890</code>，或 <code>magpie update --proxy socks5://127.0.0.1:1080</code>（支持 http、https、socks5、socks5h；环境变量 <code>HTTPS_PROXY</code>、<code>ALL_PROXY</code> 同样生效）。<code>--mirror &lt;前缀&gt;</code> 从你指定的 GitHub 下载镜像取发布文件，即 <code>&lt;前缀&gt;https://github.com/…</code>；<code>magpie update mirror &lt;前缀&gt;</code> 让之后每次更新（包括应用自己的更新）都用它，<code>magpie update mirror off</code> 取消。不指定就不用任何镜像；文件的 SHA-256 始终来自 usemagpie.ai，而不是镜像，镜像改过的文件会被拒绝安装。应用自己的更新走 <span class="ui">设置</span> → <span class="ui">代理</span>。</p>
+    <p>给安装脚本和 <code>magpie update</code> 加代理：<code>curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --proxy http://127.0.0.1:7890</code>，或 <code>magpie update --proxy socks5://127.0.0.1:1080</code>（支持 http、https、socks5、socks5h；环境变量 <code>HTTPS_PROXY</code>、<code>ALL_PROXY</code> 同样生效）。发布文件从 usemagpie.ai（Cloudflare R2）下载，失败时改从 github.com 下载。<code>--mirror &lt;前缀&gt;</code> 在站点下载失败时从你指定的 GitHub 下载镜像取发布文件，即 <code>&lt;前缀&gt;https://github.com/…</code>；<code>magpie update mirror &lt;前缀&gt;</code> 让之后每次更新（包括应用自己的更新）都用它，<code>magpie update mirror off</code> 取消。不指定就不用任何镜像；文件的 SHA-256 始终来自 usemagpie.ai，而不是镜像，镜像改过的文件会被拒绝安装。应用自己的更新走 <span class="ui">设置</span> → <span class="ui">代理</span>。</p>
+
+    <h3 id="linux-build"><a class="anchor" href="#linux-build">Linux 上安装脚本装的是哪个版本？</a></h3>
+    <p>装了 GTK 3 和 WebKitGTK 4.1 时装桌面版（窗口、托盘图标和应用菜单项）。有桌面但缺这两个库时，脚本会用系统的包管理器（apt、dnf、pacman 或 zypper）通过 <code>sudo</code> 装上 WebKitGTK 4.1（sudo 会要你的密码），再装桌面版；要密码之前会先说要装什么。没有终端（CI、Dockerfile）、没有 <code>sudo</code>、发行版不认识或者装库失败时，先装终端版（<code>magpie tui</code>、<code>magpie web</code> 和命令行），最后给出装库的命令，比如 Debian、Ubuntu 上是 <code>sudo apt install libwebkit2gtk-4.1-0</code>，Fedora 上是 <code>sudo dnf install webkit2gtk4.1</code>；装好后再运行一次安装脚本就换成桌面版。在桌面上运行还是 ssh 进去运行都算有桌面：有图形会话、你登录着图形界面，或者装了可登录的桌面环境。没有桌面的服务器装终端版。想自己选，加 <code>--gui</code>（库现在装不上也装桌面版）或 <code>--tui</code>（装终端版，不装任何系统包）：<code>curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --tui</code>。</p>
+
+    <h3 id="uninstall"><a class="anchor" href="#uninstall">怎么卸载 magpie？</a></h3>
+    <p>用安装脚本装的：<code>curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --uninstall</code> 会先让 magpie 断开每个 Agent 并恢复它原来的配置，再拿掉脚本装上的东西：<code>magpie</code> 命令，macOS 上的应用，Linux 上的菜单项、图标和 <code>magpie://</code> 链接处理，以及 Linux 上会去启动一个已不存在的 magpie 的后台服务和开机启动。<code>~/.config/magpie</code> 里的设置、provider 和用量都保留，重新安装就回来。加上 <code>--purge</code> 会把它们也删掉（<code>magpie uninstall --yes</code>）。用其他方式装的，<code>magpie uninstall</code> 或 <span class="ui">设置</span> → <span class="ui">卸载 magpie</span> 做的就是 <code>--purge</code> 那些事，程序本身留给你删除。</p>
+    <p>已经把 magpie 删了（应用拖进了废纸篓、文件夹删掉了），Agent 还是连不上？macOS 和 Linux 上运行同一行 <code>--uninstall</code>：找不到 magpie 时它会把最新版下载到临时文件夹（和安装一样校验），由它趁 <code>~/.config/magpie</code> 里还记着每个 Agent 原来的配置时把它们恢复。Windows 上重新下载 magpie，用 <span class="ui">设置</span> → <span class="ui">卸载 magpie</span>。手动恢复 Codex：先退出 Codex，在 <code>~/.codex/config.toml</code> 里删掉每条 <code># magpie:</code> 注释下面的那一行（<code>openai_base_url</code>、<code>model_provider = "magpie"</code>、<code>model_catalog_json</code>），把 <code>model</code> 改回 Codex 自己的模型；没有要保留的、在 magpie 上开的对话时，<code>[model_providers.magpie]</code> 整段也可以删。再删掉 <code>~/.codex/magpie-models.json</code>，重新打开 Codex。</p>
+
+    <h3 id="data-folder"><a class="anchor" href="#data-folder">magpie 的文件能放到另一块磁盘上，重装系统也不丢吗？</a></h3>
+    <p>安装版的 magpie 把设置、provider、用量和库放在 <code>~/.config/magpie</code>（Windows 上是 <code>C:\Users\&lt;你&gt;\.config\magpie</code>）。它每天自动备份一次，备份放在同一个文件夹的 <code>auto-backups</code> 里，所以重装系统时备份也会一起丢；<span class="ui">设置</span> → <span class="ui">同步与备份</span> 的 <span class="ui">备份文件夹</span> 下面会提示这一点。在那里点 <span class="ui">更改…</span>，选另一块磁盘上的文件夹（如 <code>D:\magpie-backups</code>）或网盘同步的文件夹。重装后装好 magpie，在同一处选回这个文件夹，再对最新的版本点 <span class="ui">恢复…</span>。备份里没有 API Key；打开 <span class="ui">备份登录信息</span> 会把订阅账号和插件登录也放进去，用口令加密。要连 Key 一起带走，在同一处设置同步到 WebDAV 文件夹、S3 存储桶或 GitHub 仓库，用口令加密。</p>
+    <p>想把 magpie 自己的文件放到那块磁盘（比如移动固态硬盘）上，就在同一处 <span class="ui">数据文件夹</span> 旁点 <span class="ui">移动…</span>，选那块盘上的一个文件夹。magpie 会重启，把文件和缓存移到其中名为 <code>magpie</code> 的文件夹里，并在原处留一个链接，其他都不用改。请保持那块盘连着：拔掉后 magpie 打不开，插回即可。点 <span class="ui">移回</span> 可移回本机。在终端里用 <code>magpie data move &lt;文件夹&gt;</code> 也一样。</p>
+    <p>想把所有东西都放在那块磁盘上，就用便携模式：把 <code>magpie.exe</code> 放进那里的一个文件夹，旁边建一个名为 <code>data</code> 的空文件夹（<code>D:\magpie\magpie.exe</code> 和 <code>D:\magpie\data</code>）。这样 magpie 的一切，包括缓存和日志，都放在 <code>data</code> 里，不在你的用户文件夹里写任何自己的文件；<span class="ui">设置</span> → <span class="ui">关于</span> → <span class="ui">配置目录</span> 会显示便携模式。打开它，按上面的方法恢复一个备份。重装系统后，再打开 <code>D:\magpie\magpie.exe</code> 即可。各 Agent 自己的配置（<code>~/.claude</code>、<code>~/.codex</code>…）仍留在各自读取的位置。</p>
+
+    <h3 id="log">magpie 的日志在哪里？</h3>
+    <p>应用（窗口、菜单栏或托盘图标、快捷面板，不论怎样打开）写入 <code>app.log</code>：macOS 上是 <code>~/Library/Logs/magpie/app.log</code>，Windows 上是 <code>%LOCALAPPDATA%\magpie\logs\app.log</code>，Linux 上是 <code>~/.local/state/magpie/app.log</code>（设置了 <code>$XDG_STATE_HOME</code> 时是 <code>$XDG_STATE_HOME/magpie</code>），便携版则在数据文件夹的 <code>logs</code> 里。<span class="ui">设置</span> → <span class="ui">关于</span> → <span class="ui">日志</span>里有它的路径，<span class="ui">打开</span>会显示它所在的文件夹；<code>magpie log</code> 打印路径，<code>magpie log -f</code> 持续跟随。满 5 MiB 后它变成旁边的 <code>app.old.log</code>，最多保留两个文件。它记的是 magpie 做了什么、遇到了哪些错误（服务商拒绝请求、重试、插件没能启动），不含你的密钥、提示词或回复；看起来像密钥或令牌的内容也会被遮掉。作为服务运行的 <code>magpie serve</code> 日志在别处：macOS 上是 <code>~/Library/Logs/magpie/serve.log</code>，Linux 上是 <code>journalctl --user -u magpie</code>；<code>magpie log</code> 也会列出它。</p>
 
     <h3 id="privacy">magpie 会发送我的哪些信息？</h3>
-    <p>你的提示词、回复、密钥和账号只发给你用的供应商，中间没有 magpie 自己的服务器。正式发布的 magpie 每天告诉我们一次它在用，好让我们知道有多少人在用、该先照顾哪些：本机随机生成的 ID、magpie 版本和系统，以及用了哪些 agent、供应商和模型，只用 magpie 自己的 ID（<code>claude</code>、<code>deepseek</code>、<code>deepseek/deepseek-v4</code>）和各自的数量。你自己添加的供应商及其上的模型只记作 <code>custom</code>。添加供应商页里排在最前的合作伙伴，每天被展示、打开和添加的次数也一并发送，只有次数。不发送名称、Base URL、账号、密钥、提示词和用量。<span class="ui">设置</span> → <span class="ui">隐私</span> → <span class="ui">分享我用的 agent、provider 和模型</span> 可以去掉 agent、供应商、模型和合作伙伴次数这部分；<span class="ui">计入用户数</span>、<code>DO_NOT_TRACK=1</code> 或 <code>MAGPIE_NO_STATS=1</code> 全部关闭。从源码构建的版本从不发送。合作伙伴的官网和「获取 Key」链接经 <code>usemagpie.ai/go/…</code> 跳转，跳转前记一次点击（哪个合作伙伴、哪个链接、哪个国家），usemagpie.ai 也会统计合作伙伴列表被拉取的次数。这部分是服务器本身看到的，和任何网站统计访问一样，不受上面的设置影响；不记录 ID、IP 和账号。插件、导入链接和库里的图标经 <code>usemagpie.ai/api/icon</code> 获取，图标所在的服务器只看到 Cloudflare 的地址，看不到你的 IP；这台服务器只转发图片，不计数也不记录。<a href="/docs/zh/privacy">隐私页</a>列出了 magpie 自己发出的所有内容，附每日计数的示例、它在本机留下的文件和每个开关。</p>
+    <p>你的提示词、回复、密钥和账号只发给你用的供应商，中间没有 magpie 自己的服务器。正式发布的 magpie 每天告诉我们一次它在用，好让我们知道有多少人在用、该先照顾哪些：本机随机生成的 ID、magpie 版本和系统，以及用了哪些 agent、供应商和模型，只用 magpie 自己的 ID（<code>claude</code>、<code>deepseek</code>、<code>deepseek/deepseek-v4</code>）和各自的数量。你自己添加的供应商及其上的模型只记作 <code>custom</code>。添加供应商页里排在最前的合作伙伴，每天被展示、打开和添加的次数也一并发送，只有次数。不发送名称、Base URL、账号、密钥、提示词和用量。<span class="ui">设置</span> → <span class="ui">隐私</span> → <span class="ui">分享我用的 agent、provider、模型和插件</span> 可以去掉 agent、供应商、模型、合作伙伴次数，以及装了 Discover 里哪些插件（用于统计每个插件的在用人数和点赞）这部分；<span class="ui">计入用户数</span>、<code>DO_NOT_TRACK=1</code> 或 <code>MAGPIE_NO_STATS=1</code> 全部关闭。从源码构建的版本从不发送。合作伙伴的官网和「获取 Key」链接经 <code>usemagpie.ai/go/…</code> 跳转，跳转前记一次点击（哪个合作伙伴、哪个链接、哪个国家），usemagpie.ai 也会统计合作伙伴列表被拉取的次数。这部分是服务器本身看到的，和任何网站统计访问一样，不受上面的设置影响；不记录 ID、IP 和账号。插件、导入链接和库里的图标经 <code>usemagpie.ai/api/icon</code> 获取，图标所在的服务器只看到 Cloudflare 的地址，看不到你的 IP；这台服务器只转发图片，不计数也不记录。<a href="/docs/zh/privacy">隐私页</a>列出了 magpie 自己发出的所有内容，附每日计数的示例、它在本机留下的文件和每个开关。</p>
 
     <h3 id="proxy-loopback">Agent 报 502 或连不上，magpie 的路由标签页里却什么都没有？</h3>
     <p>代理软件（Surge、Clash、mihomo 等，开了系统代理、TUN 或增强模式）把 Agent 发往 <code>http://127.0.0.1:3425</code> 的请求接走、转去了别处，请求根本没到 magpie。只在跳过列表（<code>skip-proxy</code>、「绕过」）里写 127.0.0.1 不一定够：有些 Agent（比如 Codex）照样会走代理。在代理软件里加两条本地地址直连的规则，放在其他规则前面：</p>
@@ -315,7 +401,16 @@ IP-CIDR6,::1/128,DIRECT,no-resolve</pre>
         contextWindow: 1000000</pre>
     </div>
     <p><code>baseURL</code> 不带 <code>/anthropic</code>。模型 id 用 magpie 的（<code>magpie models</code>）；写了 <code>models</code> 就会替换 dsh 的默认列表，所以两行更新方式要保留。<code>MAGPIE_DS_KEY</code> 里放网关密钥（本机是 <code>magpie</code>），不是你的 DeepSeek 密钥：export、写进 <code>~/.dsh/.env</code>，或在 dsh 模型页的 DeepSeek 行填入都行。模型在 dsh 里选；在 magpie 里断开不会动这一项。magpie 没有 Files API，dsh 会把图片按 base64 每轮内联发送，上限是 <code>maxInlineRequestImageBytes</code>（默认 20 MiB，上面设成 64 MiB）。这一行只用 DeepSeek 自己的模型。<a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#deepseek-harness-the-deepseek-row-by-hand">详见参考文档</a>。</p>
-    <p style="margin-top:48px">遇到问题，或者有值得分享的配置？来 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 聊。想给自己的用户一键添加供应商的厂商，请看 <a href="/docs/zh/import">Add to magpie</a>。</p>
+    <h3 id="trae">Trae / Trae CN 能用 magpie 的模型吗？</h3>
+    <p>有用户反馈这样可以用。Trae 把自定义模型存在你的 Trae 账号里（在它的服务器上），所以 magpie 没法一键帮你配好，而且 Trae 不一定连得到 <code>127.0.0.1</code>。做法是：</p>
+    <ol>
+      <li>在 magpie 里打开 <span class="ui">设置</span> → <span class="ui">网络与共享</span> → <span class="ui">局域网共享</span>，记下它显示的 <span class="ui">地址</span>。</li>
+      <li>准备一个网关密钥（<span class="ui">网关</span> → <span class="ui">网关密钥</span>，或 <code>magpie gateway-key add "Trae"</code>）。</li>
+      <li>在 Trae 的自定义模型设置里，地址填这个地址，API 密钥填这个网关密钥。</li>
+    </ol>
+    <p>模型 id 用 magpie 的（<code>magpie models</code>）。打开共享后，局域网里的其他电脑凭网关密钥也能连入；见 <a href="/docs/zh/remote#share">远程 magpie</a>。</p>
+
+    <p style="margin-top:48px">网关报错？见 <a href="/docs/zh/troubleshooting">常见错误排查</a>。遇到问题，或者有值得分享的配置？来 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 聊。在 Cherry Studio 里聊天？见 <a href="/docs/zh/cherry-studio">在 Cherry Studio 里用所有模型</a>。想给自己的用户一键添加供应商的厂商，请看 <a href="/docs/zh/import">Add to magpie</a>。</p>
   </article>
 </main>
 
@@ -329,10 +424,20 @@ IP-CIDR6,::1/128,DIRECT,no-resolve</pre>
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

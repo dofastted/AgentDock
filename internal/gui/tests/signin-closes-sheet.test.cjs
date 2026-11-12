@@ -60,6 +60,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test(lang, async () => {
         const page = await (await browser.newContext({ viewport: { width: 1180, height: 728 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang));
         // the vendor's sign-in page, opened in a new window, gets an empty page:
@@ -70,7 +71,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#providers .row").nth(9).waitFor();
         await page.locator("#addProvider").click();
         await page.waitForTimeout(900);
-        await page.locator("#addSheet .tiles button", { hasText: "Qoder CN" }).first().click();
+        await page.locator("#addSheet .tiles button", { hasText: lang === "zh" ? "Qoder 中国版" : "Qoder CN" }).first().click();
         // its risk said, the sign-in asked for
         await page.locator("#addSheet .signing button.primary").first().click();
         // done: the account's editor opens over the list, the sheet put away

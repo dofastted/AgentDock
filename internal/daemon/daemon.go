@@ -22,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -161,10 +162,10 @@ func Web() (addr, key string) {
 }
 
 var (
-	webArgRe = regexp.MustCompile(`(?:"|<string>)` + regexp.QuoteMeta(webFlag) + `([^"<\s]+)(?:"|</string>)`)
+	webArgRe = lazyre.New(`(?:"|<string>)` + regexp.QuoteMeta(webFlag) + `([^"<\s]+)(?:"|</string>)`)
 	// a unit's Environment="MAGPIE_WEB_KEY=…", a plist's
 	// <key>MAGPIE_WEB_KEY</key><string>…</string>
-	webKeyRe = regexp.MustCompile(webKeyVar + `(?:=|</key><string>)([A-Za-z0-9._~-]+)`)
+	webKeyRe = lazyre.New(webKeyVar + `(?:=|</key><string>)([A-Za-z0-9._~-]+)`)
 )
 
 // TLS is the certificate and key files the installed service serves
@@ -182,21 +183,39 @@ func TLS() (cert, key string) {
 	return tlsOf(string(b))
 }
 
+// Addr is the gateway address the installed service was installed with
+// (its MAGPIE_ADDR), "" when it has none or isn't installed: where a
+// magpie from before gateway.json ran, which `magpie update` looks at.
+func Addr() string {
+	m, err := current()
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(m.file())
+	if err != nil {
+		return ""
+	}
+	return envOf(string(b), "MAGPIE_ADDR")
+}
+
+// envOf is the value of NAME in a unit's or a launch agent's text, "" when
+// it has none.
+func envOf(text, name string) string {
+	// a unit's Environment="NAME=…", quoted by unitQuote
+	if m := regexp.MustCompile(`Environment="` + name + `=((?:[^"\\]|\\.)*)"`).FindStringSubmatch(text); m != nil {
+		return strings.NewReplacer(`\\`, `\`, `\"`, `"`, "%%", "%").Replace(m[1])
+	}
+	// a plist's <key>NAME</key><string>…</string>
+	if m := regexp.MustCompile(`<key>` + name + `</key><string>([^<]*)</string>`).FindStringSubmatch(text); m != nil {
+		return html.UnescapeString(m[1])
+	}
+	return ""
+}
+
 // tlsOf is TLS from a unit's or a launch agent's text: both files or
 // neither.
 func tlsOf(text string) (cert, key string) {
-	val := func(name string) string {
-		// a unit's Environment="NAME=…", quoted by unitQuote
-		if m := regexp.MustCompile(`Environment="` + name + `=((?:[^"\\]|\\.)*)"`).FindStringSubmatch(text); m != nil {
-			return strings.NewReplacer(`\\`, `\`, `\"`, `"`, "%%", "%").Replace(m[1])
-		}
-		// a plist's <key>NAME</key><string>…</string>
-		if m := regexp.MustCompile(`<key>` + name + `</key><string>([^<]*)</string>`).FindStringSubmatch(text); m != nil {
-			return html.UnescapeString(m[1])
-		}
-		return ""
-	}
-	cert, key = val("MAGPIE_TLS_CERT"), val("MAGPIE_TLS_KEY")
+	cert, key = envOf(text, "MAGPIE_TLS_CERT"), envOf(text, "MAGPIE_TLS_KEY")
 	if cert == "" || key == "" {
 		return "", ""
 	}
@@ -301,10 +320,14 @@ func installed(f func(manager) error) error {
 	})
 }
 
-// autostartEnabled: magpie's own record is there, whether or not the
-// user has it switched off in System Settings for now, since switching
-// it back on there opens the app with the service still installed. A
-// var for the tests.
+// autostartEnabled: magpie opens at login, by its own record or, on
+// Linux, by a package's entry (#3372). On the Mac a record the user has
+// switched off in System Settings for now counts all the same, since
+// switching it back on there opens the app with the service still
+// installed. On Linux an entry the desktop's own settings switched off
+// (Hidden, X-GNOME-Autostart-enabled=false) reads off, as Open at login
+// reads it, so the install goes in; and a package's entry counts on a box
+// no desktop logs into too (#3756). A var for the tests.
 var autostartEnabled = func() bool { return autostart.Enabled() != autostart.Off }
 
 // self is the program the service runs: this one, by the name on PATH

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/appdir"
 )
 
 // PI-Desktop (vastsa/PI-Desktop) keeps its chats as its own jsonl, not
@@ -20,7 +22,7 @@ import (
 // PIDesktopDir is where PI-Desktop keeps its data: $PI_DESKTOP_DATA_DIR,
 // else ~/.pi-desktop (a packaged install's, its 04-data-storage.md).
 func PIDesktopDir() string {
-	if d := os.Getenv("PI_DESKTOP_DATA_DIR"); d != "" {
+	if d := appdir.Getenv("PI_DESKTOP_DATA_DIR"); d != "" {
 		return d
 	}
 	home, _ := os.UserHomeDir()
@@ -44,6 +46,9 @@ var piDesktopTitlesHeld = time.Second
 // store.db is (openCursorStore). A database that can't be read leaves the
 // names last read standing: unknown, not untitled.
 func PIDesktopTitles(ids []string) map[string]string {
+	if !Reads("pi") {
+		return map[string]string{}
+	}
 	out := map[string]string{}
 	if len(ids) == 0 {
 		return out

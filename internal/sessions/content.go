@@ -83,6 +83,9 @@ func keep(p Part) (Part, bool) {
 
 // ContentOf reads what was said in a call from its file.
 func ContentOf(c Call) (Content, error) {
+	if !Reads(c.Agent) {
+		return Content{Input: []Part{}, Output: []Part{}}, ErrNotRead
+	}
 	out := Content{Input: []Part{}, Output: []Part{}}
 	if c.File == "" || c.Agent == "opencode" { // OpenCode's are rows, not lines of a file
 		return out, errNoPlace
@@ -351,7 +354,7 @@ func codexContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part)
 			case "assistant":
 				return add(false, textPart("assistant", words()))
 			}
-		case "reasoning":
+		case "reasoning", "magpie_reasoning": // magpie_reasoning: PortCodexRolloutsLeft
 			var s []string
 			for _, x := range p.Summary {
 				s = append(s, x.Text)

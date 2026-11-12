@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>リモート magpie · magpie ドキュメント</title>
+<title>リモート magpie：LAN の複数のコンピューターで 1 つの AI ゲートウェイを共有 · magpie ドキュメント</title>
 <meta name="description" content="1 つの magpie を複数のコンピューターで使う：ネットワークで共有し、ほかのコンピューターでリモート magpie として追加する（アプリ、TUI、CLI）方法と、使えるもの：モデル、ルーティンググループ、画像、System One、価格、クォータ。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/remote">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/remote">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/remote">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/remote">
+<link rel="canonical" href="https://usemagpie.ai/docs/ja/remote">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="リモート magpie">
 <meta property="og:description" content="1 つの magpie のプロバイダ、アカウント、ルーティンググループを、使うすべてのコンピューターで。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/ja/remote">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "リモート magpie",
+   "description": "1 つの magpie を複数のコンピューターで使う：ネットワークで共有し、ほかのコンピューターでリモート magpie として追加する（アプリ、TUI、CLI）方法と、使えるもの：モデル、ルーティンググループ、画像、System One、価格、クォータ。",
+   "inLanguage": "ja",
+   "url": "https://usemagpie.ai/docs/ja/remote",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/ja/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "ドキュメント",
+     "item": "https://usemagpie.ai/docs/ja/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "リモート magpie",
+     "item": "https://usemagpie.ai/docs/ja/remote"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/ja/docker">Docker</a>
     <a class="toc-only" href="/docs/ja/privacy">プライバシー</a>
     <a class="toc-only" href="/docs/ja/masking">プライバシーマスキング</a>
+    <a class="toc-only" href="/docs/ja/mcp-router">MCP ルーター</a>
+    <a class="toc-only" href="/docs/ja/library">ライブラリ</a>
+    <a class="toc-only" href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a class="toc-only" href="/docs/ja/local-models">ローカルモデル</a>
+    <a class="toc-only" href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
@@ -76,6 +136,9 @@
     <a href="#add">2. ほかのコンピューターで追加する</a>
     <a href="#models">使えるもの</a>
     <a href="#quotas">クォータと使用量</a>
+    <a href="#keys">短期キー</a>
+    <a href="#oidc">GitHub Actions のキー</a>
+    <a href="#api">統計 API</a>
     <a href="#trouble">うまくいかないとき</a>
   </aside>
 
@@ -123,13 +186,84 @@ magpie provider refresh office   <span class="c"># 一覧を再取得</span></pr
       <li><b>すべての API。</b>リクエストはエージェントが使った API のまま転送されます（Anthropic Messages とトークン計数、Responses、Chat Completions）。共有側のプロバイダが別の API でしか提供しないモデルは、変換が 1 回だけ行われ、両方のコンピューターで変換されることはありません。Responses は WebSocket ではなく HTTP（SSE を含む）で送られます。</li>
       <li><b>画像と動画。</b>画像・動画モデルは自動で見つかり、向こうの画像生成・編集・動画 API を通して使えます。</li>
       <li><b>System One。</b>決定モデル（Jev、Clef、自分で名前を付けたモデル）は向こうの <code>/v1/systemone</code> につながり、チャットモデルではなく決定モデルとして現れます。新しいものはプロバイダの一覧を更新すると見つかります。<code>office</code> だけを指定すると一覧の最初の決定モデルに問い合わせます。</li>
-      <li><b>Embeddings、rerank、音声の文字起こし</b>は向こうの対応する API に送られます。エージェントの一覧ではリモートでの扱いのままです。一覧にあっても会話に使えるわけではありません。</li>
+      <li><b>Embeddings、rerank、音声の文字起こしと音声合成</b>は向こうの対応する API に送られます。エージェントの一覧ではリモートでの扱いのままです。一覧にあっても会話に使えるわけではありません。</li>
       <li><b>価格。</b>各モデルは共有する magpie の計算どおり（向こうで手動設定した価格、なければプロバイダの定価）になるので、2 台の集計は一致します。このコンピューターで設定した価格が優先されます。</li>
     </ul>
 
     <h2 id="quotas"><a class="anchor" href="#quotas">クォータと使用量</a></h2>
     <p>使用量ページ、メニューバー、<code>magpie quota</code> には、共有する magpie のサブスクリプションカードがその名前付きで（<code>Codex · office</code>、id <code>office/codex</code>）、向こうが最後に読んだ内容で表示されます。ベンダーに問い合わせるのはサインインを持つコンピューターだけです。このコンピューターでカードを更新すると、向こうがもう一度読みます（最大で 30 秒に 1 回）。Codex のリセットや WorkBuddy のチェックインは、向こうのコンピューターのアプリ、TUI、CLI で行います。向こうが予算・モデル・アカウントで制限したキーにはカードは一切渡されず、ここにはそのキー自身のカードと上限だけが表示されます。</p>
     <p>共有する magpie は、このコンピューターのリクエストを、送ってきたゲートウェイキーの名前と応答したアカウントで記録します。</p>
+
+    <h2 id="keys"><a class="anchor" href="#keys">短期キー</a></h2>
+    <p>サンドボックスでエージェントを起動するプログラムは、エージェントごとに自動で失効するゲートウェイキーを渡せます。有効期間は 1 分から 30 日で、一部のモデル、一部のアカウント、有効期間全体のトークン数やコスト、または読み取り専用に制限できます。キー本体は応答に一度だけ含まれます。</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-keys">コピー</button>
+      <pre id="ex-keys">curl -s -X POST http://127.0.0.1:3425/v1/magpie/keys \
+  -d '{"name":"sandbox-1","ttl":"1h","models":["office/codex/gpt-5"],"tokens":200000}'
+<span class="c"># {"id":"k…","name":"sandbox-1","key":"sk-magpie-…","expires":"…","models":[…],"limit":{…}}</span>
+curl -s http://127.0.0.1:3425/v1/magpie/keys              <span class="c"># 発行したキー（伏せ字）</span>
+curl -s -X DELETE http://127.0.0.1:3425/v1/magpie/keys/k…  <span class="c"># 早めに失効させる</span></pre>
+    </div>
+    <p>このコンピューター上のプログラムはキーなしで呼べますが、ブラウザーのページは呼べません。ほかのコンピューター、コンテナー、CI は、キーの発行を許可したゲートウェイキーを付けて呼びます。そのキーが発行したキーはすべてそのキーに縛られます。使えないモデルやアカウントは使えず、そのキーより後まで有効にはならず、使った分はそのキーの上限に数えられます。オフにするか削除すると、発行したキーもすぐに使えなくなります。コマンドラインでも同じで、キーだけを出力します。</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-keys-cli">コピー</button>
+      <pre id="ex-keys-cli">magpie gateway-key issue --ttl 1h --name sandbox-1 --models office/codex/gpt-5 --tokens 200000
+magpie gateway-key issuer &lt;id&gt; on    <span class="c"># このキーにキーの発行を許可</span>
+magpie gateway-key issue --ttl 30m --from &lt;id&gt; --read-only --json
+magpie gateway-key list               <span class="c"># until 10-31 14:00、expired、issued by …</span></pre>
+    </div>
+    <p>期限切れのキーは、どの API でも理由付きの <code>401</code>（“the gateway key "sandbox-1" expired at …: ask for a new one”）で断られます。このコンピューターからでも同じです。1 時間後に削除されます。</p>
+
+    <h2 id="oidc"><a class="anchor" href="#oidc">GitHub Actions のキー</a></h2>
+    <p>GitHub Actions のジョブは、リポジトリの secrets にゲートウェイキーを置かなくても短期キーを受け取れます。GitHub が渡す OIDC トークンと交換します。リポジトリ（必要ならブランチ、environment、任意の claim。完全一致か <code>*</code> 付き）、発行に使うゲートウェイキー、有効期間を指定するルールを書きます：</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-oidc-cli">コピー</button>
+      <pre id="ex-oidc-cli">magpie gateway-key issuer &lt;id&gt; on
+magpie gateway-key oidc add --key &lt;id&gt; --repo owner/app --ref refs/heads/main --ttl 1h
+<span class="c"># ルール id と audience（magpie-&lt;ルール id&gt;）を表示</span>
+magpie gateway-key oidc list
+magpie gateway-key oidc remove &lt;rule id&gt;</pre>
+    </div>
+    <p>ワークフローでは、ルールの audience 付きトークンを GitHub に求め、<code>/v1/magpie/keys/oidc</code> に POST します：</p>
+    <div class="code">
+      <span class="lang">YAML</span>
+      <button class="copy" data-copy="ex-oidc">コピー</button>
+      <pre id="ex-oidc">permissions:
+  id-token: write
+steps:
+  - name: Get a magpie key
+    run: |
+      TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&amp;audience=magpie-&lt;rule id&gt;" | jq -r .value)
+      KEY=$(curl -s -X POST https://&lt;your magpie&gt;/v1/magpie/keys/oidc \
+        -H "Authorization: Bearer $TOKEN" -d '{"ttl":"30m"}' | jq -r .key)
+      echo "::add-mask::$KEY"
+      echo "MAGPIE_KEY=$KEY" &gt;&gt; "$GITHUB_ENV"</pre>
+    </div>
+    <p>キーはルールのゲートウェイキーの下で発行され、他の発行済みキーと同じくそのキーに縛られ、ルールの期間より長くは有効になりません。名前はリポジトリ、ブランチ、実行番号です。別のリポジトリやブランチのトークン、期限切れ、交換済みのトークンには理由付きの <code>401</code> が返ります。他のコンピューターから使えるのは magpie を共有している間だけで、断られたトークンは認証失敗の回数に数えられます。ルールがなければ何も交換されません。</p>
+
+    <h2 id="api"><a class="anchor" href="#api">統計 API</a></h2>
+    <p>使用量ページの内容は JSON でも、このコンピューターに、また magpie を共有している間はゲートウェイキー付きのリクエストに提供されます。予算、モデル、アカウントで制限されたキーには、自分のリクエストと上限だけが返ります。持ち主がそのキーの<span class="ui">残量</span>をオンにすると（<code>magpie gateway-key quotas &lt;id&gt; on</code>）、使えるもののクォータも返ります。</p>
+    <ul>
+      <li><code>/v1/magpie/usage?period=today|7d|30d|all</code>：合計と、モデル、エージェント、プロバイダー、アカウント、ゲートウェイキーごとの内訳。</li>
+      <li><code>/v1/magpie/usage/requests</code>：リクエストログ。<code>period</code>、<code>day</code>、<code>offset</code>、<code>limit</code> と、絞り込みの <code>model</code>、<code>agent</code>、<code>provider</code>、<code>account</code>、<code>callerKey</code>、<code>failed=1</code>、<code>retried=1</code>、<code>q</code>。</li>
+      <li><code>/v1/magpie/quotas</code>：各サブスクリプションのウィンドウ（<code>?kept=1</code> でベンダーに問い合わせない）。<code>/v1/magpie/quotas/history?days=</code>：残量の履歴、最大 45 日。</li>
+      <li><code>/v1/magpie/limit</code>：キー自身の上限、有効期限、発行元キーの上限。制限されたキーには、何で制限されているか（<code>heldTo</code>）、使えるモデル（<code>models</code>）、クォータが返るか（<code>quotas</code>、<code>quotaProviders</code>）も。</li>
+      <li><code>/v1/magpie/concurrency</code>：アカウントごとの実行中のリクエスト。</li>
+    </ul>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-api">コピー</button>
+      <pre id="ex-api">curl -s 'http://127.0.0.1:3425/v1/magpie/usage?period=7d'
+curl -s 'http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&amp;callerKey=k…&amp;failed=1&amp;limit=50'
+curl -s 'http://127.0.0.1:3425/v1/magpie/quotas?kept=1'
+curl -s 'http://127.0.0.1:3425/v1/magpie/quotas/history?days=14'
+curl -s http://127.0.0.1:3425/v1/magpie/limit -H 'Authorization: Bearer sk-magpie-…'
+curl -s http://127.0.0.1:3425/v1/magpie/concurrency</pre>
+    </div>
 
     <h2 id="trouble"><a class="anchor" href="#trouble">うまくいかないとき</a></h2>
     <div class="table-wrap"><table>
@@ -157,10 +291,20 @@ magpie provider refresh office   <span class="c"># 一覧を再取得</span></pr
     <a href="/docs/ja/docker">Docker</a>
     <a href="/docs/ja/privacy">プライバシー</a>
     <a href="/docs/ja/masking">プライバシーマスキング</a>
+    <a href="/docs/ja/mcp-router">MCP ルーター</a>
+    <a href="/docs/ja/library">ライブラリ</a>
+    <a href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a href="/docs/ja/local-models">ローカルモデル</a>
+    <a href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/ja/contributors">コントリビューター</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
   </div>
 </div></footer>
