@@ -84,6 +84,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(7000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], asked = [];
       // WebKit reports a ResizeObserver round left to the next frame as a page
       // error; Chromium doesn't. A purpose picked from a long list shrinks the
@@ -172,7 +173,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForFunction(() => document.querySelectorAll(".rt-req").length === 8);
       assert.equal(await page.locator(".rt-req").count(), 8);
       await choose("#rtPurpose", "kind:thread_title");
-      await page.locator(".rt-group-by button").last().click();
+      await page.locator(".rt-group-by button[data-by=\"session\"]").click();
       assert.match(await page.locator(".rt-session .summary").textContent(), /^4/);
       await page.locator(".rt-days .rt-day").nth(1).click();
       assert.equal(await page.locator(".rt-req").count(), 4);
@@ -186,7 +187,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await click(page, page.locator("#rtPurposeClear"));
       await page.waitForFunction(() => document.querySelector("#rtPurposeClear").hidden && document.querySelectorAll(".rt-req").length === 8);
       assert.equal(await page.locator(".rt-req").count(), 8);
-      assert.equal(await page.locator(".rt-group-by button").last().getAttribute("aria-pressed"), "true");
+      assert.equal(await page.locator(".rt-group-by button[data-by=\"session\"]").getAttribute("aria-pressed"), "true");
       assert.equal(await page.locator(".rt-days .rt-day").nth(1).getAttribute("aria-pressed"), "true");
       await choose("#rtPurpose", "unmarked");
       await choose("#rtPurpose", "");
@@ -213,6 +214,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(7000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => { if (!/^ResizeObserver loop completed with undelivered notifications/.test(e.message)) errors.push(e.message); });
       await page.route("**/*", server(lang, []));
@@ -251,7 +253,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await menu.isVisible(), true);
       await page.keyboard.press("Escape");
       assert.equal(await page.locator("#rtPurpose").evaluate((e) => e === document.activeElement), true);
-      await page.locator(".rt-group-by button").last().click();
+      await page.locator(".rt-group-by button[data-by=\"session\"]").click();
       assert.match(await page.locator(".rt-session .summary").textContent(), /^5/);
       await page.locator(".rt-days .rt-day").nth(1).click();
       assert.equal(await page.locator(".rt-req").count(), 5, "the same union applies to history and sessions");

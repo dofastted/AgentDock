@@ -26,6 +26,9 @@ func otelConfig(t *testing.T, config settings.OTel) {
 	t.Setenv("MAGPIE_OTEL_ENDPOINT", config.Endpoint)
 	t.Setenv("MAGPIE_OTEL_HEADERS", "Authorization=Bearer%20collector-test")
 	t.Setenv("MAGPIE_OTEL_METRICS", "false")
+	// The shell's own resource variables never reach a test's export.
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("OTEL_SERVICE_NAME", "")
 	if config.Metrics {
 		t.Setenv("MAGPIE_OTEL_METRICS", "true")
 	}
@@ -48,7 +51,8 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 	stop := StartOTel()
 	t.Cleanup(stop)
 	r := Record{RouteID: 42, Time: time.Now(), Agent: "pi", Provider: "deepseek", Model: "deepseek-chat", Requested: "group/mine", Served: "deepseek-v4", Input: 10, CacheRead: 3, CacheWrite: 2, Output: 4, Reasoning: 1, Millis: 1200, TTFT: 200, Status: 200,
-		ProviderKeyName: "PRIVATE-ACCOUNT", ProviderKeyID: "PRIVATE-KEY", Session: "PRIVATE-SESSION", Via: "PRIVATE-HOST"}
+		ProviderKeyName: "PRIVATE-ACCOUNT", ProviderKeyID: "PRIVATE-KEY", Session: "PRIVATE-SESSION", Via: "PRIVATE-HOST",
+		CallerKeyID: "PRIVATE-CALLER-KEY", CallerKeyName: "team-ci"}
 	usage.Append(r)
 	r.Error, r.ErrType = "PRIVATE-ERROR", "PRIVATE-ERROR-TYPE"
 	usage.Append(r) // an error in a stream whose HTTP status is already 200
@@ -116,7 +120,7 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 	for _, a := range spans[0].Attributes {
 		values[a.Key] = a.Value["stringValue"] + a.Value["intValue"]
 	}
-	if values["gen_ai.usage.input_tokens"] != "15" || values["gen_ai.usage.output_tokens"] != "4" || values["magpie.route.id"] != "42" || values["magpie.ttft_ms"] != "200" {
+	if values["gen_ai.usage.input_tokens"] != "15" || values["gen_ai.usage.output_tokens"] != "4" || values["magpie.route.id"] != "42" || values["magpie.ttft_ms"] != "200" || values["magpie.gateway_key.name"] != "team-ci" {
 		t.Fatalf("attributes: %v", values)
 	}
 	var metrics struct {
@@ -154,11 +158,17 @@ func TestOTelBatchWireAndPrivacy(t *testing.T) {
 		if p.Count != "1" || p.Sum != 1.2 || len(p.Buckets) != len(p.Bounds)+1 {
 			t.Errorf("point: %+v", p)
 		}
-		errType := ""
+		errType, keyName := "", ""
 		for _, a := range p.Attributes {
-			if a.Key == "error.type" {
+			switch a.Key {
+			case "error.type":
 				errType = a.Value["stringValue"]
+			case "magpie.gateway_key.name":
+				keyName = a.Value["stringValue"]
 			}
+		}
+		if keyName != "team-ci" {
+			t.Errorf("point's gateway key name: %q, want team-ci", keyName)
 		}
 		categories[errType]++
 	}

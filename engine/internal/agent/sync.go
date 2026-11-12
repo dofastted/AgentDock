@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -45,9 +46,15 @@ func SyncCatalog() {
 		// the catalog built once for every agent's lists, not for each
 		// look-up of each (thousands at magpie's start, with 30 providers)
 		release := provider.Hold()
+		// and each agent's files looked at once a round, not each time
+		// one is asked about (#1665: settings.json hundreds of times a
+		// round); a write is made from what is on the disk (edit.Read)
+		unhold := filememo.Hold()
 		renaming := setToFoundGroups()
 		for _, a := range All() {
-			if a.Sync != nil {
+			// a provider named magpie written by hand is the user's, its
+			// model list too (handWired)
+			if a.Sync != nil && !a.handWired() && (!a.ListOnly || a.Wired()) {
 				_ = synced(a.Sync)
 			}
 			// a field magpie set to a found group's id before (autoref.go)
@@ -55,6 +62,7 @@ func SyncCatalog() {
 				a.renameFoundGroups()
 			}
 		}
+		unhold()
 		release()
 		syncing.Lock()
 		if !syncing.again {

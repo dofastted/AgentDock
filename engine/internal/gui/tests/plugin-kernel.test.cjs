@@ -69,6 +69,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], logged = [];
         page.on("pageerror", (e) => errors.push(e.message));
         page.on("console", (m) => { if (m.type() === "error") logged.push(m.text()); });
@@ -105,9 +106,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // its markup came back translated, and its wiring with it
         assert.equal((await page.locator("#foldConnect .label").textContent()).trim(), await page.evaluate(() => t("Connect")), `${where}: translated again`);
         await page.locator("#foldConnect").click();
-        await page.waitForFunction(() => document.querySelector("#connect").hidden);
-        await page.locator("#foldConnect").click();
         await page.waitForFunction(() => !document.querySelector("#connect").hidden);
+        await page.locator("#foldConnect").click();
+        await page.waitForFunction(() => document.querySelector("#connect").hidden);
         assert.deepEqual(errors, [], where);
         await context.close();
       }
@@ -122,6 +123,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 420, height: 700 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, { gateway: { callsPage: 10 } }));

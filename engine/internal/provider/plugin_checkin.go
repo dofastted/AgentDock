@@ -90,7 +90,13 @@ var pluginCheckinProviders = func() []pluginCheckinProvider {
 					if err != nil {
 						return wbCheckinFailed(err)
 					}
-					return WorkBuddyCheckin{Outcome: c.Outcome, Credit: c.Credit, Streak: c.Streak, Msg: c.Message}
+					r := WorkBuddyCheckin{Outcome: c.Outcome, Credit: c.Credit, Streak: c.Streak, Msg: c.Message}
+					// the vendor's own day turns then (Qoder's 10:00
+					// UTC+8); a time that doesn't parse is not told
+					if t, err := time.Parse(time.RFC3339, c.Until); err == nil {
+						r.ValidUntil = t
+					}
+					return r
 				}})
 		}
 		if len(p.accounts) > 0 {
@@ -262,9 +268,10 @@ func PluginCheckinOn(s settings.Settings, id string) bool {
 // within the Beijing day, as magpie's own Qoder check-in is (recheck):
 // a campaign can open mid-day (Qoder CN's ran 10:00 to 09:59 the next
 // day), so a done or inactive read before then said nothing about the
-// day's own and was kept all day, a press too (#2696). Every other
-// plugin is settled for the day.
-func pluginRechecks(id string) bool { return id == "qoder" || id == QoderCNID }
+// day's own and was kept all day, a press too (#2696). ZCode's gift
+// plans open as campaigns too, some for under a day (plugins#503). Every
+// other plugin is settled for the day.
+func pluginRechecks(id string) bool { return id == "qoder" || id == QoderCNID || id == "zcode" }
 
 func (p pluginCheckinProvider) checkiner(now func() time.Time) checkiner {
 	return checkiner{path: pluginCheckinPath(), now: now, mu: &pluginCheckinMu, by: pluginCheckinBy(p.ID), label: p.ID, recheck: pluginRechecks(p.ID), accounts: func() []checkinAcct {

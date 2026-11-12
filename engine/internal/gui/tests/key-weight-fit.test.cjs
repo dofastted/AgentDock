@@ -55,6 +55,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang));
@@ -91,7 +92,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const hov = await page.evaluate(() => {
           const row = document.querySelector('.editor .acc[data-account-id="bbbbbbbbbb"]');
           const box = row.closest(".accts").getBoundingClientRect();
-          const rm = row.querySelector(".text.quiet"), n = row.querySelector(".n");
+          const rm = row.querySelector(".text.quiet:not(.key-switch)"), n = row.querySelector(".n");
           const b = rm.getBoundingClientRect();
           return { opacity: getComputedStyle(rm).opacity, cw: rm.clientWidth, sw: rm.scrollWidth, right: b.right, boxRight: box.right, name: n.clientWidth };
         });

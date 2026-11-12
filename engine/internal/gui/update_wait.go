@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
@@ -23,7 +24,52 @@ var (
 	idleSettle = 10 * time.Second
 	waitMost   = time.Hour
 	waitTick   = time.Second
+	// restartDrain is how long a restart `magpie update` asked for waits
+	// for what is in flight; then it restarts anyway. Without a bound a
+	// long stream kept the old version running for good (ljlwlcz on X, on
+	// Windows, where nothing is handed over).
+	restartDrain = 10 * time.Minute
 )
+
+// A restart by itself (Settings' AutoRestart) also waits while the user
+// is using one of magpie's own windows (BESTLJP0412 on X: the window
+// closed and came back mid-way through adding a provider). Each page
+// tells the app of the user's input (`POST /api/update/using`, a press, a
+// key, typing or the wheel, at most every 20s), and whether a dialog is
+// open (#modal); the app counts it in use for usingFor after that input,
+// or openFor with a dialog open, which may hold a form half filled in.
+// A restart the user asked for (a click, `magpie update`) doesn't wait
+// for it: they are the one using magpie.
+var (
+	usingFor = 2 * time.Minute
+	openFor  = 15 * time.Minute
+)
+
+// usedAt is when a page last told of input (Unix nanoseconds), usedOpen
+// whether a dialog was open then.
+var (
+	usedAt   atomic.Int64
+	usedOpen atomic.Bool
+)
+
+// noteUse is a page's word of the user's input at now.
+func noteUse(open bool, now time.Time) {
+	usedOpen.Store(open)
+	usedAt.Store(now.UnixNano())
+}
+
+// inUseAt is whether the user was using a window lately enough at now.
+func inUseAt(now time.Time) bool {
+	at := usedAt.Load()
+	if at == 0 {
+		return false
+	}
+	gap, most := now.Sub(time.Unix(0, at)), usingFor
+	if usedOpen.Load() {
+		most = openFor
+	}
+	return gap < most
+}
 
 // gatewayBusy is what the gateway this process serves has in flight;
 // nothing when another magpie serves it, which a restart here leaves be.
@@ -34,7 +80,8 @@ var gatewayBusy = func() gateway.Busy {
 	return gateway.Busy{}
 }
 
-// waitRecheck asks the feed again before the restart (updater.recheck).
+// waitRecheck asks the feed again before the restart (updater.recheck),
+// asked when a click armed the wait.
 var waitRecheck = (*updater).recheck
 
 // idleAt is whether b leaves nothing for a restart at now to cut short.
@@ -46,10 +93,14 @@ func idleAt(b gateway.Busy, now time.Time) bool {
 func (u *updater) idle() bool { return idleAt(restartBusy(), time.Now()) }
 
 // waitIdle has restart run once the gateway is idle; a wait under way
-// takes the newer restart (the window as it is now).
-func (u *updater) waitIdle(restart func() bool) {
+// takes the newer restart (the window as it is now). asked is a click's
+// (Restart to update), not Settings' AutoRestart's.
+func (u *updater) waitIdle(restart func() bool, asked bool) {
 	u.mu.Lock()
-	u.whenIdle, u.gaveUp = restart, false
+	u.whenIdle, u.gaveUp, u.waitAsked = restart, false, asked
+	if !u.waiting {
+		u.drainMost = 0
+	}
 	if u.waiting {
 		u.mu.Unlock()
 		return
@@ -115,6 +166,20 @@ func (u *updater) waitFor(gen int) {
 			u.told()
 			return
 		}
+		drained := u.drainMost > 0 && time.Since(u.waitFrom) >= u.drainMost
+		if drained {
+			// the bound `magpie update` was told: what is still in
+			// flight is cut now, as a restart does (the gateway's own
+			// shutdown lets a stream end its turn first)
+			restart := u.whenIdle
+			u.waiting, u.whenIdle = false, nil
+			u.mu.Unlock()
+			u.told()
+			if restart != nil {
+				restart()
+			}
+			return
+		}
 		u.mu.Unlock()
 		b := restartBusy()
 		if b.Requests != last.Requests || b.Tools != last.Tools {
@@ -124,14 +189,26 @@ func (u *updater) waitFor(gen int) {
 		if !idleAt(b, time.Now()) {
 			continue
 		}
-		switch u.json().State {
-		case "ready":
+		u.mu.Lock()
+		asked := u.waitAsked
+		u.mu.Unlock()
+		if !asked && inUseAt(time.Now()) {
+			continue
+		}
+		u.mu.Lock()
+		// another magpie put the update in (restartBeside): that is what
+		// the restart goes into, whatever the feed answers now
+		in := u.replaced()
+		u.mu.Unlock()
+		switch st := u.json().State; {
+		case in:
+		case st == "ready":
 			// a newer version out since is downloaded first, and waited for
-			waitRecheck(u)
-			if u.json().State != "ready" {
+			waitRecheck(u, asked)
+			if u.asking() || u.json().State != "ready" {
 				continue
 			}
-		case "checking", "downloading":
+		case st == "checking", st == "downloading":
 			continue
 		default:
 			// nothing left to restart into (a newer one failed to download)
@@ -156,7 +233,8 @@ func (u *updater) waitFor(gen int) {
 
 // autoTick, with Settings' AutoRestart on (and automatic updates), has a
 // downloaded update restarted into once the gateway is idle (#2096). The
-// wait is waitIdle's, so a restart never cuts a request short; one that
+// wait is waitIdle's, so a restart never cuts a request short, nor comes
+// while the user is using a window (inUseAt); one that
 // ran out (gaveUp) is waited for again on the next tick, and one the user
 // called off isn't, for that version.
 func (u *updater) autoTick(s settings.Settings) {
@@ -172,7 +250,27 @@ func (u *updater) autoTick(s settings.Settings) {
 	if j := u.json(); j.State != "ready" || j.Latest == "" || j.Latest == skip {
 		return
 	}
-	u.waitIdle(restart)
+	u.waitIdle(restart, false)
+}
+
+// restartAsked is the tray's Restart to update, restart doing it. With the
+// gateway busy it waits for it to be idle (#577), and a click while it
+// waits restarts at once. The feed is asked first, as the page's restart
+// asks it (coeo91 on Discord: the tray restarted into the version the
+// last check found): a newer version out since is downloaded, and the
+// restart waits for it.
+func (u *updater) restartAsked(restart func() bool) {
+	if waiting, _ := u.waitingFor(); !waiting && !u.idle() {
+		u.waitIdle(restart, true)
+		return
+	}
+	u.cancelWait()
+	u.recheck(true)
+	if u.asking() || u.json().State != "ready" {
+		u.waitIdle(restart, true)
+		return
+	}
+	restart()
 }
 
 // callOff is the user's Cancel of a restart waiting: the wait stops, and

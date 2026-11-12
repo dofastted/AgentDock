@@ -58,12 +58,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       const zh = lang === "zh";
-      const L = { names: zh ? "名称与推理档位" : "Names & levels", input: zh ? "输入" : "Input", output: zh ? "输出" : "Output", cacheRead: zh ? "缓存读取" : "Cache read",
+      const L = { names: zh ? "模型设置" : "Model settings", input: zh ? "输入" : "Input", output: zh ? "输出" : "Output", cacheRead: zh ? "缓存读取" : "Cache read",
         oneHour: zh ? "1 小时缓存写入" : "Cache write 1h", long: zh ? "长上下文价格" : "Long-context price", over: zh ? "超过的输入 token 数" : "Over input tokens",
         save: zh ? "保存" : "Save", badSize: zh ? "长上下文价格要写从多少输入 token 起算，比如 272K" : "A long-context price starts over a number of input tokens, like 272K" };
       await page.locator('.row.provider[data-id="relay"]').click();

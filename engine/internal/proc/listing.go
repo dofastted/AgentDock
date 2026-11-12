@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -73,9 +74,11 @@ func mayBeIn(name string, dirs []string) bool {
 }
 
 // listed is the names in dir, read again when its modification time
-// changed (checked once a lookWindow); false when it can't be read.
+// changed (checked once a lookWindow); false when it can't be read. A
+// folder changed within lookSettle is read and not kept: what is
+// installed in the same clock tick leaves its time as it was (lookStamp).
 func listed(dir string) (map[string]bool, bool) {
-	now := time.Now()
+	now := lookNow()
 	listings.Lock()
 	l := listings.m[dir]
 	if l != nil && now.Sub(l.checked) < lookWindow() {
@@ -118,11 +121,15 @@ func listed(dir string) (map[string]bool, bool) {
 		}
 	}
 	listings.Lock()
-	if listings.m == nil {
-		listings.m = map[string]*listing{}
-	}
-	listings.m[dir] = &listing{mod: st.ModTime(), checked: now, names: names}
 	listingRead++
+	if d := now.Sub(st.ModTime()); d >= 0 && d < lookSettle {
+		delete(listings.m, dir)
+	} else {
+		if listings.m == nil {
+			listings.m = map[string]*listing{}
+		}
+		listings.m[dir] = &listing{mod: st.ModTime(), checked: now, names: names}
+	}
 	listings.Unlock()
 	return names, true
 }
@@ -149,9 +156,19 @@ func pathDirs() []string {
 
 // lookPath is exec.LookPath, with a command no folder of PATH has a name
 // for answered as not found without looking.
+// A folder of PATH that doesn't answer (reach.go) is left out: the
+// command is looked for in the others, each as a path.
 func lookPath(name string) (string, error) {
-	if !mayBeIn(name, pathDirs()) {
+	dirs := pathDirs()
+	hung := hungDirs(dirs)
+	if hung != nil {
+		dirs = slices.DeleteFunc(slices.Clone(dirs), func(d string) bool { return hung[d] })
+	}
+	if !mayBeIn(name, dirs) {
 		return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	}
+	if hung != nil && !strings.ContainsAny(name, `/\`) {
+		return lookIn(name, dirs)
 	}
 	return execLookPath(name)
 }

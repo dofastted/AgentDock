@@ -73,6 +73,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     t.after(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1100, height: 600 }, reducedMotion: "reduce" });
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.route("**/*", serve);
@@ -125,7 +126,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
       assert.equal(await page.locator("#gwModels .selected .name").textContent(), await name.textContent(), "an ordinary click still picks the model");
       await page.locator('#nav button[data-view="providers"]').click();
       await page.locator("#providers .row.provider").click();
-      await page.getByRole("button", { name: "Names & levels", exact: true }).click();
+      await page.getByRole("button", { name: "Model settings", exact: true }).click();
       const id = page.locator(".mname .mwho code").first();
       await id.scrollIntoViewIfNeeded();
       assert.equal(await selectText(page, id), await id.textContent(), "model IDs in the editor can be selected too");

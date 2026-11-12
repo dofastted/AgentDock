@@ -34,7 +34,7 @@ function server(lang, ours) {
     const req = route.request(), url = new URL(req.url());
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return route.fulfill({ json: { agents: [snow(ours)], profiles: [], settings: { lang, theme: "light" } } });
+    if (url.pathname === "/api/state") return route.fulfill({ json: { agents: [snow(ours)], profiles: [], settings: { lang, theme: "light", guideHidden: true } } });
     if (url.pathname === "/api/usage/quotas") return route.fulfill({ json: [] });
     if (url.pathname === "/api/groups") return route.fulfill({ json: { groups: [] } });
     if (url.pathname === "/api/plugins") return route.fulfill({ json: { plugins: [] } });
@@ -80,6 +80,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, true));
@@ -99,6 +100,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, false));

@@ -8,14 +8,18 @@ import (
 	"crypto/sha256"
 	"encoding"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+	"weak"
 )
 
 const (
@@ -52,6 +56,13 @@ type logSnapshot struct {
 	// out of blocks: every reader of those counts what it reads, and the
 	// request log alone lists these (queryPage)
 	probes []probeRow
+	// hosts are the providers by the host their calls went to, as the log
+	// recorded them: "" for a host two providers were on. A probe made
+	// while a provider was being added, under its host, is that
+	// provider's after it is deleted too (probeChunk; cybercaius).
+	hosts map[string]string
+	// full is where the full blocks end, for log-v1.bin
+	full logFull
 }
 
 var logIndex struct {
@@ -71,6 +82,25 @@ var logAppends struct {
 	base, last os.FileInfo
 }
 
+// sawHost notes the provider r's call went to by its host. A probe made
+// before its provider had an id names the host for both, and says nothing.
+func (s *logSnapshot) sawHost(r Record) {
+	h, _, _ := strings.Cut(r.Host, " as ") // a subscription's "host as user"
+	h = strings.ToLower(strings.TrimSpace(h))
+	// an MCP tool call's host is its server's name, not a provider's
+	if h == "" || r.Provider == "" || strings.EqualFold(r.Provider, h) || r.IsRejected() || r.Source == SourceMCP {
+		return
+	}
+	if s.hosts == nil {
+		s.hosts = map[string]string{}
+	}
+	if to, ok := s.hosts[h]; !ok {
+		s.hosts[h] = r.Provider
+	} else if to != r.Provider {
+		s.hosts[h] = ""
+	}
+}
+
 func readLogSnapshot() *logSnapshot {
 	// the clients the user counts as agents, read once for the pass the
 	// snapshot is read for (#1958)
@@ -82,9 +112,21 @@ func readLogSnapshot() *logSnapshot {
 	info, err := statLogFile(path)
 	settled := settledLogStamp(info, start)
 	old := logIndex.snapshot
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && old != nil && old.path == path {
+		// A stat that failed but for the log's absence (a busy disk, a share
+		// that blinked) says nothing of the log: the last good read stays, or
+		// every page reads an empty ledger until the next good stat.
+		return old
+	}
 	unchanged := old != nil && old.path == path && (err != nil && old.info == nil || err == nil && sameLogInfo(old.info, info))
 	if unchanged && info != nil {
-		if logChangeStamp(info) == "" || !old.settled {
+		if !old.settled && !settled && old.hash != "" && logChangeStamp(info) != "" {
+			// Still in the stamp's tick: hashing the log again proves nothing
+			// a read a moment earlier wouldn't have, and every reader an
+			// append wakes (the menu bar, the pages) hashed the whole log
+			// once more (#4368). The first read once it settles verifies it,
+			// before anything is built on it, as below.
+		} else if logChangeStamp(info) == "" || !old.settled {
 			unchanged = old.hash != "" && logRecordHash(path, old.off) == old.hash
 			if unchanged && settled {
 				promoted := *old
@@ -103,7 +145,7 @@ func readLogSnapshot() *logSnapshot {
 		logIndex.version++
 	}
 
-	next := &logSnapshot{path: path, info: info, settled: settled, version: logIndex.version, keyProviders: map[string]bool{}}
+	next := &logSnapshot{path: path, info: info, settled: settled, version: logIndex.version, keyProviders: map[string]bool{}, hosts: map[string]string{}}
 	if err != nil {
 		logIndex.snapshot = next
 		return next
@@ -121,15 +163,37 @@ func readLogSnapshot() *logSnapshot {
 		next.blocks = slices.Clone(old.blocks)
 		next.keyProviders = maps.Clone(old.keyProviders)
 		next.probes = slices.Clip(old.probes) // appended to, never written in
+		next.hosts = maps.Clone(old.hosts)
+		next.full = old.full
+	} else if old == nil {
+		// a start: the blocks kept, and the lines after them
+		if d := logDiskRead(path, info.Size()); d != nil && resumeLogHash(sum, d.full.digest) {
+			next.full = d.full
+			next.off, next.first, next.firstOwn = d.full.off, d.full.first, d.full.firstOwn
+			next.blocks, next.probes = d.blocks, d.probes
+			next.keyProviders, next.hosts = maps.Clone(d.full.keyProviders), maps.Clone(d.full.hosts)
+			logDiskKept(path, d.full.n)
+			if logDiskLoaded != nil {
+				logDiskLoaded(d.full.n)
+			}
+		}
 	}
 	logIndex.reads++
+	// never publish an incomplete read as current, nor hand one to a reader
+	// while there is a good one: what stands is kept
+	kept := func() *logSnapshot {
+		if old != nil && old.path == path {
+			return old
+		}
+		return next
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return next
-	} // never publish an incomplete read as current
+		return kept()
+	}
 	defer f.Close()
 	if _, err = f.Seek(next.off, 0); err != nil {
-		return next
+		return kept()
 	}
 	var tail *rowChunk
 	routes := routeRows{}
@@ -152,8 +216,11 @@ func readLogSnapshot() *logSnapshot {
 		if json.Unmarshal(b, &r) != nil {
 			continue
 		}
+		next.sawHost(r)
 		if r.IsProbe() {
-			next.probes = append(next.probes, probeRow{r, next.off})
+			if !quietProbe(r) { // a model list answered is no row (ferock)
+				next.probes = append(next.probes, probeRow{r, next.off})
+			}
 			continue
 		}
 		if tail == nil {
@@ -175,16 +242,24 @@ func readLogSnapshot() *logSnapshot {
 			next.blocks = append(next.blocks, tail.freeze())
 			tail = nil
 			clear(routes)
+			next.full = logFull{n: len(next.blocks), off: next.off, hash: fmt.Sprintf("%x", sum.Sum(nil)), digest: marshalLogHash(sum),
+				first: next.first, firstOwn: next.firstOwn, keyProviders: maps.Clone(next.keyProviders), hosts: maps.Clone(next.hosts)}
 		}
 	}
 	if tail != nil {
 		next.blocks = append(next.blocks, tail.freeze())
 	}
 	next.hash, next.digest = fmt.Sprintf("%x", sum.Sum(nil)), marshalLogHash(sum)
-	// A rewrite during the read must not give old blocks the new content's hash.
-	if (!trusted || !settled) && next.hash != logRecordHash(path, next.off) {
+	// A rewrite during the read must not give old blocks the new content's
+	// hash. A read inside the stamp's tick is checked when it settles
+	// instead (no settled snapshot is made of it unchecked, and one
+	// continued from it hashes its prefix first): checked now, it hashed
+	// the whole log twice for each append, once now and again on
+	// settling (#4368).
+	if settled && !trusted && next.hash != logRecordHash(path, next.off) {
 		next.hash, next.digest = "", nil
 		next.settled = false
+		next.full = logFull{}
 	}
 	logAppends.Lock()
 	// Preserve writes which arrived while this immutable snapshot was built.
@@ -198,6 +273,7 @@ func readLogSnapshot() *logSnapshot {
 		next.bytes += c.Bytes
 	}
 	logIndex.snapshot = next
+	logDiskWrite(next)
 	return next
 }
 
@@ -232,22 +308,150 @@ func (o routeRows) handedOn(c *rowChunk, r *Record) {
 	r.Tries = max(r.Tries, 2)
 }
 
-func (s *logSnapshot) visit(since time.Time, fn func(Record)) {
-	for _, packed := range s.blocks {
+// visit hands fn each record of the log since since. The blocks are
+// decoded into one buffer, each over the one before: each decoded into
+// rows of its own, the Sessions, Usage and Routing pages' reads of the
+// log allocated ~800 MB of rows a minute while calls came in (#2278). A
+// record's strings are the block's own, not the buffer's.
+func (s *logSnapshot) visit(since time.Time, fn func(Record)) { visitBlocks(s.blocks, since, fn) }
+
+// blockReader reads blocks as visit reads the log's.
+func blockReader(blocks []*rowChunk, since time.Time) func(func(Record)) {
+	return func(fn func(Record)) { visitBlocks(blocks, since, fn) }
+}
+
+func visitBlocks(blocks []*rowChunk, since time.Time, fn func(Record)) {
+	rows := chunkRows{}
+	defer rows.release()
+	for _, packed := range blocks {
 		if !since.IsZero() && packed.Latest.Before(since) {
 			continue
 		}
-		c := packed.unpack()
-		if c == nil {
-			continue
-		}
+		c := rows.of(packed)
 		for i := range c.Rows {
 			p := &c.Rows[i]
-			if !p.Time.Before(since) {
+			if !p.Time().Before(since) {
 				fn(c.row(i).Record)
 			}
 		}
 	}
+}
+
+// rowSession and rowNativeSession are the Text slots of a row's session
+// and its agent's own conversation id (rowText)
+const (
+	rowSession       = 13
+	rowNativeSession = 14
+)
+
+// visitSessions is visit for the rows of the sessions named, by Session
+// or NativeSession: a row of another session is passed over by its
+// strings' ids, never made a Record. Codex's lead lookup read thirty
+// days of the log into a Record a row, for every request a subagent
+// sent (#4370).
+func (s *logSnapshot) visitSessions(since time.Time, sessions []string, fn func(Record)) {
+	if len(sessions) == 0 {
+		return
+	}
+	rows := lentRows() // a matched row's strings are cloned
+	defer rows.release()
+	var ids []uint32
+	var shapes []bool
+	for _, packed := range s.blocks {
+		if !since.IsZero() && packed.Latest.Before(since) {
+			continue
+		}
+		if known, ok := blockSessions.of(packed); ok && !slices.ContainsFunc(sessions, func(s string) bool { _, in := known[s]; return in }) {
+			continue
+		}
+		if sessionsDecoding != nil {
+			sessionsDecoding()
+		}
+		c := rows.of(packed)
+		blockSessions.learn(packed, c)
+		// a row a Codex identity names is told its root session as it is
+		// read (codexIdentityRow): only a page's copies have them
+		named := c.codexIdentities != nil
+		ids = ids[:0]
+		for id, str := range c.Strings {
+			if id != 0 && slices.Contains(sessions, str) {
+				ids = append(ids, uint32(id))
+			}
+		}
+		if len(ids) == 0 && !named {
+			continue
+		}
+		shapes = slices.Grow(shapes[:0], len(c.Shapes))[:len(c.Shapes)]
+		for k, t := range c.Shapes {
+			shapes[k] = named || slices.Contains(ids, t[rowSession]) || slices.Contains(ids, t[rowNativeSession])
+		}
+		for i := range c.Rows {
+			p := &c.Rows[i]
+			if int(p.Shape) >= len(shapes) || !shapes[p.Shape] || p.Time().Before(since) {
+				continue
+			}
+			r := c.row(i)
+			if named && !slices.Contains(sessions, r.Session) && !slices.Contains(sessions, r.NativeSession) {
+				continue
+			}
+			for _, str := range rowText(&r) {
+				*str = strings.Clone(*str)
+			}
+			fn(r.Record)
+		}
+	}
+}
+
+// blockSessions are the sessions each packed block's rows name, by
+// Session or NativeSession, so a lookup of a session decodes only the
+// blocks it is in: decoding every block of a month for each of a
+// subagent's requests still took ~20ms (#4370). A packed block isn't
+// written again. A block is known by a weak pointer, so the map keeps no
+// block the log has let go (a tail block is packed anew as calls come
+// in); their entries go when it has 4096.
+var blockSessions sessionsByBlock
+
+// sessionsDecoding, in tests, is told each block visitSessions decodes.
+var sessionsDecoding func()
+
+type sessionsByBlock struct {
+	sync.Mutex
+	m map[weak.Pointer[rowChunk]]map[string]struct{}
+}
+
+func (b *sessionsByBlock) of(c *rowChunk) (map[string]struct{}, bool) {
+	if len(c.Archive) == 0 || c.codexIdentities != nil {
+		return nil, false
+	}
+	b.Lock()
+	defer b.Unlock()
+	known, ok := b.m[weak.Make(c)]
+	return known, ok
+}
+
+// learn keeps the sessions of packed, open being its rows
+func (b *sessionsByBlock) learn(packed, open *rowChunk) {
+	if len(packed.Archive) == 0 || packed.codexIdentities != nil {
+		return
+	}
+	known := map[string]struct{}{}
+	for _, t := range open.Shapes {
+		for _, slot := range [...]int{rowSession, rowNativeSession} {
+			if t[slot] != 0 {
+				if s := open.Strings[t[slot]]; s != "" {
+					if _, in := known[s]; !in {
+						known[strings.Clone(s)] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	b.Lock()
+	defer b.Unlock()
+	if b.m == nil || len(b.m) >= 4096 {
+		b.m = map[weak.Pointer[rowChunk]]map[string]struct{}{}
+	}
+	b.m[weak.Make(packed)] = known
 }
 
 func (c *rowChunk) writable() *rowChunk {

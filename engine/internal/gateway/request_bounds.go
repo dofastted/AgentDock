@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -30,6 +31,61 @@ const (
 	defaultBodyTimeout = 60 * time.Second
 )
 
+// codexBodyMost bounds codexBodyLimit on any machine.
+const codexBodyMost = 2 << 30
+
+// codexBodyLimit is the decoded limit of a turn on Codex's own backend
+// path (CodexPath, the relay, its WebSocket): a sixteenth of what
+// magpie's processes may use (bodyRoomSize's memory), defaultBodyLimit at
+// least and codexBodyMost at most. Codex keeps every image it generated
+// in the conversation, a ~3 MB PNG as ~4 MB of base64 each, and over
+// HTTP sends the conversation whole every turn: a session that generated
+// and revised images for a while went past 512 MB and got magpie's 413,
+// while Codex signed in to OpenAI directly kept going (dallascao on
+// Discord). One of Codex's own models is sent on to its sign-in as it
+// came, at about four times the body's size in Go heap at its peak; a
+// turn for a magpie model is translated, at several times that, and keeps
+// defaultBodyLimit (codexBackend). The bound still holds a zstd bomb: no
+// body decodes past it.
+func codexBodyLimit() int64 {
+	codexLimit.Lock()
+	defer codexLimit.Unlock()
+	if codexLimit.goos != memGOOS || codexLimit.root != memRoot || codexLimit.n == 0 {
+		limit, _ := memLimit(memGOOS, memRoot)
+		if limit <= 0 && memOwn() {
+			limit = proc.MemTotal()
+		}
+		codexLimit.goos, codexLimit.root = memGOOS, memRoot
+		codexLimit.n = min(max(limit/16, defaultBodyLimit), codexBodyMost)
+	}
+	return codexLimit.n
+}
+
+// codexLimit is codexBodyLimit as last read, for the memory it was read
+// from (memGOOS and memRoot change only in tests).
+var codexLimit struct {
+	sync.Mutex
+	goos, root string
+	n          int64
+}
+
+// codexLimitOf is the decoded limit of a request on Codex's own path to
+// s: its requestLimits' when set (a test's), else codexBodyLimit.
+func (s *Server) codexLimitOf() int64 {
+	if s.requestLimits.body > 0 {
+		return s.requestLimits.body
+	}
+	return codexBodyLimit()
+}
+
+// bodyLimitOf is s's decoded limit for every other request.
+func (s *Server) bodyLimitOf() int64 {
+	if s.requestLimits.body > 0 {
+		return s.requestLimits.body
+	}
+	return defaultBodyLimit
+}
+
 type requestLimits struct {
 	body        int64
 	readTimeout time.Duration
@@ -44,9 +100,25 @@ func (s *Server) readRequestBody(w http.ResponseWriter, r *http.Request, from pr
 	if limit > 0 {
 		limits.body = limit
 	}
+	// wait for room before reading: a body waiting is not held (bodyRoom)
+	most := limits.body
+	if most <= 0 {
+		most = defaultBodyLimit
+	}
+	if n := r.ContentLength; n > 0 && n <= most {
+		if err := bodyRoom.take(r.Context(), n); err != nil {
+			w.Header().Set("Connection", "close") // its body is left unread
+			writeError(w, from, http.StatusServiceUnavailable, err.Error())
+			return nil, false
+		}
+	}
 	body, status, err := readBoundedRequestBody(w, r, limits)
 	if err != nil {
 		writeError(w, from, status, err.Error())
+		return nil, false
+	}
+	if err := bodyRoom.take(r.Context(), int64(len(body))); err != nil {
+		writeError(w, from, http.StatusServiceUnavailable, err.Error())
 		return nil, false
 	}
 	holdBody(r.Context(), body)
@@ -195,7 +267,9 @@ func readBoundedRequestBody(w http.ResponseWriter, r *http.Request, limits reque
 	if err != nil {
 		return readFailure(err)
 	}
-	return body, 0, nil
+	// text that isn't, as U+FFFD, before anything routes or forwards it
+	// (textBody, laincatx on X)
+	return textBody(r.Header, body), 0, nil
 }
 
 // sizedReadFirst is the most readSized sets aside before a byte has come:
@@ -208,11 +282,13 @@ const sizedReadFirst = 1 << 20
 // copies them into a slice of their sum, two copies of every body, and an
 // agent sends its whole conversation, ~1 MB, on every turn (yg6888 on X:
 // ~1 GB). Content-Length is not trusted for the allocation: room grows by
-// doubling, from sizedReadFirst, up to what was declared, so an honest body
-// of 1 MB or less is read into one slice of its own size, a larger one into
-// a final slice of its own size, and a body shorter than it said costs at
-// most about twice what it sent. A body longer than it said reads on, as
-// io.ReadAll would. The error is io.ReadAll's: nil at io.EOF.
+// doubling, from sizedReadFirst, up to what was declared, and straight to
+// it once that is within a quarter, so an honest body of 1 MB or less is
+// read into one slice of its own size, and a larger one into a final slice
+// of its own size, with at most 2.6 times the body allocated in all (a
+// doubling that fell just short of it made that 3). A body shorter than it
+// said is held in at most two and a half times what it sent. A body longer
+// than it said reads on, as io.ReadAll would. The error is io.ReadAll's: nil at io.EOF.
 func readSized(r io.Reader, declared int64) ([]byte, error) {
 	if declared <= 0 {
 		return io.ReadAll(r)
@@ -235,7 +311,15 @@ func readSized(r io.Reader, declared int64) ([]byte, error) {
 				}
 				continue
 			}
-			b = append(make([]byte, 0, min(int64(cap(b))*2, declared)), b...)
+			next := min(int64(cap(b))*2, declared)
+			if declared-next < next/4 {
+				// within a quarter of what it said: a doubling that
+				// fell just short would copy the whole body again for
+				// its last few bytes (a 516 MB turn read into 512 MB,
+				// then all of it into 516 MB, #5281)
+				next = declared
+			}
+			b = append(make([]byte, 0, next), b...)
 		}
 		n, err := r.Read(b[len(b):cap(b)])
 		b = b[:len(b)+n]

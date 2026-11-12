@@ -14,7 +14,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { click, inView } = require("./reader.cjs");
+const reader = require("./reader.cjs");
+const { click, inView } = reader;
 
 const assets = path.resolve(__dirname, "../assets");
 const now = Date.now();
@@ -101,14 +102,14 @@ function server(lang, theme, asked) {
 const L = {
   en: {
     tabs: ["Overview", "Requests", "Sessions", "Context"],
-    cols: ["Time", "Agent", "Requested", "Provider · account", "Sent", "Served", "Effort", "In", "Out", "Cache write", "Cache read", "Cost", "TTFT", "Duration", "Speed", "Status"],
+    cols: ["Time", "Agent", "Requested", "Provider · account", "Sent", "Served", "Effort", "In", "Out", "Cache write", "Cache read", "Cache hit rate", "Cost", "TTFT", "Duration", "Speed", "Status"],
     sum: "130 requests", pager: "1–100 of 130", older: "Older", newer: "Newer", failed: "Failed", export: "Export CSV",
     why: "The vendor was asked for gpt-6-sol, but its reply says gpt-6-luna answered",saved: "Saved 130 requests to ~/Downloads/magpie-requests-30d-2026-09-29.csv",
     none: "No requests match these filters.", bad: "Failed: the agent was answered 429", via: "Codex · via office-mac",
   },
   zh: {
     tabs: ["概览", "请求", "会话", "上下文"],
-    cols: ["时间", "Agent", "请求模型", "供应商 · 账号", "发送模型", "实际模型", "推理强度", "输入", "输出", "缓存写入", "缓存读取", "费用", "首字耗时", "耗时", "速度", "状态"],
+    cols: ["时间", "Agent", "请求模型", "供应商 · 账号", "发送模型", "实际模型", "推理强度", "输入", "输出", "缓存写入", "缓存读取", "缓存命中率", "费用", "首字耗时", "耗时", "速度", "状态"],
     sum: "130 个请求", pager: "第 1–100 条，共 130 条", older: "较早", newer: "较新", failed: "失败", export: "导出 CSV",
     why: null, saved: "已将 130 个请求保存到 ~/Downloads/magpie-requests-30d-2026-09-29.csv",
     none: "没有符合这些筛选条件的请求。", bad: "失败：Agent 收到的是 429", via: "Codex · 来自 office-mac",
@@ -141,6 +142,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const errors = [];
       const page = await (await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang, theme, asked));
       await page.goto("http://magpie.test/");
@@ -181,12 +183,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             });
             await route.fulfill({ json: data });
           });
-          await tab.locator("#period .opt").nth(2).click();
+          await tab.locator("#period .opt").nth(3).click();
           await lastAsked(tab, asked, q => q.get("period") === "30d");
           await tab.locator(key === "agent" ? "#ledAgent" : "#ledProvider").click();
           await tab.locator(".sess-menu .pm-item", { hasText: name }).click();
           await lastAsked(tab, asked, q => q.get(key) === removed);
-          await tab.locator("#period .opt").nth(1).click();
+          await tab.locator("#period .opt").nth(2).click();
           await lastAsked(tab, asked, q => q.get("period") === "7d" && !q.has(key) && q.get("offset") === "0");
           assert.equal(await tab.locator(key === "agent" ? "#ledAgent" : "#ledProvider").textContent(), all);
           assert.equal(await tab.locator(".led-row").count(), Math.min(100, ROWS.filter(r => r[key] !== removed).length));
@@ -345,12 +347,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const originalPeriod = asked.at(-1).get("period");
         const routeTitle = lang === "en" ? "View routing" : "查看路由";
         const usageTitle = lang === "en" ? "View usage" : "查看用量";
-        assert.equal(await page.locator(".led tbody tr").nth(3).locator("button").count(), 0, "old rows have no route link");
+        // a row is no link of its own: its click opens the request's page,
+        // and Routing is a link there (geesehowardt7 on X)
+        assert.equal(await page.locator(".led tbody tr").first().locator("button").count(), 0, "the row's time is no link");
+        const old = await reader.openRequest(page, page.locator(".led tbody tr").nth(3));
+        assert.equal(await old.locator(".led-route-link").count(), 0, "old rows have no route link");
+        assert.equal(lookups.length, 0, "opening a request asks Routing nothing");
+        await reader.closeRequest(page);
         // the dashboard above the table can leave its first row below the fold:
         // bring it up first, and the return must come back to where it was
-        const link = page.locator(".led tbody tr").first().getByTitle(routeTitle);
-        await wheelTo(page, link);
+        const row = page.locator(".led tbody tr").first();
+        await wheelTo(page, row);
         const left = await scrolled(page);
+        const link = (await reader.openRequest(page, row)).getByText(routeTitle, { exact: true });
         await link.click();
         await page.locator("#view-routing").waitFor({ state: "visible" });
         await page.locator(".rt-log-head").getByText(usageTitle, { exact: true }).waitFor();
@@ -378,8 +387,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await lastAsked(page, asked, (q) => !q.has("route") && q.get("period") === originalPeriod);
         await page.waitForFunction(() => document.querySelectorAll(".led tbody tr").length === 100);
         // A pruned request stays in Usage and explains why its route cannot open.
-        const pruned = page.locator(".led tbody tr").nth(1).getByTitle(routeTitle);
-        await wheelTo(page, pruned);
+        await wheelTo(page, page.locator(".led tbody tr").nth(1));
+        const pruned = (await reader.openRequest(page, page.locator(".led tbody tr").nth(1))).getByText(routeTitle, { exact: true });
         await pruned.click();
         await page.waitForFunction((msg) => document.querySelector("#status").textContent === msg,
           lang === "en" ? "Routing history for this request is no longer available." : "此请求的路由历史已不可用。");
@@ -416,8 +425,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await route.fulfill({json:{mine:true, seq:1, routes:[{id:123,time:ROWS[0].t,agent:"codex",model:"gpt-6-sol",provider:"relay",order:[],tries:[],done:true,status:200}],totals:{requests:1,rerouted:0,errors:0},now:new Date().toISOString()}}).catch(()=>{});
         });
         await page.waitForTimeout(5500);
-        const link = page.locator(".led tbody tr").first().getByTitle(lang === "en" ? "View routing" : "查看路由");
-        await wheelTo(page, link);
+        await wheelTo(page, page.locator(".led tbody tr").first());
+        const link = (await reader.openRequest(page, page.locator(".led tbody tr").first())).getByText(lang === "en" ? "View routing" : "查看路由", { exact: true });
         await link.click();
         await page.locator("#view-routing").waitFor({state:"visible"});
         assert.equal(await page.locator(".rt-log-head").getByText(lang === "en" ? "Back to live" : "回到实时", {exact:true}).count(), 0);

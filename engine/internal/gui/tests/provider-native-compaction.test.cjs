@@ -22,7 +22,7 @@ const unfold = async (page) => {
 const base = {
   icon: "generic", chat: "", responses: "", anthropic: "", catalog: "",
   models: [{ id: "m1", name: "M1", on: true }], agents: [], fallback: [], headers: {},
-  key: { set: true, masked: "sk-…1234" }, keyList: [], balanceToken: { takes: false, set: false }, proxy: "", searches: false, unredacted: false, passUserAgent: false,
+  key: { set: true, masked: "sk-…1234" }, keyList: [], balanceToken: { takes: false, set: false }, proxy: "", searches: false, unredacted: false, passUserAgent: true,
 };
 const relay = { ...base, id: "relay", name: "Responses Relay", responses: "https://relay.example.com/v1", carriesCompaction: true };
 const chat = { ...base, id: "chatonly", name: "Chat Relay", chat: "https://chat.example.com/v1" };
@@ -84,6 +84,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         });
         const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const posts = [];

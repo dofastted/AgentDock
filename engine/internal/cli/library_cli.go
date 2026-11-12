@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +20,26 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library instructions        print the shared instructions
   magpie library instructions set <file|->   replace them with a file's text (- for stdin)
   magpie library instructions agents <a,b…|none>   the agents that get them
-  magpie library mcp add <name> <url | command args…> [agents=a,b…]
+  magpie library mcp add <name> <url | command args…> [agents=a,b…] [header=K=V…] [env=K=V…] [timeout=SECS] [--local]
+                                     header= is for a URL, env= for a command; the program's own words go after --
+  magpie library mcp set <name> header=K=V | header-=K | env=K=V | env-=K | timeout=SECS   change one setting of a server
+  magpie library mcp show <name>     print the server as the library keeps it, as JSON
   magpie library mcp agents <name> <a,b…|none>
+  magpie library mcp local <name> on|off   keep it to this computer: a sync or a backup never carries it, and one
+                                     coming in neither takes it away nor puts another computer's in its place
+  magpie library mcp off|on <name>   take it from every agent, project and app, keeping its settings; on gives it back as it was
   magpie library mcp rm <name>
+  magpie library mcp router on|off   give each agent one MCP server, magpie, in place of the library's (magpie runs them, once for every agent)
+  magpie library mcp router <name> shared|direct   with the router on, share the server through it (the default) or keep it each
+                                     agent's own entry, as with the router off: for one that reads its project from the folder it starts in
   magpie library skill agents <name> <a,b…|none>
+  magpie library skill router on|off   give each agent one skill, magpie-skills, that lists the library's: it reads the one a task needs
+  magpie library skill router <name> routed|direct   with the router on, list the skill there (the default) or keep it each agent's own
+  magpie library skill off-here <name>   turn it off on this computer only: a sync neither carries that nor turns it back on
+  magpie library skill on-here <name>    …and on again here
+  magpie library skill hand-over <name…>|--all   move skills kept in ~/.agents/skills into the library's folder: the agents that read them
+                                     there keep them, ticked, and you can turn each off
+  magpie library skill hand-back <name>  …and back into ~/.agents/skills, where those agents read it whatever is ticked
   magpie library skill rm <name>     (skills are installed from the app's Library page)
   magpie library skill rm --all [--yes]   every skill out of the library and the agents (asks first; --yes doesn't)
   magpie library skill rm --gone [--yes]  every skill an update found removed from its source (asks first; --yes doesn't)
@@ -30,11 +47,14 @@ const libraryUsage = `magpie library                     what the library gives 
                                      (one changed here is left as it is; update it by name with --replace-edits)
   magpie library skill how link|copy [agent]   give skills as links to the library's or as copies: every agent's way, or one agent's
   magpie library skill how default <agent>     the agent goes the library's way again
+  magpie library skill where agents|shared     skills go to the agents ticked, or also into ~/.agents/skills for every agent and tool that reads it
   magpie library skill use-library <name> <agent>   an agent's own skill by that name is in the way: set it aside, link the library's
   magpie library skill keep-own <name> <agent>      …or keep the agent's, and take the agent off the library's
+  magpie library project …           a project folder's own skills (Library › Projects): magpie library project help
   magpie library rtk                 which agents run their shell commands through RTK (rtk-ai.app), to save tokens
   magpie library rtk on|off <agent>  switch it (on with RTK's own installer; off works with RTK gone)
   magpie library rtk install         install RTK (Homebrew, winget, or RTK's own script)
+  magpie library rtk install <distro>  install RTK in a WSL distro, for the agents there (RTK's own script, run there)
   magpie library rtk upgrade         bring RTK up to its latest release, the way it was installed
   magpie library rtk path            put RTK on the PATH the agents get, when it isn't (their hooks run it by name)
 `
@@ -90,33 +110,79 @@ func libraryCmd(args []string) error {
 		switch {
 		case len(rest) >= 3 && rest[0] == "add":
 			var cmd, agents []string
-			for _, a := range rest[2:] {
-				if v, ok := strings.CutPrefix(a, "agents="); ok {
-					if agents, err = libraryAgents(v, "mcp"); err != nil {
-						return err
-					}
-				} else {
-					cmd = append(cmd, a)
+			var o library.ServerOpts
+			if cmd, o, err = library.SplitServerWords(rest[2:]); err != nil {
+				return err
+			}
+			for _, v := range o.Agents {
+				var as []string
+				if as, err = libraryAgents(v, "mcp"); err != nil {
+					return err
 				}
+				agents = append(agents, as...)
 			}
 			var s library.Server
 			if s, err = library.ServerOf(rest[1], cmd); err != nil {
 				return err
 			}
-			if agents != nil {
+			if o.HasAgent {
 				s.Agents = agents
+			}
+			if err = o.Apply(&s); err != nil {
+				return err
 			}
 			res, err = library.SaveServer("", s)
 			if len(s.Agents) == 0 {
 				unused = s.Name
 			}
+		case len(rest) >= 3 && rest[0] == "set" && !strings.HasPrefix(rest[1], "-"):
+			// header, env and timeout of a server in the library, one at a time (#6111)
+			var cmd []string
+			var o library.ServerOpts
+			if cmd, o, err = library.SplitServerWords(rest[2:]); err != nil {
+				return err
+			}
+			if len(cmd) > 0 || o.HasAgent || o.Local != nil {
+				return fmt.Errorf("set takes header=K=V, env=K=V, header-=K, env-=K and timeout=SECS, not %q", strings.Join(cmd, " "))
+			}
+			res, err = library.SetServer(rest[1], o)
+		case len(rest) == 2 && rest[0] == "show" && !strings.HasPrefix(rest[1], "-"):
+			v, rerr := library.Read(nil)
+			if rerr != nil {
+				return rerr
+			}
+			for _, s := range v.Servers {
+				if s.Name == rest[1] {
+					b, _ := json.MarshalIndent(s.Server, "", "  ")
+					fmt.Println(string(b))
+					return nil
+				}
+			}
+			return fmt.Errorf("no server called %s", rest[1])
 		case len(rest) == 3 && rest[0] == "agents":
 			var as []string
 			if as, err = libraryAgents(rest[2], "mcp"); err == nil {
 				res, err = library.ServerAgents(rest[1], as)
 			}
+		case len(rest) == 3 && rest[0] == "local" && (rest[2] == "on" || rest[2] == "off") && !strings.HasPrefix(rest[1], "-"):
+			if res, err = library.ServerLocal(rest[1], rest[2] == "on"); err == nil && len(res.Changed) == 0 && len(res.Problems) == 0 {
+				if rest[2] == "on" {
+					fmt.Println(green.Render("✓"), rest[1], "is kept to this computer: a sync or a backup never carries it")
+				} else {
+					fmt.Println(green.Render("✓"), rest[1], "goes with the library again at the next sync")
+				}
+				return nil
+			}
+		case len(rest) == 2 && (rest[0] == "on" || rest[0] == "off") && !strings.HasPrefix(rest[1], "-"):
+			// off for everyone, kept with its settings; on again as it was
+			res, err = library.ServerOn(rest[1], rest[0] == "on")
 		case len(rest) == 2 && rest[0] == "rm":
 			res, err = library.RemoveServer(rest[1])
+		case len(rest) == 2 && (rest[0] == "router" || rest[0] == "hub") && (rest[1] == "on" || rest[1] == "off"):
+			res, err = library.SetMCPHub(rest[1] == "on")
+		case len(rest) == 3 && (rest[0] == "router" || rest[0] == "hub") && (rest[2] == "shared" || rest[2] == "direct") && !strings.HasPrefix(rest[1], "-"):
+			// a server out of the hub, each agent's own entry (#4382)
+			res, err = library.ServerHub(rest[1], rest[2] == "direct")
 		default:
 			return fmt.Errorf("usage:\n  %s", libraryUsage)
 		}
@@ -134,6 +200,20 @@ func libraryCmd(args []string) error {
 		case len(rest) >= 2 && rest[0] == "rm" && slices.Contains(rest[1:], "--all"):
 			if res, err = removeEverySkill(rest[1:]); res == nil && err == nil {
 				return nil
+			}
+		case len(rest) == 2 && rest[0] == "router" && (rest[1] == "on" || rest[1] == "off"):
+			res, err = library.SetSkillRouter(rest[1] == "on")
+		case len(rest) == 3 && rest[0] == "router" && (rest[2] == "routed" || rest[2] == "direct") && !strings.HasPrefix(rest[1], "-"):
+			res, err = library.SkillRouterHow(rest[1], rest[2] == "direct")
+		case len(rest) == 2 && (rest[0] == "off-here" || rest[0] == "on-here") && !strings.HasPrefix(rest[1], "-"):
+			res, err = library.SkillHere(rest[1], rest[0] == "on-here")
+		case len(rest) >= 2 && rest[0] == "hand-over":
+			if res, err = handOverSkills(rest[1:]); res == nil && err == nil {
+				return nil
+			}
+		case len(rest) == 2 && rest[0] == "hand-back" && !strings.HasPrefix(rest[1], "-"):
+			if res, err = library.HandBackSkill(rest[1]); err == nil {
+				fmt.Println(green.Render("✓"), rest[1], "is back in", filepath.Join("~", ".agents", "skills", rest[1]))
 			}
 		case len(rest) == 2 && rest[0] == "rm":
 			res, err = library.RemoveSkill(rest[1])
@@ -170,11 +250,15 @@ func libraryCmd(args []string) error {
 				how = ""
 			}
 			res, err = library.SetSkillHow(agent, how)
+		case len(rest) == 2 && rest[0] == "where" && (rest[1] == library.SkillsInAgents || rest[1] == library.SkillsInShared):
+			res, err = library.SetSkillsWhere(rest[1])
 		default:
 			return fmt.Errorf("usage:\n  %s", libraryUsage)
 		}
 	case "rtk":
 		return rtkCmd(rest)
+	case "project", "projects":
+		return libraryProjectCmd(rest)
 	case "help", "-h", "--help":
 		fmt.Print("  " + libraryUsage)
 		return nil
@@ -326,6 +410,11 @@ func libraryAgents(s, kind string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		// one in a stopped WSL distro is recorded, and written there once
+		// the distro runs: asking would start it (#3896)
+		if d := library.AsleepIn(id); d != "" {
+			fmt.Fprintln(os.Stderr, amber.Render("!"), muted.Render("WSL "+d+" isn't running: "+id+" is recorded, and magpie writes it there once it sees the distro running"))
+		}
 		out = append(out, id)
 	}
 	return out, nil
@@ -403,8 +492,39 @@ func libraryStatus() error {
 			what = strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
 		}
 		fmt.Printf("  %s %s → %s\n", bold.Render(s.Name), muted.Render(what), on(s.Agents))
+		if s.Local {
+			fmt.Println("   ", muted.Render("not synced: a sync never carries it to your other computers · magpie library mcp local "+s.Name+" off"))
+		}
+		if s.Hub == library.HubDirect {
+			fmt.Println("   ", muted.Render("direct: each agent's own entry, never through the hub · magpie library mcp hub "+s.Name+" shared"))
+		}
 		for a, e := range s.Problems {
 			fmt.Println("   ", amber.Render("!"), a, muted.Render(e))
+		}
+	}
+	if v.MCPHub {
+		var given []string
+		keep := map[string][]string{}
+		for _, a := range v.Agents {
+			switch a.Hub {
+			case "":
+			case "on":
+				given = append(given, a.ID)
+			default:
+				keep[a.Hub] = append(keep[a.Hub], a.ID)
+			}
+		}
+		fmt.Printf("  %s → %s\n", bold.Render("magpie")+muted.Render(" (one server in place of these, at "+v.HubPath+"<agent>)"), on(given))
+		for _, why := range []string{"no-remote", "taken", "own"} {
+			if len(keep[why]) == 0 {
+				continue
+			}
+			say := map[string]string{
+				"no-remote": "reaches no MCP server over HTTP, so it keeps each server's own entry",
+				"taken":     "a library server is called magpie, so each agent keeps each server's own entry",
+				"own":       "has an MCP server called magpie of its own, so it keeps each server's own entry",
+			}[why]
+			fmt.Println("   ", amber.Render("!"), strings.Join(keep[why], ", "), muted.Render(say))
 		}
 	}
 	var found, own []string
@@ -433,6 +553,9 @@ func libraryStatus() error {
 		if s.Gone != "" {
 			fmt.Println("   ", amber.Render("!"), muted.Render("removed from "+s.Source+" · magpie library skill rm --gone"))
 		}
+		if s.OffHere {
+			fmt.Println("   ", muted.Render("off on this computer · magpie library skill on-here "+s.Name))
+		}
 	}
 	fmt.Println(muted.Render("  kept in " + v.Dir + " · magpie library help"))
 	return nil
@@ -448,6 +571,12 @@ func rtkCmd(args []string) error {
 		fmt.Println(muted.Render("installing rtk…"))
 		var err error
 		if v, err = library.InstallRTK(); err != nil {
+			return err
+		}
+	case len(args) == 2 && args[0] == "install":
+		fmt.Println(muted.Render("installing rtk in WSL " + args[1] + "…"))
+		var err error
+		if v, err = library.InstallRTKIn(args[1]); err != nil {
 			return err
 		}
 	case len(args) == 1 && args[0] == "path":
@@ -487,8 +616,11 @@ func rtkCmd(args []string) error {
 			fmt.Println(amber.Render("  RTK "+v.Latest+" is out · waiting for "+v.Waiting), muted.Render("— "+v.Waiting+" has "+v.WaitingHas+" so far, and usually has a release within a few days"))
 		case v.Latest != "" && v.Version != "" && library.RTKNewer(v.Latest, v.Version):
 			up := "update it the way it was installed"
-			if v.Upgrade != "" {
+			switch {
+			case v.Upgrade != "":
 				up = "magpie library rtk upgrade runs: " + v.Upgrade
+			case v.NoUpgrade == "cargo":
+				up = "it was installed with cargo, but magpie can't find cargo: install Rust from https://rustup.rs, or run " + v.Manual
 			}
 			fmt.Println(amber.Render("  RTK "+v.Latest+" is out"), muted.Render("— "+up))
 		case len(args) == 1 && args[0] == "upgrade":
@@ -518,17 +650,42 @@ func rtkCmd(args []string) error {
 			fmt.Println(muted.Render("  Codex runs its commands in its Windows sandbox, which can't write RTK's history, so what RTK saves there isn't counted"))
 		}
 	}
+	// an agent in WSL runs its distro's rtk
+	wslRTK := map[string]library.RTKDistro{}
+	for _, d := range v.WSL {
+		wslRTK[d.Name] = d
+		switch {
+		case d.Asleep:
+			fmt.Println(muted.Render("  WSL " + d.Name + " isn't running: its agents are left as they are, and magpie doesn't start it"))
+		case d.Path == "" && d.Install != "":
+			fmt.Println(amber.Render("  rtk isn't installed in WSL "+d.Name), muted.Render("— magpie library rtk install "+d.Name+" runs there: "+d.Install))
+		case d.Path == "":
+			fmt.Println(amber.Render("  magpie couldn't look for rtk in WSL " + d.Name))
+		case d.OffPath:
+			fmt.Println(bold.Render("  WSL "+d.Name), muted.Render(d.Version+" · "+d.Path))
+			fmt.Println(amber.Render("  rtk isn't on the PATH of WSL "+d.Name+"'s shells"), muted.Render("— add "+d.Path[:strings.LastIndex(d.Path, "/")]+" to PATH in your shell profile there"))
+		default:
+			fmt.Println(bold.Render("  WSL "+d.Name), muted.Render(d.Version+" · "+d.Path))
+		}
+	}
 	for _, a := range v.Agents {
 		mark := muted.Render("off")
 		note := ""
 		if a.NoHook {
 			mark, note = muted.Render(" – "), muted.Render(" — "+a.Blocked)
 		}
+		path, offPath := v.Path, v.OffPath
+		if a.WSL != "" {
+			path, offPath = wslRTK[a.WSL].Path, wslRTK[a.WSL].OffPath
+		}
+		if a.Asleep {
+			mark, note = muted.Render(" ? "), muted.Render(" — WSL "+a.WSL+" isn't running")
+		}
 		if a.On {
 			mark = green.Render("on ")
-			if v.Path == "" {
+			if path == "" {
 				mark, note = amber.Render("on "), muted.Render(" — its hook calls rtk, which isn't installed: install it, or switch this off")
-			} else if v.OffPath {
+			} else if offPath {
 				mark, note = amber.Render("on "), muted.Render(" — its hook can't find rtk on PATH, so it does nothing")
 			}
 		}
@@ -544,4 +701,40 @@ func rtkCmd(args []string) error {
 		fmt.Println(muted.Render("  what was there before is kept in " + v.Backup))
 	}
 	return nil
+}
+
+// handOverSkills is magpie library skill hand-over: the skills named, or
+// with --all every one the library keeps in ~/.agents/skills, moved into
+// the library's folder. Each moved is said, and where it went.
+func handOverSkills(args []string) (*library.Result, error) {
+	names := args
+	if slices.Contains(args, "--all") {
+		if len(args) != 1 {
+			return nil, fmt.Errorf("usage:\n  %s", libraryUsage)
+		}
+		var err error
+		if names, err = library.SharedSkills(); err != nil {
+			return nil, err
+		}
+		if len(names) == 0 {
+			fmt.Println(muted.Render("No skill of the library's is kept in ~/.agents/skills."))
+			return nil, nil
+		}
+	} else if slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "-") }) {
+		return nil, fmt.Errorf("usage:\n  %s", libraryUsage)
+	}
+	res, err := library.HandOverSkills(names)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range names {
+		if slices.ContainsFunc(res.Unmoved, func(p library.Problem) bool { return p.What == "skill:"+n }) {
+			continue
+		}
+		fmt.Println(green.Render("✓"), n, "is in the library's folder:", library.SkillPath(n))
+	}
+	for _, p := range res.Unmoved {
+		fmt.Println(amber.Render("!"), strings.TrimPrefix(p.What, "skill:"), "stays where it was:", p.Error)
+	}
+	return res, nil
 }

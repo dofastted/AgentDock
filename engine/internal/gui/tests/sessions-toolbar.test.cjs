@@ -55,6 +55,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await context.newPage();
         // The fixture renders hundreds of sessions, also on Windows WebKit.
         page.setDefaultTimeout(10000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, theme));
@@ -95,7 +96,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             assert(await tabs.isHidden(), "overflowing tabs give way to the menu");
             assert(await picker.isVisible());
           }
-          const boxes = await view.locator(".sm-switch, .sm-filter, .sm-trash-btn").evaluateAll((els) => els.map((e) => {
+          const boxes = await view.locator(".sm-switch, .sm-filter, .sm-trash-btn, .sm-toset").evaluateAll((els) => els.map((e) => {
             const b = e.getBoundingClientRect();
             return { name: e.className, left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width };
           }));

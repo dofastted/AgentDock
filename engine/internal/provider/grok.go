@@ -28,7 +28,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -37,6 +36,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 )
@@ -182,14 +182,17 @@ var grokTools = map[string]bool{"function": true, "web_search": true, "x_search"
 // user's message, its sender and recipient said first (grokAgentMessage).
 func grokBody(body []byte) []byte { return grokShaped(body, false) }
 
-// grokPluginBody is grokBody for the Grok plugin, but a tool_choice "none"
-// with no tools stays: a request that turned tools off says so to the
-// plugin, which reads it before adding a tool of its own (x_search) and
-// leaves a lone tool_choice out before the request goes to Grok
-// (@magpie-community/opencode-grok-auth 0.1.18, #3110).
+// grokPluginBody is grokBody for the Grok plugin, but the tool_choice the
+// plugin reads stays: a lone "none" (a request that turned tools off says
+// so to the plugin, which reads it before adding a tool of its own
+// (x_search) and leaves a lone tool_choice out before the request goes to
+// Grok; @magpie-community/opencode-grok-auth 0.1.18, #3110), and an object
+// of a type Grok's backend doesn't take, an allowed_tools naming the
+// client's own tools among them, which the plugin reads the same way and
+// leaves out before Grok (#3153).
 func grokPluginBody(body []byte) []byte { return grokShaped(body, true) }
 
-func grokShaped(body []byte, keepNone bool) []byte {
+func grokShaped(body []byte, forPlugin bool) []byte {
 	if !bytes.Contains(body, []byte(`"tools"`)) && !bytes.Contains(body, []byte(`"reasoning"`)) && !bytes.Contains(body, []byte(`"tool_choice"`)) && !bytes.Contains(body, []byte(`"namespace"`)) && !bytes.Contains(body, []byte(`"agent_message"`)) {
 		return body
 	}
@@ -231,13 +234,17 @@ func grokShaped(body []byte, keepNone bool) []byte {
 			if flatCall(tc) {
 				dirty = true
 			}
-			if ty, _ := tc["type"].(string); !grokTools[ty] {
+			// a type the backend turns the request away over goes for the
+			// plugin to read, as the lone "none" does: it leaves an
+			// unsupported one out before Grok instead of adding x_search
+			// over it (#3153). The built-in is Grok's last stop.
+			if ty, _ := tc["type"].(string); !grokTools[ty] && !forPlugin {
 				delete(m, "tool_choice")
 				dirty = true
 			}
 		}
 	}
-	if tools, _ := m["tools"].([]any); len(tools) == 0 && !(keepNone && m["tool_choice"] == "none") {
+	if tools, _ := m["tools"].([]any); len(tools) == 0 && !(forPlugin && m["tool_choice"] == "none") {
 		if _, ok := m["tool_choice"]; ok {
 			delete(m, "tool_choice")
 			dirty = true
@@ -702,18 +709,18 @@ func runCLISignIn(s *signInFlow, what string, env []string, using bool, failed f
 // it couldn't reach, not a page to open: grok 1.0.46 behind a proxy it
 // can't get through prints "Error: error sending request for url
 // (https://auth.x.ai/oauth2/device/code): …" (𝕏 on Discord).
-var failedLine = regexp.MustCompile(`(?i)\berror\b`)
+var failedLine = lazyre.New(`(?i)\berror\b`)
 
 // linkWait is how long a login command has to print its link.
 var linkWait = 30 * time.Second
 
 // linkRest is a line that is nothing but more of a link: no spaces, only
 // what a URL holds.
-var linkRest = regexp.MustCompile(`^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$`)
+var linkRest = lazyre.New(`^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$`)
 
 // queryRest is what may still follow a link that already has its challenge
 // and uuid: the rest of a value, or more params.
-var queryRest = regexp.MustCompile(`^[A-Za-z0-9\-_%&=]+$`)
+var queryRest = lazyre.New(`^[A-Za-z0-9\-_%&=]+$`)
 
 // AgentUser is who an agent is signed in to itself, as its own files say,
 // for an agent whose vendor a plugin serves too; "" when not known.
@@ -729,4 +736,64 @@ func AgentUser(agent string) string {
 func GrokUser(home string) (string, bool) {
 	c, ok := readGrokCredential(home)
 	return c.Email, ok
+}
+
+// GrokFlatBody is a Responses body with Codex's namespaced functions flat
+// (namespace__name) and every function's parameters an object at the root,
+// the two things Grok's backend turns a request away over wherever it is
+// served (Copilot's grok-4.7, #4374), and nothing else: tool types, reasoning
+// and the rest go as they came. The model's call to a flat name is given its
+// namespace back by the gateway (namespacedIn).
+func GrokFlatBody(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"namespace"`)) && !bytes.Contains(body, []byte(`"anyOf"`)) && !bytes.Contains(body, []byte(`"oneOf"`)) && !bytes.Contains(body, []byte(`"allOf"`)) {
+		return body
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var m map[string]any
+	if dec.Decode(&m) != nil || m == nil {
+		return body
+	}
+	dirty := false
+	if tools, ok := m["tools"].([]any); ok {
+		var out []any
+		for _, t := range tools {
+			tm, _ := t.(map[string]any)
+			switch {
+			case tm != nil && tm["type"] == "namespace":
+				dirty = true
+				for _, f := range grokFlat(tm) {
+					if fm, ok := f.(map[string]any); ok {
+						objectRoot(fm)
+					}
+					out = append(out, f)
+				}
+			case tm != nil && tm["type"] == "function":
+				if objectRoot(tm) {
+					dirty = true
+				}
+				out = append(out, t)
+			default:
+				out = append(out, t)
+			}
+		}
+		m["tools"] = out
+	}
+	if tc, ok := m["tool_choice"].(map[string]any); ok && flatCall(tc) {
+		dirty = true
+	}
+	input, _ := m["input"].([]any)
+	for _, it := range input {
+		if im, ok := it.(map[string]any); ok && flatCall(im) {
+			dirty = true
+		}
+	}
+	if !dirty {
+		return body
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return b
 }

@@ -80,6 +80,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "skills"); } catch {} });
       const page = await ctx.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang, st));
       await page.goto("http://magpie.test/");
@@ -103,7 +104,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [], st = {};
         const { ctx, page, v } = await open(lang, width, st, errors);
         await v.locator(".lib-body:not(.lib-skel) .lib-row").first().waitFor();
-        await v.locator(".row-head button.lib-updall", { hasText: w.check }).click();
+        await v.locator(".lib-skillshead .lib-barmore").click(); // Check for updates is under ⋯ (library-bar-more)
+        await page.locator(".row-menu .rm-item.lib-check", { hasText: w.check }).click();
         await page.waitForFunction(() => !document.querySelector("#view-library .lib-updall.busy, #view-library .lib-updall[disabled]"));
         await page.waitForTimeout(200);
         assert.deepEqual(errors, []);
@@ -127,7 +129,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [], st = { undrawable: true };
         const { ctx, page, v } = await open(lang, width, st, errors);
         await v.locator(".lib-body:not(.lib-skel) .lib-row").first().waitFor();
-        await v.locator(".row-head button.lib-updall", { hasText: w.check }).click();
+        await v.locator(".lib-skillshead .lib-barmore").click(); // Check for updates is under ⋯ (library-bar-more)
+        await page.locator(".row-menu .rm-item.lib-check", { hasText: w.check }).click();
         await page.waitForTimeout(500);
         assert.deepEqual(errors, [], "no uncaught error");
         const s = page.locator("#status");

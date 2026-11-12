@@ -140,8 +140,9 @@ func TestStreamedByteCapSaysRequestTooLargeToPi(t *testing.T) {
 }
 
 // Every shape a stream already begun says a 413 in (#2533): the text names
-// request_too_large for Chat, Anthropic and Responses, and Chat's and
-// Anthropic's type is it; Gemini keeps its own status shape; a 413 that
+// request_too_large for Chat, Anthropic and Responses, Chat's and
+// Anthropic's type is it, and Responses' code is context_length_exceeded,
+// the one Codex compacts on; Gemini keeps its own status shape; a 413 that
 // says the context is too long stays context_length_exceeded.
 func TestStreamErrorByteCapInEveryShape(t *testing.T) {
 	const capped = "A: 413 Request Entity Too Large"
@@ -152,12 +153,13 @@ func TestStreamErrorByteCapInEveryShape(t *testing.T) {
 	}{
 		{provider.Chat, capped, "request_too_large", `"type":"request_too_large"`},
 		{provider.Anthropic, capped, "request_too_large", `"type":"request_too_large"`},
-		{provider.Responses, capped, "request_too_large", `"code":"server_error"`},
+		// Codex reconnects on server_error and compacts on this alone
+		{provider.Responses, capped, "request_too_large", `"code":"context_length_exceeded"`},
 		{provider.Gemini, capped, "", `"status"`},
 		{provider.Chat, "A: 413 prompt is too long: 300000 tokens > 200000 maximum", "", `"code":"context_length_exceeded"`},
 	} {
 		rec := httptest.NewRecorder()
-		streamError(rec, c.proto, http.StatusRequestEntityTooLarge, c.msg)
+		streamError(rec, c.proto, "a/m", http.StatusRequestEntityTooLarge, c.msg)
 		body := rec.Body.String()
 		if !strings.Contains(body, c.kind) {
 			t.Errorf("%s %q: want %s in %s", c.proto, c.msg, c.kind, body)
@@ -165,5 +167,89 @@ func TestStreamErrorByteCapInEveryShape(t *testing.T) {
 		if said := strings.Contains(body, "(request_too_large)"); said != (c.text != "") {
 			t.Errorf("%s %q: the text says request_too_large: %v, want %v: %s", c.proto, c.msg, said, c.text != "", body)
 		}
+	}
+}
+
+// A relay busy for a moment says so under a request-error status, and Pi,
+// judging by the text alone, ended the turn on it after one try, where the
+// same request a moment later was answered (#2372, zminds: Pi 1.3.0
+// stopped on "Concurrency limit exceeded for account, please retry later"
+// and retried once the text said 503). The words that say it may be asked
+// again are said in it; a request's own fault, an account out of credit
+// and a conversation too long are left as they were.
+func TestBusyRelaySaysItPasses(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		msg    string
+	}{
+		{400, "Concurrency limit exceeded for account, please retry later"},
+		{400, "Too many pending requests, please retry later"},
+		{400, "The service is temporarily unavailable. Please retry later."},
+		{422, "当前并发请求过多，请稍后重试"},
+	} {
+		if got := saysBusy(c.status, c.msg); !piRetries(got) || !strings.HasPrefix(got, c.msg) {
+			t.Errorf("%d %q is told %q", c.status, c.msg, got)
+		}
+		// in a stream already begun too
+		if got := saysPassing(c.status, saysBusy(c.status, c.msg)); !piRetries(got) {
+			t.Errorf("in a stream, %d %q is told %q", c.status, c.msg, got)
+		}
+	}
+	for _, c := range []struct {
+		status int
+		msg    string
+	}{
+		{400, "Invalid request parameters"},
+		{400, "insufficient balance, please retry later after topping up"},
+		{400, "Monthly usage limit reached, try again later"},
+		{400, "prompt is too long: please retry later with fewer messages"},
+		{401, "invalid api key, please retry later"},
+		{404, "model not found"},
+		{400, "Upstream rate limit exceeded, please retry later"},
+	} {
+		if got := saysBusy(c.status, c.msg); got != c.msg {
+			t.Errorf("%d %q is told %q", c.status, c.msg, got)
+		}
+	}
+}
+
+// Through a group whose every member is busy, before anything was sent
+// and in a stream already begun: what reaches the agent is a text Pi asks
+// again for. The relay's body is the one zminds' mock answered with.
+func TestGroupBusyRelaySaysItPasses(t *testing.T) {
+	old := retryPause
+	retryPause = time.Millisecond
+	t.Cleanup(func() { retryPause = old })
+	const busy = `{"message":"Concurrency limit exceeded for account, please retry later","type":"upstream_error"}`
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "whole", true: "stream"}[stream], func(t *testing.T) {
+			fresh(t)
+			a := &scripted{replies: []reply{{400, "application/json", busy}}}
+			b := &scripted{replies: []reply{{400, "application/json", busy}}}
+			scriptedOn(t, "a", provider.Chat, a)
+			scriptedOn(t, "b", provider.Chat, b)
+			if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered}); err != nil {
+				t.Fatal(err)
+			}
+			s := New()
+			body := `{"model":"group/g","messages":[{"role":"user","content":"hi"}]}`
+			if stream {
+				body = `{"model":"group/g","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+			}
+			_, raw := postAs(t, s, "", body)
+			if a.n == 0 || b.n == 0 {
+				t.Fatalf("the group didn't ask both members (%d, %d): %s", a.n, b.n, raw)
+			}
+			var said string
+			for _, line := range append([]string{raw}, strings.Split(raw, "\n")...) {
+				d, _ := strings.CutPrefix(line, "data: ")
+				if m := gjson.Get(d, "error.message"); m.Exists() {
+					said = m.String()
+				}
+			}
+			if !strings.Contains(said, "Concurrency limit exceeded") || !piRetries(said) {
+				t.Fatalf("the agent is told %q, which Pi doesn't ask again for: %s", said, raw)
+			}
+		})
 	}
 }

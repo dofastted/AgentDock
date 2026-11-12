@@ -10,7 +10,9 @@ var ModelKinds = modelKinds
 func Forget() {
 	mu.Lock()
 	values = map[string]string{}
+	used = map[string]uint64{}
 	shapes = map[string]string{}
+	scores = map[string]float64{}
 	reindexKnown()
 	mu.Unlock()
 	resetSent()

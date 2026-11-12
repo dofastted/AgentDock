@@ -29,10 +29,10 @@ func codexThreadOn(t *testing.T, dir, id, p string) string {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL, model TEXT)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL, model TEXT, updated_at INTEGER NOT NULL DEFAULT 0)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO threads VALUES (?, ?, ?, 'fake/m1')`, id, path, p); err != nil {
+	if _, err := db.Exec(`INSERT INTO threads (id, rollout_path, model_provider, model, updated_at) VALUES (?, ?, ?, 'fake/m1', ?)`, id, path, p, day.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -133,11 +133,13 @@ func TestCodexThreadsComeBackOffMagpie(t *testing.T) {
 				t.Errorf("thread %s on %q, want %q", id, p, want)
 			}
 		}
-		// CC Switch's provider set by hand: a thread left on magpie goes there
+		// CC Switch's provider set by hand: a thread left on magpie goes
+		// there, and so does OpenAI's, which Codex resumes there alone
+		// (lendOwn)
 		codexThreadOn(t, dir, before, "magpie")
 		os.WriteFile(path, []byte("model = \"gpt-5.4\"\nmodel_provider = \"custom\"\n"+table+"\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://relay.example/v1\"\n"), 0o644)
 		cx.Sync()
-		for id, want := range map[string]string{mine: "openai", theirs: "custom", before: "custom"} {
+		for id, want := range map[string]string{mine: "custom", theirs: "custom", before: "custom"} {
 			if p := codexRowOn(t, dir, id); p != want {
 				t.Errorf("thread %s on %q, want %q", id, p, want)
 			}

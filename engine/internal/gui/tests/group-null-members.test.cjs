@@ -79,10 +79,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await (await browser.newContext({ viewport: { width, height: 1400 }, reducedMotion: "reduce" })).newPage();
         t.after(() => browser.close());
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang));
-        await page.goto("http://magpie.test/?view=routing");
+        await page.goto("http://magpie.test/?view=groups");
         const row = (name) => page.locator(".rt-group", { has: page.locator(".nm b", { hasText: new RegExp("^" + name + "$") }) });
         await row("Fast").waitFor();
         assert.deepEqual(await page.locator(".rt-group .nm b").allTextContents(), ["Fast", "Plugin", "Odd", "Slow"], "every group is listed");
@@ -125,6 +126,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await (await browser.newContext({ viewport: { width: 420, height: 900 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang));

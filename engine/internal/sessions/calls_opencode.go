@@ -39,6 +39,9 @@ var ocCallList struct {
 
 // openCodeCallFiles are OpenCode's sessions as call sources.
 func openCodeCallFiles() []file {
+	if !Reads("opencode") {
+		return nil
+	}
 	path := openCodeDB()
 	if !fileExists(path) {
 		return openCodeJSONFiles(filepath.Join(OpenCodeDir(), "storage"))
@@ -56,7 +59,7 @@ func openCodeCallFiles() []file {
 		out = openCodeDBFilesIn("opencode", path, db, "COUNT(m.id) + COALESCE(SUM(m.time_updated), 0)")
 	})
 	for i := range out {
-		out[i].oc = nil // the handle is not kept; a read opens it again
+		out[i].w().oc = nil // the handle is not kept; a read opens it again
 	}
 	ocCallList.stamp, ocCallList.files = stamp, out
 	return append([]file(nil), out...)

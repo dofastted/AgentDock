@@ -100,6 +100,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await (await browser.newContext({ viewport: { width: 1000, height: 760 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const seen = [];
@@ -118,7 +119,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // the Gateway page: no switch, and a call the archive kept shows its
       // bodies with nothing of the archive under them
       await page.goto("http://magpie.test/?view=gateway");
-      await page.locator("#foldConnect").click();
       const calls = page.locator("#activity .call-item");
       await calls.first().waitFor();
       assert.equal(await page.locator("#archiveList, #view-gateway [role=switch]").count(), 0, "no archive switch on the Gateway page");

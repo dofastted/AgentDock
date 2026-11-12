@@ -37,7 +37,7 @@ func sideLogins(agent, ownUser string, usable func(savedLogin) bool) []sideLogin
 	// logins.json.lock all the same (#1665: every page's read lists a
 	// dozen agents' accounts, each a lock). logins.json is only ever
 	// replaced whole (writePrivate), so the read is one write's file.
-	ls := readLogins()
+	ls := sharedLogins() // only looked at: a change reads its own copy
 	if _, change := keepSideLogins(ls, agent, ownUser, true); change {
 		loginsMu.Lock()
 		ls, _ = keepSideLogins(readLogins(), agent, ownUser, false)
@@ -256,9 +256,36 @@ func switchSideLogin(agent, user string, ls []sideLogin) error {
 	})
 }
 
+// setSideLoginOn ticks an account on or off. First is only the gateway's
+// order here, so the first ticked off hands first to the next ticked
+// account (Rime_Nan on X: it could be ticked off only after dragging it
+// down the list); with no other ticked, it stays, as one account is used.
 func setSideLoginOn(agent, user string, on bool, ls []sideLogin) error {
 	if !on && strings.EqualFold(activeOf(ls), user) {
-		return fmt.Errorf("magpie uses %s first; put another account first to stop using it", user)
+		next := ""
+		for _, l := range ls {
+			if !l.Active && l.On && l.Lapsed == "" {
+				next = l.User
+				break
+			}
+		}
+		if next == "" {
+			return fmt.Errorf("%s is the only account in use; tick another to stop using it", user)
+		}
+		isNext := listedMatch(agent, next, ls)
+		return editListedLogin(agent, user, ls, func(saved []savedLogin, i int) ([]savedLogin, error) {
+			n := pickSaved(saved, isNext)
+			if n < 0 {
+				return nil, fmt.Errorf("no %s account %q", agent, next)
+			}
+			for j := range saved {
+				if saved[j].Agent == agent {
+					saved[j].First = j == n
+				}
+			}
+			saved[i].On = false
+			return saved, nil
+		})
 	}
 	return editListedLogin(agent, user, ls, func(saved []savedLogin, i int) ([]savedLogin, error) {
 		saved[i].On = on

@@ -55,7 +55,7 @@ func TestSessionsPage(t *testing.T) {
 		t.Fatalf("page %d, range %d", m.page, m.srange)
 	}
 	v := m.View()
-	for _, want := range []string{"5 sessions", " all ", "all models", "all folders", "11.9K tokens", "cache read 25.2K (67% hit)", "active 7m on 2 days",
+	for _, want := range []string{"5 sessions", " all ", "all models", "all folders", "11.9K tokens", "cache read 25.2K (68% hit)", "active 7m on 2 days",
 		"█", "Sep 20", "tokens · a day", "models", "gpt-6-astra", "claude-opus-5-5", "folders", "/work/app", "/work/it's", "M model", "f folder"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("missing %q in\n%s", want, v)
@@ -271,5 +271,23 @@ func TestSessionsListIsNotCutAtTheLimit(t *testing.T) {
 	}
 	if got := len(m.sessShown()); got < n {
 		t.Fatalf("the page shows %d sessions, want at least %d", got, n)
+	}
+}
+
+// Not asked yet (RustCats on X), the page lists nothing and says how to
+// allow an agent, where it would say none ran in the range.
+func TestSessionsNotAskedSaysHow(t *testing.T) {
+	sessionsHome(t)
+	if err := settings.SetSessionReads(func(*settings.SessionReads) *settings.SessionReads {
+		return &settings.SessionReads{}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := press(t, model{w: 220, h: 40, srange: 1}, "5", "A")
+	if n := len(m.sessShown()); n != 0 {
+		t.Fatalf("not asked, %d sessions read", n)
+	}
+	if v := m.View(); !strings.Contains(v, "magpie sessions read on all") {
+		t.Errorf("the empty page doesn't say how to allow an agent:\n%s", v)
 	}
 }

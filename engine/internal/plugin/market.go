@@ -15,9 +15,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/ghtoken"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/source"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -30,17 +34,27 @@ import (
 //go:embed market.json
 var builtinMarket []byte
 
+// builtinParsed is the built-in copy, parsed once; shared, so only read.
+var builtinParsed = sync.OnceValue(func() []Listing {
+	l, _ := parseMarket(builtinMarket)
+	return l
+})
+
 // MarketURL is where the list is kept; MAGPIE_PLUGIN_MARKET moves it, and
 // "off" keeps to the built-in copy.
 const MarketURL = "https://raw.githubusercontent.com/magpie-community/plugins/main/registry.json"
 
-// Listing is a plugin the market suggests.
+// Listing is a plugin the market suggests. One not Community is an
+// author's own package the list names, published from their repository
+// (the owner on magpie-community/plugins#479: PinK, WispTerm): the page
+// shows it to a search alone, under its publisher; it is never browsed,
+// suggested as an agent or called by a short name.
 type Listing struct {
 	Package   string            `json:"package"`
 	Name      string            `json:"name"`
 	Icon      string            `json:"icon,omitempty"`
 	Providers []string          `json:"providers,omitempty"` // OpenCode's ids of those it signs in to
-	Community bool              `json:"community,omitempty"` // written by magpie's community
+	Community bool              `json:"community,omitempty"` // written by magpie's community; see Listing
 	Replaces  string            `json:"replaces,omitempty"`  // the built-in subscription it does the work of
 	Kind      string            `json:"kind,omitempty"`      // "middleware" for gateway middleware, "agent" for an agent, "tools" for tools alone, "page" for a page alone; none for a provider
 	Summary   map[string]string `json:"summary,omitempty"`   // by language: en, zh
@@ -147,11 +161,22 @@ func InfoCached(names []string) map[string]NPM {
 	c := npmCached()
 	out := map[string]NPM{}
 	for _, n := range names {
-		if e, ok := c[n]; ok {
+		if e, ok := c[n]; ok && !e.missingStale(time.Hour) {
 			out[n] = e.Info
 		}
 	}
 	return out
+}
+
+// missingStale is whether e is "not on npm" said over age ago: unknown
+// now, not missing. A package only the community repo's dist branch has
+// was kept as missing by builds before v0.1.2413 whenever the branch's
+// read was cut off (zhudabao8433 on Discord: PowerContext, installable the
+// day before, read Coming soon), and an ask that still can't read the
+// branch leaves that answer standing; a page told "unknown" offers
+// Install instead of a Coming soon nothing has confirmed.
+func (e npmEntry) missingStale(age time.Duration) bool {
+	return e.Info.Version == "" && time.Since(e.At) >= age
 }
 
 func marketCache() string { return filepath.Join(appdir.Cache(), "plugin-market.json") }
@@ -163,9 +188,11 @@ func parseMarket(b []byte) ([]Listing, error) {
 	}
 	out := r.Plugins[:0]
 	for _, l := range r.Plugins {
-		// magpie's community's alone: others' OpenCode plugins weren't
-		// written against magpie's sign-ins, and are found by a search
-		if l.Package != "" && pkgName.MatchString(l.Package) && l.Community {
+		// an author's own package is kept too, marked as not the
+		// community's (Community false): the page shows it to a search
+		// alone, and only the community's are browsed, suggested as
+		// agents or called by a short name (Community)
+		if l.Package != "" && pkgName.MatchString(l.Package) {
 			if l.Name == "" {
 				l.Name = l.Package
 			}
@@ -176,6 +203,17 @@ func parseMarket(b []byte) ([]Listing, error) {
 		return nil, errors.New("the list has no plugins")
 	}
 	return out, nil
+}
+
+// Community is the listings of l magpie's community wrote, in l's order.
+func Community(l []Listing) []Listing {
+	out := []Listing{}
+	for _, x := range l {
+		if x.Community {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // Market is the list of plugins magpie suggests: fetched at most every six
@@ -247,6 +285,8 @@ func fetchJSONFaithful(ctx context.Context, u string, limit int64) ([]byte, erro
 }
 
 func fetchJSONFrom(ctx context.Context, u string, limit int64, do func(*http.Client, *http.Request) (*http.Response, error)) ([]byte, error) {
+	// through plugin downloads' proxy, where Settings sets one
+	ctx = netproxy.Downloads(ctx)
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
@@ -310,6 +350,12 @@ func npmPath(name string) string { return strings.Replace(url.PathEscape(name), 
 // its answer, when it comes, is kept for the next time. A package npm
 // doesn't have has no Version.
 func Info(ctx context.Context, names []string) map[string]NPM {
+	return infoWithin(ctx, names, time.Hour)
+}
+
+// infoWithin is Info asking npm of each package it last answered for over
+// age ago; 0 asks of every one.
+func infoWithin(ctx context.Context, names []string, age time.Duration) map[string]NPM {
 	out := map[string]NPM{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -329,8 +375,11 @@ func Info(ctx context.Context, names []string) map[string]NPM {
 		asked[n] = true
 		e, hit := cache[n]
 		if hit {
-			out[n] = e.Info // what it said last, until it says otherwise
-			if time.Since(e.At) < time.Hour {
+			// what it said last, until it says otherwise
+			if !e.missingStale(time.Hour) {
+				out[n] = e.Info
+			}
+			if time.Since(e.At) < age {
 				continue
 			}
 		}
@@ -386,7 +435,9 @@ type npmLatest struct {
 		Name string `json:"name"`
 	} `json:"_npmUser"`
 	Magpie struct {
-		Icon string `json:"icon"`
+		Icon    string          `json:"icon"`
+		Name    string          `json:"name"`
+		Summary json.RawMessage `json:"summary"`
 	} `json:"magpie"`
 }
 
@@ -442,7 +493,7 @@ func npmAsk(ctx context.Context, name string) (NPM, error) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		b, err := fetchJSON(ctx, npmRegistry+"/"+npmPath(name)+"/latest", 1<<20)
+		b, err := fetchNPM(ctx, name, "/"+npmPath(name)+"/latest", 1<<20)
 		if err != nil {
 			latestErr = err
 			return
@@ -470,8 +521,15 @@ func npmAsk(ctx context.Context, name string) (NPM, error) {
 	// a @magpie-community package npm doesn't have yet, or has an older
 	// version of, is as the community repo's dist branch has it, which
 	// magpie installs it from (dist.go)
-	if d, ok := distInfo(ctx, name); ok && (latestErr != nil || update.Newer(d.Version, info.Version)) {
+	d, ok, derr := distInfo(ctx, name)
+	if ok && (latestErr != nil || update.Newer(d.Version, info.Version)) {
 		info, latestErr = d, nil
+	}
+	// npm not having it is "missing" only once the dist branch has
+	// said it hasn't either: the branch not read leaves it unknown, and
+	// it is asked again, not kept as missing for an hour (ferock)
+	if errors.Is(latestErr, errNotFound) && derr != nil {
+		latestErr = derr
 	}
 	info.Weekly = weekly
 	if latestErr != nil {
@@ -549,7 +607,12 @@ func Search(ctx context.Context, q string) ([]Hit, error) {
 // (given their name and keywords, lowercased, and the keywords).
 func searchNPM(ctx context.Context, text string, keep func(string, []string) bool) ([]Hit, error) {
 	v := url.Values{"text": {text}, "size": {"30"}}
-	b, err := fetchJSON(ctx, npmRegistry+"/-/v1/search?"+v.Encode(), 4<<20)
+	b, err := fetchNPM(ctx, "", "/-/v1/search?"+v.Encode(), 4<<20)
+	if _, _, official := npmBase(""); err != nil && !official {
+		// a registry of the user's that has no search (a private one):
+		// npm's own has the plugins' packages
+		b, err = fetchJSON(ctx, npmRegistry+"/-/v1/search?"+v.Encode(), 4<<20)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -600,17 +663,33 @@ type Page struct {
 // Readme is the package's README, as npm has it, or — for a plugin added
 // from a folder on this computer or a git repository — the one its folder
 // carries.
-func Readme(ctx context.Context, name string) (Page, error) {
+func Readme(ctx context.Context, name string) (Page, error) { return ReadmeIn(ctx, name, "") }
+
+// ReadmeIn is Readme in the reader's language (the UI's, "zh-CN", "ja"):
+// the README a package carries named for it (README.zh-CN.md, README_zh.md
+// and the like) in place of its README.md, from its folder where it is
+// installed and from npm's or GitHub's copy where it isn't. Without one,
+// or with lang "" or English, the README.md.
+func ReadmeIn(ctx context.Context, name, lang string) (Page, error) {
 	if IsGit(name) {
 		// one not installed yet (a repository tagged magpie-plugin): its
 		// README as GitHub has it
 		if _, err := os.Stat(Target(name)); err != nil {
 			if repo := githubRepo(name); repo != "" {
+				if r, ok := cachedReadme(ctx, name); ok {
+					return Page{Readme: r}, nil
+				}
+				if r, ok := githubLangReadme(ctx, repo, lang); ok {
+					return Page{Readme: r}, nil
+				}
 				return githubReadme(ctx, repo)
 			}
 		}
 	}
 	if IsPath(name) || IsGit(name) {
+		if p, ok := folderLangReadme(Target(name), lang); ok {
+			return p, nil
+		}
 		return folderReadme(Target(name))
 	}
 	if !pkgName.MatchString(name) {
@@ -618,25 +697,47 @@ func Readme(ctx context.Context, name string) (Page, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	b, err := fetchJSON(ctx, npmRegistry+"/"+npmPath(name), 32<<20)
+	if p, ok := folderLangReadme(Target(name), lang); ok {
+		return p, nil // installed: its own file, as it was installed
+	}
+	// the copy the community repo keeps, before npm, which a human check
+	// can stand in front of
+	if r, ok := cachedReadme(ctx, name); ok {
+		return Page{Readme: r}, nil
+	}
+	b, err := fetchNPM(ctx, name, "/"+npmPath(name), 32<<20)
 	if err != nil {
 		// one npm doesn't have (yet): the README the community repo's
 		// dist branch packed with it
-		if d := distPkg(ctx, name); d != nil && d.Readme != "" {
+		d, derr := distPkg(ctx, name)
+		if d != nil && d.Readme != "" {
 			return Page{Readme: d.Readme}, nil
+		}
+		if errors.Is(err, errNotFound) && derr != nil {
+			return Page{}, derr // not known to be missing
 		}
 		return Page{}, err
 	}
 	var d struct {
-		Readme string               `json:"readme"`
-		Time   map[string]time.Time `json:"time"`
+		Readme   string               `json:"readme"`
+		Time     map[string]time.Time `json:"time"`
+		DistTags map[string]string    `json:"dist-tags"`
 	}
 	if err := json.Unmarshal(b, &d); err != nil {
-		return Page{}, err
+		// a page that isn't npm's entry (a human check, a portal)
+		return Page{}, errors.New("the answer isn't the package's page; npm may be asking for a human check")
 	}
 	const most = 200 << 10
 	if len(d.Readme) > most {
 		d.Readme = d.Readme[:most]
+	}
+	// the registry's entry holds the README.md alone; one named for the
+	// reader's language is in the package's files, which only the public
+	// registry's copy is asked of jsDelivr for
+	if _, _, official := npmBase(name); official {
+		if r, ok := npmLangReadme(ctx, name, d.DistTags["latest"], lang); ok {
+			d.Readme = r
+		}
 	}
 	return Page{Readme: d.Readme, Updated: d.Time["modified"]}, nil
 }
@@ -696,20 +797,87 @@ func Installed(spec string) string {
 // gives in magpie.icon, as ownIcon takes one: the plugin's own, for its
 // row, apart from those its providers give themselves in the auth hook
 // (#1775). "" for none, or a plugin that is one file.
-func InstalledIcon(spec string) string {
+func InstalledIcon(spec string) string { return ownIcon(installedOwn(spec).Icon) }
+
+// InstalledName is the name the installed plugin spec's package.json
+// gives itself in magpie.name, for its row when the community's list
+// doesn't name it: a package's dependency key has to be ASCII for Bun,
+// so one installed from git, or from npm outside the list, had no other
+// way to show a readable name (#4558). It is the package's own word,
+// never used to resolve a name; "" for none, one that isn't one short
+// line, or a plugin that is one file.
+func InstalledName(spec string) string { return ownName(installedOwn(spec).Name) }
+
+// installedOwn is the magpie block of the installed plugin spec's
+// package.json, as the package says it: zero for none, or one that
+// can't be read.
+func installedOwn(spec string) (own struct {
+	Icon string `json:"icon"`
+	Name string `json:"name"`
+}) {
 	b, err := os.ReadFile(filepath.Join(Target(spec), "package.json"))
 	if err != nil {
-		return ""
+		return own
 	}
 	var p struct {
-		Magpie struct {
-			Icon string `json:"icon"`
-		} `json:"magpie"`
+		Magpie json.RawMessage `json:"magpie"`
 	}
-	if json.Unmarshal(b, &p) != nil {
+	if json.Unmarshal(b, &p) != nil || json.Unmarshal(p.Magpie, &own) != nil {
+		own.Icon, own.Name = "", ""
+	}
+	return own
+}
+
+// ownName is a package's magpie.name as a row may show it: one line of
+// at most 80 bytes, with no control or format characters (a bidi
+// override would make it read as another name); "" otherwise.
+func ownName(said string) string {
+	n := strings.TrimSpace(said)
+	if n == "" || len(n) > 80 || !utf8.ValidString(n) {
 		return ""
 	}
-	return ownIcon(p.Magpie.Icon)
+	for _, r := range n {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ""
+		}
+	}
+	return n
+}
+
+// ownSummary is what a package.json's magpie.summary says of the package,
+// by language ("en", "zh"), as its card shows it (#3608): a sentence a
+// language, trimmed, of at most 300 bytes on one line, with nothing that
+// could make it read as other text (control or format characters, a bidi
+// override); a language that says anything else is left out, and nil is
+// none. Not an object of strings at all is none too, never a failed read
+// of the whole package.json.
+func ownSummary(raw json.RawMessage) map[string]string {
+	var said map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &said) != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for lang, v := range said {
+		s, ok := v.(string)
+		l, t := strings.TrimSpace(lang), strings.TrimSpace(s)
+		if !ok || l == "" || len(l) > 12 || t == "" || len(t) > 300 || !utf8.ValidString(t) || !utf8.ValidString(l) {
+			continue
+		}
+		bad := false
+		for _, r := range l + t {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				bad = true
+				break
+			}
+		}
+		if !bad {
+			out[l] = t
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Upgrade installs the newest version of one plugin: npm's, or its git
@@ -718,6 +886,9 @@ func Upgrade(ctx context.Context, name string) error {
 	for _, e := range Load().Plugins {
 		if (Name(e.Spec) == name || e.Spec == name) && IsGit(e.Spec) {
 			err := reinstall(ctx, e.Spec)
+			if err == nil {
+				settleWaiting()
+			}
 			Restart()
 			return err
 		}
@@ -740,11 +911,12 @@ func Icon(spec, id string) string {
 	l := marketList
 	marketMu.Unlock()
 	if l == nil {
-		if b, err := os.ReadFile(marketCache()); err == nil {
-			l, _ = parseMarket(b)
-		}
+		// parsed once for each copy, not for each plugin each look: the
+		// Providers page parsed it for every plugin's row each poll, 13 MB
+		// of what twenty polls allocated with real accounts
+		l, _ = filememo.Read("plugin-market", marketCache(), parseMarket)
 		if l == nil {
-			l, _ = parseMarket(builtinMarket)
+			l = builtinParsed()
 		}
 	}
 	pkg := Name(spec)
@@ -756,7 +928,7 @@ func Icon(spec, id string) string {
 	if ic, ok := otherIcons[pkg]; ok {
 		return ic
 	}
-	for _, x := range l {
+	for _, x := range Community(l) {
 		for _, p := range x.Providers {
 			if p == id && x.Icon != "" {
 				return x.Icon

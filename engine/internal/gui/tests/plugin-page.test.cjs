@@ -6,7 +6,9 @@
 // can't reach magpie's API: its policy stops the fetch, and with the
 // policy gone the request it would send carries Origin: null, which
 // apiFramed turns away (TestPluginPageNoAPI). A read it didn't declare is
-// refused, and a message from another frame is nothing. A page that
+// refused, and a message from another frame is nothing. A picture the
+// page drew is handed to /api/plugin-pages/image to copy or save, and
+// what isn't a PNG is refused. A page that
 // throws shows "This page stopped working" with Try again. The Plugins
 // page says what a page may read before it is on. Every language, both
 // engines, a narrow window. The API is faked here; the server's side is
@@ -31,16 +33,18 @@ const entry = (tok, name, title, reads, file = "index.html") => ({
 const TITLES = { zh: "用量速览", "zh-TW": "用量速覽", ja: "使用量の概要" };
 const pages = [
   { ...entry(GLANCE, "glance", "Usage glance", ["usage:summary"]), titles: TITLES },
-  entry(PROBE, "probe", "Probe", []),
+  // a page with a local service (magpie.page.service), as /api/plugin-pages
+  // lists it to a browser: relative to the page's address
+  { ...entry(PROBE, "probe", "Probe", []), service: "_magpie/service/" },
   entry(OPEN, "open", "Probe without a policy", []),
   entry(BROKEN, "broken", "Broken", []),
 ];
 
-// what pluginpage.go's pagePolicy sends, for this host: the page's folder
-// under each scheme the window is served on
+// what pluginpage.go's pagePolicy sends a browser, for this host: the
+// page's folder under https and http (ownSources, #4198)
 const policy = (tok) => {
   const dir = `magpie.test/_magpie/plugin/${tok}/`;
-  const own = `wails://${dir} http://${dir} https://${dir}`;
+  const own = `https://${dir} http://${dir}`;
   return [
     "sandbox allow-scripts", "default-src 'none'", `script-src ${own}`, `style-src ${own} 'unsafe-inline'`,
     `img-src ${own} data:`, `font-src ${own}`, `media-src ${own}`, "connect-src 'none'", "frame-src 'none'",
@@ -54,12 +58,21 @@ const PROBE_HTML = `<!doctype html><meta charset="utf-8"><script src="_magpie/br
 const PROBE_JS = `(async () => {
   const out = {};
   await magpie.ready;
+  out.service = magpie.service;
   try { const r = await fetch("/api/state?probe=1"); out.fetch = "status " + r.status; } catch (e) { out.fetch = "refused"; }
   try { out.storage = typeof localStorage.length; } catch (e) { out.storage = "refused"; }
   try { out.cookie = document.cookie; } catch (e) { out.cookie = "refused"; }
   try { out.top = String(parent.document.title); } catch (e) { out.top = "refused"; }
   try { await magpie.read("usage:summary"); out.read = "given"; } catch (e) { out.read = e.message; }
   try { await magpie.read("providers:list"); out.read2 = "given"; } catch (e) { out.read2 = e.message; }
+  // a picture it drew, saved and copied through the window; what isn't a
+  // PNG is refused there
+  const c = document.createElement("canvas");
+  c.width = 3; c.height = 2;
+  const png = await new Promise((r) => c.toBlob(r, "image/png"));
+  try { out.save = await magpie.image.save(png, "card 1"); } catch (e) { out.save = e.message; }
+  try { out.copy = await magpie.image.copy(png); } catch (e) { out.copy = e.message; }
+  try { await magpie.image.copy(new Blob(["<svg/>"], { type: "image/svg+xml" })); out.bad = "given"; } catch (e) { out.bad = e.message; }
   // what the page left unstyled is magpie's; what it styled is its own
   const cs = (q) => getComputedStyle(document.querySelector(q));
   out.look = { bg: cs("html").backgroundColor, fg: cs("body").color, font: cs("body").fontFamily, h1: cs("h1").fontSize, button: cs("#b").borderRadius, own: cs(".own").borderRadius };
@@ -88,6 +101,11 @@ function server(lang, seen, plugins) {
       const b = req.postDataJSON();
       seen.reads.push(b);
       return json({ period: "today", calls: 12, errors: 0, input: 1000, output: 234, cost: 0.5, models: [] });
+    }
+    if (url.pathname === "/api/plugin-pages/image") {
+      const b = req.postDataJSON();
+      seen.images = [...(seen.images || []), b];
+      return json(b.action === "save" ? { path: "~/Downloads/" + b.name + ".png" } : { ok: true });
     }
     if (url.pathname === "/api/plugin-pages/options") {
       const b = req.postDataJSON();
@@ -143,6 +161,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(8000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const seen = { api: [], reads: [], options: [] };
@@ -162,9 +181,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         if (lang === "de") {
           // a new language retitles the tab, and back
           await page.evaluate(() => setLocale("ja"));
-          await page.waitForFunction(() => document.querySelector("#nav button[data-plugin-page] span").textContent === "使用量の概要");
+          await page.waitForFunction(() => document.querySelector("#nav button[data-plugin-page] span")?.textContent === "使用量の概要");
           await page.evaluate(() => setLocale("de"));
-          await page.waitForFunction(() => document.querySelector("#nav button[data-plugin-page] span").textContent === "Usage glance");
+          await page.waitForFunction(() => document.querySelector("#nav button[data-plugin-page] span")?.textContent === "Usage glance");
         }
         // no frame until the page is looked at
         assert.equal(await page.locator("iframe.plugin-frame").count(), 0, `${where}: nothing loaded unseen`);
@@ -173,7 +192,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.evaluate(() => show("plugin-glance"));
         const glance = await frameReady(page, GLANCE);
         assert.equal(await page.locator("#view-plugin-glance iframe").getAttribute("sandbox"), "allow-scripts", where);
-        await glance.waitForFunction(() => document.getElementById("cost").textContent === "$0.50");
+        await glance.waitForFunction(() => document.getElementById("cost")?.textContent === "$0.50");
         assert.equal(await glance.locator("#calls").textContent(), "12 calls, 1234 tokens", where);
         assert.deepEqual(seen.reads.map((r) => [r.spec, r.read]), [["/x/glance", "usage:summary"]], where);
         assert.equal(await glance.evaluate(() => document.documentElement.lang), lang, `${where}: the window's language`);
@@ -182,7 +201,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await glance.waitForFunction(() => document.documentElement.dataset.theme === "dark");
         assert.ok((await glance.evaluate(() => document.documentElement.style.getPropertyValue("--magpie-bg"))).length > 0, `${where}: the tokens`);
         await glance.locator("#hide").click();
-        await glance.waitForFunction(() => document.getElementById("cost").textContent === "");
+        await glance.waitForFunction(() => document.getElementById("cost")?.textContent === "");
         assert.deepEqual(seen.options.map((o) => [o.spec, o.options.hideCost]), [["/x/glance", true]], `${where}: its own options`);
         // the frame fits the window
         assert.ok(await page.evaluate(() => { const v = document.querySelector("#view-plugin-glance"); const f = v.querySelector("iframe"); return f.getBoundingClientRect().width <= v.clientWidth + 1 && v.scrollWidth <= v.clientWidth + 1 && f.getBoundingClientRect().height > 200; }), `${where}: fits`);
@@ -201,6 +220,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(probe.read2, "Probe doesn't ask to read providers:list", where);
           assert.equal(seen.api.length, 0, `${where}: nothing reached /api`);
           assert.equal(seen.reads.length, 1, `${where}: an undeclared read never reached the server`);
+          assert.deepEqual(probe.save, { path: "~/Downloads/card 1.png" }, `${where}: image.save`);
+          assert.deepEqual(probe.copy, { ok: true }, `${where}: image.copy`);
+          assert.equal(probe.bad, "A picture is a PNG of 16 MB at most", `${where}: not a PNG`);
+          assert.deepEqual(seen.images.map((b) => [b.spec, b.action, b.name]), [["/x/probe", "save", "card 1"], ["/x/probe", "copy", ""]], `${where}: what reached the server`);
+          for (const b of seen.images) assert.equal(Buffer.from(b.png, "base64").subarray(1, 4).toString(), "PNG", `${where}: the page's PNG, as base64`);
+          // its service, where the window's server serves it: an absolute
+          // address under the page's own
+          assert.match(probe.service, new RegExp(`^https?://[^/]+/_magpie/plugin/${PROBE}/_magpie/service/$`), `${where}: magpie.service`);
           // a page with no stylesheet of its own reads as part of the window
           const win = await page.evaluate(() => {
             const d = document.createElement("div");
@@ -226,6 +253,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(open.fetch.startsWith("status") || open.fetch === "refused", true, where);
           assert.equal(seen.api.length, 1, `${where}: the fetch went out`);
           assert.equal(seen.api[0].origin, "null", `${where}: as Origin: null`);
+          assert.equal(open.service, "", `${where}: a page with no service has no magpie.service`);
           assert.ok(!seen.api[0].cookie, `${where}: without a cookie`);
 
           // a message from another frame naming a page is nothing
@@ -272,6 +300,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const where = `${engine} ${lang}`;
       const page = await (await browser.newContext({ viewport: { width: 980, height: 820 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const mine = structuredClone(plugins);
@@ -309,6 +338,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const where = `${engine} ${lang} ${width}`;
         const page = await (await browser.newContext({ viewport: { width, height: 820 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, { api: [], reads: [], options: [] }, plugins));

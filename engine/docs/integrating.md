@@ -61,7 +61,27 @@ it takes images. List them from there rather than shipping a list: the
 user adds and removes providers in magpie. Reasoning is asked in your
 API's own field (`reasoning_effort`, `reasoning.effort`, Anthropic's
 `thinking` or `output_config.effort`). `?format=text` gives the ids one a
-line.
+line. The list holds chat models only. Ask for image and video models
+with `?kind=image,video` (or `?kind=chat,image,video`, or `?kind=all`).
+Each of them is marked `"kind": "image"` or `"kind": "video"` and goes to
+`/v1/images/generations` or `/v1/videos`, never to a chat route.
+
+**A vendor's own fields.** `/v1/images/generations` and `/v1/videos`
+take OpenAI's fields and pass the others on to a vendor that takes them:
+Volcengine Ark's `content` (reference video and audio, `draft_task`),
+`ratio`, `resolution`, `duration: -1`, `tools`, `watermark`,
+`sequential_image_generation` and the rest. A video's answer carries
+Ark's own fields too (`content.last_frame_url`, `usage`, `resolution`).
+For the rest of a vendor's API use
+`/v1/magpie/native/<provider>/<path>`: GET, POST, PUT, PATCH or DELETE,
+with `<path>` joined to the provider's host (not its base URL), sent and
+answered in the vendor's own shape on the user's key for that provider,
+a stream as it comes. So Ark's task list is `GET
+/v1/magpie/native/ark/api/v3/contents/generations/tasks`. It serves a
+provider added with an API key, not a subscription or sign-in. Ark's
+short paths (`images/generations`, `contents/generations/tasks[/<id>]`)
+still work under the key's base. It takes the same gateway key as every
+route, and a key held to models, accounts or a budget is refused it.
 
 **Optional.** Send `X-Magpie-Session: <id>` with a conversation's requests
 and `GET /v1/magpie/route?session=<id>` says which model a routing group
@@ -74,7 +94,7 @@ subagent's call). They answer only this machine, or another with a gateway
 key; a key held to a budget, models or accounts sees its own calls and
 routes alone, and is refused the quotas unless its owner lets it see
 those of what it may use (`magpie gateway-key quotas <id> on`, #2216;
-its own limit is `GET /v1/magpie/limit`).
+its own limit, and what holds it, is `GET /v1/magpie/limit`).
 Calls your app makes to its vendor itself can be reported with `POST
 /v1/magpie/usage/requests` (one record or up to 5000 a post, in
 `usage.jsonl`'s shape, each with a `rid`; past times are kept, so a
@@ -120,8 +140,9 @@ app offers decides its shape:
   the row then asks the user to confirm in your app without claiming an
   import status. magpie writes nothing of yours. This suits an app that keeps
   its providers in a database or encrypted.
-- **Your app has a local API while it runs** (Alma, at `localhost:23001`):
-  magpie adds itself as a provider and sets the default model through it.
+- **Your app has a local API while it runs** (Alma, at `localhost:23001`;
+  Shelley, on its Unix socket): magpie adds itself as a provider and sets the
+  default model through it.
 
 A pull request needs: the adapter and its registration, `UA` (what your
 User-Agent begins with, lower-case) so Usage knows your calls, an icon in
@@ -141,7 +162,7 @@ kinds ([plugin guide](https://usemagpie.ai/docs/plugins)):
   source of models, such as a subscription magpie doesn't sign in to
   itself. They sign in, list models and make requests.
 - **Gateway middleware**: rewrites requests and replies as they pass
-  (`onRequest`, `onProvider`, `onEvent`, `onResponse`).
+  (`onRequest`, `onAccount`, `onProvider`, `onEvent`, `onResponse`).
 
 A plugin can't add a row to the Agents page or write another app's
 config, so it is not how an app registers itself.

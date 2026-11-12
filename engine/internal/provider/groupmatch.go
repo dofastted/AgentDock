@@ -12,14 +12,18 @@ package provider
 // again. Every reader — the gateway's routing, /v1/models, rules, the
 // Routing view, the TUI and the CLI — gets the group from there, so all of
 // them see the same members: those the user named, in their order, then
-// those the patterns match, in the catalog's order. A model named and
-// matched both keeps the place it was named at.
+// those the patterns match, in the catalog's order, or in the order the
+// user put them in (Group.Placed). A model named and matched both keeps
+// the place it was named at.
 
 import (
 	"fmt"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
+
+	"github.com/dlclark/regexp2"
 )
 
 // RegexpPrefix starts a member that is a regular expression over the whole
@@ -35,26 +39,50 @@ func IsPattern(s string) bool {
 	return strings.HasPrefix(s, RegexpPrefix) || strings.Contains(s, "*")
 }
 
+// matcher is a compiled pattern.
+type matcher interface{ MatchString(string) bool }
+
+// patternTimeout bounds one backtracking match over one id: a pattern that
+// takes longer matches nothing rather than holding the catalog's read.
+const patternTimeout = 100 * time.Millisecond
+
+// backtracking is a pattern Go's regexp can't read, read by regexp2.
+type backtracking struct{ x *regexp2.Regexp }
+
+func (b backtracking) MatchString(s string) bool {
+	ok, err := b.x.MatchString(s)
+	return err == nil && ok
+}
+
 // compilePattern is a pattern as the regexp it means. A glob's "*" is any
 // run of characters, "/" too, and the rest is the id as spelt, in any case
 // ("openrouter/*:free", "*-free"); a regexp must match the whole id, in any
 // case as a glob does unless it says "(?-i)" (usrname1833 on Discord).
-func compilePattern(p string) (*regexp.Regexp, error) {
+func compilePattern(p string) (matcher, error) {
 	if re, ok := strings.CutPrefix(p, RegexpPrefix); ok {
 		if strings.TrimSpace(re) == "" {
 			return nil, fmt.Errorf("%q has no regular expression after %s", p, RegexpPrefix)
 		}
 		x, err := regexp.Compile("(?i)^(?:" + re + ")$")
-		if err != nil {
+		if err == nil {
+			return x, nil
+		}
+		// What Go's regexp can't read, a lookahead most often (maer8824 on
+		// Discord: "re:(?!.*flash).*glm.*", glm but not flash), is read as
+		// the GUI's preview reads it, with backtracking: a pattern Go reads
+		// is never read this way, so its matches stay what they were.
+		y, err2 := regexp2.Compile("(?i)^(?:"+re+")\\z", regexp2.None)
+		if err2 != nil {
 			return nil, fmt.Errorf("%q is not a regular expression magpie can read: %v", p, err)
 		}
-		return x, nil
+		y.MatchTimeout = patternTimeout
+		return backtracking{y}, nil
 	}
 	parts := strings.Split(p, "*")
 	for i, s := range parts {
 		parts[i] = regexp.QuoteMeta(s)
 	}
-	return regexp.Compile("(?i)^" + strings.Join(parts, ".*") + "$")
+	return regexp.MustCompile("(?i)^" + strings.Join(parts, ".*") + "$"), nil
 }
 
 // CleanPatterns are a group's patterns as they are kept: trimmed, each
@@ -91,7 +119,7 @@ func matchesIn(entries []Entry, g Group) []string {
 	if len(g.Match) == 0 {
 		return nil
 	}
-	var res []*regexp.Regexp
+	var res []matcher
 	for _, p := range g.Match {
 		if x, err := compilePattern(p); err == nil {
 			res = append(res, x)
@@ -107,7 +135,7 @@ func matchesIn(entries []Entry, g Group) []string {
 		if named[e.ID] || slices.Contains(out, e.ID) {
 			continue
 		}
-		if slices.ContainsFunc(res, func(x *regexp.Regexp) bool { return x.MatchString(e.ID) }) {
+		if slices.ContainsFunc(res, func(x matcher) bool { return x.MatchString(e.ID) }) {
 			out = append(out, e.ID)
 		}
 	}
@@ -115,14 +143,90 @@ func matchesIn(entries []Entry, g Group) []string {
 }
 
 // withMatches is a stored group as it is read: the members its patterns
-// match now after those it names (Matched says which they are).
+// match now after those it names (Matched says which they are), or in
+// the order the user put them in (Placed).
 func withMatches(entries []Entry, g Group) Group {
 	if len(g.Match) == 0 {
 		return g
 	}
 	g.Matched = matchesIn(entries, g)
-	g.Members = append(slices.Clone(g.Members), g.Matched...)
+	g.Members = placedIn(append(slices.Clone(g.Members), g.Matched...), g.Placed)
 	return g
+}
+
+// placedIn are members in the order placed has them: those it names
+// first, as it has them, then the rest in their own order — a model a
+// pattern matches since it was placed, at the end. One placed that isn't
+// a member now is left out.
+func placedIn(members, placed []string) []string {
+	if len(placed) == 0 {
+		return members
+	}
+	in := make(map[string]bool, len(members))
+	for _, m := range members {
+		in[m] = true
+	}
+	out := make([]string, 0, len(members))
+	for _, p := range placed {
+		if in[p] {
+			out = append(out, p)
+			delete(in, p)
+		}
+	}
+	for _, m := range members {
+		if in[m] {
+			out = append(out, m)
+			delete(in, m)
+		}
+	}
+	return out
+}
+
+// placedOver is the Placed a group is saved with: its members (named
+// first, then the matched) in the order placed before (the caller's, or
+// the one stored), with those the caller names (given) put in the places
+// those have, in the caller's order. So the named are reordered as the
+// caller says and the pattern's stay where they were placed; a model
+// named since goes after the last one named, one matched since last.
+// nil when that is the members' own order.
+func placedOver(members, before, given []string) []string {
+	if len(before) == 0 {
+		return nil
+	}
+	sent := map[string]bool{}
+	var order []string
+	for _, m := range given {
+		if !sent[m] && slices.Contains(members, m) {
+			sent[m] = true
+			order = append(order, m)
+		}
+	}
+	var seq []string
+	for _, m := range before {
+		if slices.Contains(members, m) && !slices.Contains(seq, m) {
+			seq = append(seq, m)
+		}
+	}
+	for _, m := range order {
+		if !slices.Contains(seq, m) {
+			at := len(seq)
+			for at > 0 && !sent[seq[at-1]] {
+				at--
+			}
+			seq = slices.Insert(seq, at, m)
+		}
+	}
+	seq = placedIn(members, seq)
+	for i, j := 0, 0; i < len(seq); i++ {
+		if sent[seq[i]] {
+			seq[i] = order[j]
+			j++
+		}
+	}
+	if slices.Equal(seq, members) {
+		return nil
+	}
+	return seq
 }
 
 // ownMembers are the members a group names itself and its patterns, from a

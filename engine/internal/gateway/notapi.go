@@ -4,12 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"html"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -49,18 +48,26 @@ func notAnAPIReply(res *http.Response, name string) *http.Response {
 	switch {
 	case htmlStart.Match(head) && !strings.Contains(ct, "xml"):
 		return asBadGateway(res, name, webPage(res, ct))
-	case strings.Contains(ct, "json") && len(head) > 0 && head[0] != '{' && head[0] != '[':
+	case strings.Contains(ct, "json") && len(head) > 0 && head[0] != '{' && head[0] != '[' && !eventsStart(head):
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<10))
 		return asBadGateway(res, name, "answered "+res.Status+" with a reply that isn't JSON, not an API reply: "+clipRunes(string(bytes.TrimSpace(b)), 200))
 	}
 	return res
 }
 
-// htmlStart is how a web page begins.
-var htmlStart = regexp.MustCompile(`(?i)^<(!doctype\s+html|html[\s>]|head[\s>]|body[\s>])`)
+// eventsStart tells whether a body begins as server-sent events: a stream
+// a vendor labels JSON is still its answer (eventStream reads it so).
+func eventsStart(head []byte) bool {
+	for _, pfx := range []string{"event:", "data:", ":"} {
+		if bytes.HasPrefix(head, []byte(pfx)) {
+			return true
+		}
+	}
+	return false
+}
 
-// pageTitle is a web page's title.
-var pageTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+// htmlStart is how a web page begins.
+var htmlStart = lazyre.New(`(?i)^<(!doctype\s+html|html[\s>]|head[\s>]|body[\s>])`)
 
 // webPage says what a page served in place of a reply was, by its title,
 // and for a firewall's block page what to do about it.
@@ -70,10 +77,8 @@ func webPage(res *http.Response, ct string) string {
 		ct = "no Content-Type"
 	}
 	why := "answered " + res.Status + " with a web page (" + strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]) + "), not an API reply"
-	if m := pageTitle.FindSubmatch(b); m != nil {
-		if t := strings.Join(strings.Fields(html.UnescapeString(string(m[1]))), " "); t != "" {
-			why += ": “" + clipRunes(t, 120) + "”"
-		}
+	if t := provider.PageTitle(b); t != "" {
+		why += ": “" + t + "”"
 	}
 	if provider.EdgeBlocked(b) {
 		why += " — " + provider.BlockedHint

@@ -7,6 +7,10 @@ import "strings"
 // rule may send that request to a cheaper, faster model (provider.Rule's
 // Compact). The prompts are the agents' own, read from each one's release.
 
+// KindCompact is the Kind of a call an agent made to compact its
+// conversation (usage's "Compaction" purpose).
+const KindCompact = "compact"
+
 // compactLead is how far into the system prompt, or into a text part of the
 // last user message, an agent's compaction prompt may begin. Each agent puts
 // its prompt first or behind a short lead of its own (Claude Code's billing
@@ -34,6 +38,10 @@ var compactSystems = []string{
 	"You are a context compaction engine. Your summary will REPLACE the original messages in the conversation context window.",
 	// Kimi Code (kimi_cli/soul/compaction.py's COMPACTION_SYSTEM_PROMPT)
 	"You are a helpful assistant that compacts conversation context.",
+	// Alma (0.4.335, its compaction's instructions): the first
+	// compaction, and one that merges a summary it made before (#2833)
+	"You are compacting a long conversation so it can continue WITHOUT losing context.",
+	"You are UPDATING an existing conversation summary with new activity so the conversation can continue WITHOUT losing context.",
 }
 
 // compactAsk is said in a text part of the last user message of a
@@ -54,6 +62,17 @@ var compactAsks = []compactAsk{
 	{ask: "You are now given a task to compact this conversation context"},
 	// Minis, around the conversation it sends as one user message
 	{ask: "END OF CONVERSATION TO COMPACT.", opens: "Compact this conversation into a context summary:"},
+	// Alma, which opens the user message of its compaction with an ask
+	// and sends the conversation behind it: a later compaction merges the
+	// summary it made before (#2833, as the report quotes it), the first
+	// has none (Alma 0.4.335's own prompt). Both are also known by their
+	// system prompt above, which a route that drops it loses.
+	{ask: "Merge the previous summary with the new conversation."},
+	{ask: "Here is the full conversation to compact."},
+	// DeepSeek Harness (compaction-basic's COMPACTION_INSTRUCTION, a user
+	// message after the conversation): its llm-pi-ai routes, magpie's
+	// among them, send no x-deepseek-harness-compact mark (#5395)
+	{ask: "You are now acting as a compaction engine for this AI coding assistant."},
 }
 
 // leads reports whether p begins within compactLead bytes of text's start.

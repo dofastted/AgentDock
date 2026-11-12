@@ -19,7 +19,6 @@ package agent
 // subagentDefaultModel.
 
 import (
-	"path/filepath"
 )
 
 func primeAgent(home string) *Agent { return primeAgentIn(here(home)) }
@@ -38,5 +37,5 @@ func primeAgentDir(at place) string {
 	if d := homeDir(at.home, at.getenv("PRIME_AGENT_CODING_AGENT_DIR")); d != "" {
 		return d
 	}
-	return filepath.Join(at.home, ".prime", "agent")
+	return at.join(".prime", "agent")
 }

@@ -10,13 +10,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf16"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // DeepSeek Harness (dsh) keeps a session in a folder of its own, under
@@ -30,8 +31,11 @@ import (
 // then an event per line: {type, seq, time, data}. A "user/message" is a
 // prompt typed when its source's kind is "user" (else instructions, a
 // plugin's, a subagent's report…), a "session/title" names the session,
-// and an "assistant/message" carries its model and its usage — input
-// without the cache, output with the reasoning. A session forked from
+// an "assistant/message" carries its model and its usage — input
+// without the cache, output with the reasoning — and a "tool/call" is a
+// tool called, {name, arguments}; a skill is a call of the skill tool,
+// or, typed as /<skill>, a "user/message" whose source is
+// {kind: "skill-invocation", name: <skill>}. A session forked from
 // another starts with that one's events: before format 2 the first
 // seedLength of them, after it those up to a "session/end-seed" said to be
 // inherited. They count where they were first written. dsh has no command
@@ -47,7 +51,7 @@ func DshDir() string {
 }
 
 // session.jsonl, session.v3.jsonl.zstd, …
-var dshName = regexp.MustCompile(`^session(?:\.v(\d+))?\.jsonl(\.zstd)?$`)
+var dshName = lazyre.New(`^session(?:\.v(\d+))?\.jsonl(\.zstd)?$`)
 
 // dshHead is a session file's first line.
 type dshHead struct {
@@ -69,6 +73,9 @@ var (
 )
 
 func dshFiles() []file {
+	if !Reads("dsh") {
+		return nil
+	}
 	dirs, _ := filepath.Glob(filepath.Join(DshDir(), "sessions", "*", "*"))
 	var out []file
 	parent := map[string]string{}
@@ -106,7 +113,7 @@ func dshFiles() []file {
 			dshHeads[f.path] = h
 		}
 		seen[f.path] = true
-		f.sid = h.ID
+		f.w().sid = h.ID
 		if h.DelegationDepth > 0 {
 			parent[h.ID] = h.ParentSession
 		}
@@ -118,12 +125,12 @@ func dshFiles() []file {
 		}
 	}
 	for i := range out {
-		root := out[i].sid
+		root := out[i].m().sid
 		for n := 0; parent[root] != "" && n < 64; n++ {
 			root = parent[root]
 		}
 		out[i].key = "dsh:" + root
-		out[i].main = parent[out[i].sid] == ""
+		out[i].main = parent[out[i].m().sid] == ""
 	}
 	return out
 }
@@ -133,11 +140,11 @@ func dshFiles() []file {
 // the session's generations and its session.lock. "" when the file isn't
 // in the folder its id names, so a delete never takes another's.
 func dshSessionDir(f file) string {
-	if f.agent != "dsh" || f.sid == "" {
+	if f.agent != "dsh" || f.m().sid == "" {
 		return ""
 	}
 	d := filepath.Dir(f.path)
-	if filepath.Base(d) != dshSegment(f.sid) || filepath.Dir(filepath.Dir(d)) != filepath.Join(DshDir(), "sessions") {
+	if filepath.Base(d) != dshSegment(f.m().sid) || filepath.Dir(filepath.Dir(d)) != filepath.Join(DshDir(), "sessions") {
 		return ""
 	}
 	return d
@@ -198,6 +205,10 @@ type dshResponse struct {
 	Model         string `json:"model"`
 	Provider      string `json:"provider"`
 	ResponseModel string `json:"responseModel"`
+	// ResponseID is the id of the reply object the vendor's own response
+	// carried, as dsh read it: the same id magpie's gateway wrote on the
+	// route that served it (Route.ResponseID)
+	ResponseID string `json:"responseId"`
 }
 
 // dshReplay is a reply's replay state, where dsh keeps what the vendor's own
@@ -226,7 +237,12 @@ type dshEvent struct {
 		Content json.RawMessage `json:"content"`
 		Source  struct {
 			Kind string `json:"kind"`
+			// a skill-invocation's skill
+			Name string `json:"name"`
 		} `json:"source"`
+		// a tool/call's tool and its arguments, a JSON string
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
 		Title     string `json:"title"`
 		Inherited bool   `json:"inherited"`
 		// Messages are a title call's (session/title-llm-request)
@@ -246,7 +262,13 @@ type dshEvent struct {
 	} `json:"data"`
 }
 
-var dshWanted = [][]byte{[]byte(`"user/message"`), []byte(`"session/title"`), []byte(`"session/title-llm-request"`), []byte(`"assistant/message"`), []byte(`"session/end-seed"`)}
+// dshTurnKept is how many of a turn's newest user messages a session keeps
+// (TurnConvs), as many as the gateway reads off a request (dshLastConvs):
+// the one typed and the runtime context dsh sends after it, and a few more
+// for a file whose dsh writes no turn/start.
+const dshTurnKept = 4
+
+var dshWanted = [][]byte{[]byte(`"user/message"`), []byte(`"session/title"`), []byte(`"session/title-llm-request"`), []byte(`"assistant/message"`), []byte(`"session/end-seed"`), []byte(`"tool/call"`), []byte(`"turn/start"`)}
 
 // dshCarry is what a read of a dsh session file carries on with: where it
 // read to and the header it read first.
@@ -264,8 +286,8 @@ func parseDsh(f file, old *state) *state {
 	var s *state
 	var c dshCarry
 	var off, skip int64
-	if old != nil && old.Dsh != nil && old.Dsh.Tail.holds(f.path) {
-		s, c = old.clone(), *old.Dsh
+	if old != nil && old.more().Dsh != nil && old.more().Dsh.Tail.holds(f.path) {
+		s, c = old.clone(), *old.more().Dsh
 		off, skip = c.Tail.Off, c.Tail.Skip
 	} else {
 		s = &state{}
@@ -307,7 +329,7 @@ func parseDsh(f file, old *state) *state {
 	if err == nil {
 		c.Tail = markTail(f.path, next, nextSkip, end)
 	}
-	s.Dsh = &c
+	s.own().Dsh = &c
 	return s
 }
 
@@ -329,23 +351,41 @@ func dshCount(s *state, h *dshHead, b []byte, main bool) {
 	}
 	switch e.Type {
 	case "user/message":
-		if main && s.Title == "" && s.First == "" && e.Data.Source.Kind == "user" {
-			s.Convs = append(s.Convs, dshConvs(e.Data.Content)...)
+		if main && s.Title == "" && s.more().First == "" && e.Data.Source.Kind == "user" {
+			s.own().Convs = append(s.more().Convs, dshConvs(e.Data.Content)...)
 			if t := ccText(e.Data.Content); strings.HasPrefix(t, "<") {
-				s.First = untagged(t)
+				s.own().First = untagged(t)
 			} else {
 				s.Title = title(t)
 			}
 		}
+		if main {
+			// the messages of the turn under way, as its file has them
+			// before the request goes out: the newest of them are what a
+			// request still answering carried (TurnConvs, ownerLast). One
+			// spelling is enough, the gateway writes the request's that
+			// way (dshLastConvs); a file with no turn/start keeps its
+			// newest few
+			if c := dshConvs(e.Data.Content); len(c) > 0 {
+				s.own().TurnConvs = append(s.more().TurnConvs, c[0])
+				if n := len(s.more().TurnConvs); n > dshTurnKept {
+					s.own().TurnConvs = slices.Clone(s.more().TurnConvs[n-dshTurnKept:])
+				}
+			}
+		}
+	case "turn/start":
+		if main {
+			s.own().TurnConvs = nil
+		}
 	case "session/title":
 		if t := title(e.Data.Title); t != "" {
-			s.Named = t
+			s.own().Named = t
 		}
 	case "session/title-llm-request":
 		if main {
 			for _, m := range e.Data.Messages {
 				if m.Role == "user" {
-					s.Convs = append(s.Convs, dshConvs(m.Content)...)
+					s.own().Convs = append(s.more().Convs, dshConvs(m.Content)...)
 					break
 				}
 			}
@@ -353,8 +393,13 @@ func dshCount(s *state, h *dshHead, b []byte, main bool) {
 	case "session/end-seed":
 		if h.Version >= 2 && h.IsSeeded && e.Data.Inherited {
 			// the events a fork was seeded with end here: what was
-			// counted of them is its source's
-			n := &state{ID: s.ID, Cwd: s.Cwd, Title: s.Title, First: s.First, Named: s.Named, Size: s.Size, Mod: s.Mod}
+			// counted of them is its source's. What they opened is
+			// kept: dsh writes no parentSession for a fork, so the
+			// openings its seed carried are all that says the fork
+			// came from them (SeedConvs)
+			n := &state{ID: s.ID, Cwd: s.Cwd, Title: s.Title, Size: s.Size, Mod: s.Mod,
+				StateMore: moreOf(StateMore{First: s.more().First, Named: s.more().Named,
+					SeedConvs: append(append([]string(nil), s.more().SeedConvs...), s.more().Convs...)})}
 			n.saw(ms(h.CreatedAt), main)
 			*s = *n
 			return
@@ -363,11 +408,40 @@ func dshCount(s *state, h *dshHead, b []byte, main bool) {
 	if h.Version < 2 && e.Seq != nil && *e.Seq < h.SeedLength {
 		return
 	}
+	if e.Type == "assistant/message" && main {
+		if src := e.Data.Message.Source; dshGatewayProvider(src) {
+			if id := src.ReplayState.Response.ResponseID; id != "" {
+				s.own().ResponseIDs = append(s.more().ResponseIDs, id)
+			}
+		}
+	}
 	at := ms(e.Time)
 	s.saw(at, main)
+	switch {
+	case e.Type == "tool/call":
+		s.tool(at, e.Data.Name, dshSkill(e.Data.Name, e.Data.Arguments))
+	case e.Type == "user/message" && e.Data.Source.Kind == "skill-invocation":
+		// a /<skill> typed: dsh puts the skill's text in after the prompt
+		s.tool(at, "", e.Data.Source.Name)
+	}
 	if u := e.Data.Usage; e.Type == "assistant/message" && u != nil && e.Data.Message.Source.Model != "" {
 		s.use(dateOf(at), e.Data.Message.Source.Model, Tokens{Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite})
 	}
+}
+
+// dshSkill is the skill a call of dsh's skill tool brings in: its
+// arguments are {"name": <skill>}.
+func dshSkill(tool, args string) string {
+	if tool != "skill" {
+		return ""
+	}
+	var a struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal([]byte(args), &a) != nil {
+		return ""
+	}
+	return a.Name
 }
 
 func dshWant(b []byte) bool {
@@ -406,6 +480,8 @@ func dshNum(b []byte, key string) int64 {
 // of one text part goes out as a plain string, or, as the last user
 // message on the messages route, as that part with a cache mark: each
 // spelling is hashed. Anything else (an image, several parts) gives none.
+// That message is what the user typed, which the gateway hashes alone
+// (conversationOpening), without the runtime context dsh sends after it.
 func dshConvs(content json.RawMessage) []string {
 	var parts []struct {
 		Type string `json:"type"`

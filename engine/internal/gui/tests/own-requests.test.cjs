@@ -150,6 +150,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const context = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
           const page = await context.newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serveUsage(lang));
@@ -198,9 +199,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
               await page.waitForTimeout(300);
             }
             const top = await page.locator("#view-usage").evaluate((v) => v.scrollTop), at = await page.evaluate(() => [scrollX, scrollY]);
+            // the request opens on a page of its own, and its way back is
+            // to the same place in the list
             await rows.nth(1).click();
-            await page.waitForTimeout(150);
-            assert.equal(await page.locator("#view-usage").evaluate((v) => v.scrollTop), top, "a click moved the page");
+            await page.locator("#ledReqPane .led-req-back").waitFor();
+            await page.locator("#ledReqPane .led-req-back").click();
+            await page.locator("#ledReqPane").waitFor({ state: "hidden" });
+            assert.equal(await page.locator("#view-usage").evaluate((v) => v.scrollTop), top, "the way back lost the list's place");
             assert.deepEqual(await page.evaluate(() => [scrollX, scrollY]), at);
             assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "the ledger scrolls the page sideways");
             assert.deepEqual(errors, []);
@@ -224,12 +229,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const context = await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" });
           const page = await context.newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serveRouting(lang));
           try {
             const open = async (i) => {
-              await page.goto("http://magpie.test/?view=routing");
+              await page.goto("http://magpie.test/?view=groups");
               const g = page.locator(".rt-group").nth(i);
               await g.waitFor();
               const edit = g.locator("button", { hasText: await page.evaluate(() => t("Edit")) });

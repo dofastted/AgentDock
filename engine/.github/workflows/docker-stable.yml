@@ -1,0 +1,69 @@
+name: Docker stable
+
+# ghcr.io/yetone/magpie:stable is the image of the desktop app's Stable
+# release (Settings › Update channel › Stable; jorbenzhu on Discord). Which
+# release that is, is decided in one place only, site/worker.js's stableOf
+# (a weekly pick out three days, or an urgent release at once), and served
+# at /api/latest?channel=stable. This only reads that answer and points
+# :stable at the image already built for that version (docker.yml); it
+# never builds, and never touches latest, edge or a version's tags. While
+# the feed can't be read the tag stays where it was.
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  # a release's image is pushed: an urgent one is Stable at once
+  workflow_run:
+    workflows: [Docker]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-stable
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/magpie
+  FEED: https://usemagpie.ai/api/latest?channel=stable
+
+jobs:
+  stable:
+    if: github.repository == 'yetone/magpie' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Point stable at the Stable release's image
+        run: |
+          set -euo pipefail
+          if ! BODY=$(curl -fsS --retry 3 --max-time 30 "$FEED"); then
+            echo "::warning::the Stable feed couldn't be read; $IMAGE:stable stays where it was"
+            exit 0
+          fi
+          V=$(jq -r '.version // empty' <<<"$BODY")
+          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::the Stable feed named no release ($V); $IMAGE:stable stays where it was"
+            exit 0
+          fi
+          # an image is the platforms' manifests in it, however its index
+          # is written
+          digest() { docker buildx imagetools inspect "$1" --format '{{json .}}' | jq -er '[.manifest.manifests[]?.digest] | sort | join(",") | select(. != "")'; }
+          WANT=$(digest "$IMAGE:$V") # no image for the Stable release is a red run
+          HAVE=$(digest "$IMAGE:stable" 2>/dev/null || true)
+          if [[ "$HAVE" == "$WANT" ]]; then
+            echo "$IMAGE:stable is $V already ($WANT)"
+            exit 0
+          fi
+          docker buildx imagetools create -t "$IMAGE:stable" "$IMAGE:$V"
+          GOT=$(digest "$IMAGE:stable")
+          echo "$IMAGE:stable is now $V ($GOT, was ${HAVE:-none})"
+          test "$GOT" == "$WANT"

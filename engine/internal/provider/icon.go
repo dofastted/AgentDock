@@ -13,12 +13,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/iconproxy"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/netguard"
 )
 
@@ -30,7 +30,7 @@ const iconPrefix = "file:"
 // MaxIcon is the largest picture magpie keeps for a provider.
 const MaxIcon = 1 << 20
 
-var iconName = regexp.MustCompile(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
+var iconName = lazyre.New(`^[0-9a-f]{16}\.(png|jpg|gif|webp|ico|svg)$`)
 
 // IconDir is where pictures given to providers are kept.
 func IconDir() string { return filepath.Join(filepath.Dir(Path()), "icons") }
@@ -80,7 +80,11 @@ func FetchIcon(ctx context.Context, rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fetchIcon(ctx, iconClient(), iconproxy.URL(u))
+	c := iconClient()
+	// the client is this fetch's alone: the connection it made, left idle
+	// in the transport's pool, is dropped by nobody else (#4824)
+	defer c.CloseIdleConnections()
+	return fetchIcon(ctx, c, iconproxy.URL(u))
 }
 
 // iconClient is the client FetchIcon uses; tests point it at a local proxy.
@@ -134,8 +138,9 @@ func publicHost(ctx context.Context, host string) error {
 }
 
 // iconIPs is ips without the AAAA records Loon synthesizes for an A
-// answer beside them (netguard.LoonPaired; that A answer is judged in
-// their place), or an error when any other is not public.
+// answer beside them (netguard.LoonPaired), nor a fake-IP resolver's
+// fake AAAA beside its fake A (netguard.FakePaired); that A answer is
+// judged in their place. It is an error when any other is not public.
 func iconIPs(host string, ips []net.IPAddr) ([]net.IPAddr, error) {
 	all := make([]netip.Addr, len(ips))
 	for i, ip := range ips {
@@ -147,7 +152,7 @@ func iconIPs(host string, ips []net.IPAddr) ([]net.IPAddr, error) {
 			allowed = append(allowed, ip)
 			continue
 		}
-		if netguard.LoonPaired(all[i].Unmap(), all) {
+		if netguard.LoonPaired(all[i].Unmap(), all) || netguard.FakePaired(all[i], all) {
 			continue
 		}
 		return nil, errorf("the icon host %s resolves to %s, which is not public", host, ip.IP)

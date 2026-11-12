@@ -24,7 +24,7 @@ function server(lang, posts, answer) {
     const json = (data, status = 200) => route.fulfill({ status, json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ ...state, settings: { lang, theme: "light" } });
+    if (url.pathname === "/api/state") return json({ ...state, settings: { lang, theme: "light", guideHidden: true } });
     if (url.pathname === "/api/agents/connect/codex") {
       posts.push(url.pathname);
       return json(answer, 400);
@@ -71,6 +71,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 980, height: 520 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [], dialogs = [];
       page.on("pageerror", (e) => errors.push(e.message));
       page.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss(); });

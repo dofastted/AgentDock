@@ -2,8 +2,10 @@
 // #1385 (shenghsi): Codex isn't connected, yet magpie set openai_base_url for
 // it so a request its ChatGPT account has no allowance for goes on to the
 // user's other ChatGPT accounts on in magpie. The row says it goes through
-// magpie for that alone, its title says what turns it off, and a button
-// opens Providers › Codex, where those accounts are switched off. A Codex
+// magpie for that alone, its title says what turns it off, and its
+// account switch (the Switch accounts only menu) has Only switch Codex's
+// sign-in and Manage accounts…, which opens Providers › Codex, where
+// those accounts are switched off. A Codex
 // not failing over says what it said before. In every language, at a narrow
 // width too, in Chromium and WebKit; no click moves the page.
 const assert = require("node:assert/strict");
@@ -28,7 +30,7 @@ function server(lang) {
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ ...state(), settings: { lang, theme: "light" } });
+    if (url.pathname === "/api/state") return json({ ...state(), settings: { lang, theme: "light", guideHidden: true } });
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
@@ -57,7 +59,8 @@ const codexProvider = {
 
 const said = "Not connected · goes through magpie only to fail over to your other ChatGPT accounts";
 const title = "magpie set openai_base_url in {agent}'s config.toml, so a request the ChatGPT account {agent} is signed in to has no allowance for goes on to your other ChatGPT accounts on in magpie. {agent} keeps to its own models. To stop it, tick Only switch {agent}'s sign-in under Providers › Codex, or switch those accounts off; connecting {agent} adds magpie's models.";
-const button = "ChatGPT accounts";
+const manage = "Manage accounts…";
+const only = "Only switch {agent}'s sign-in";
 const plain = "Not connected · {agent} uses its own settings";
 const row = (id) => `.row.agent[data-id="${id}"]`;
 
@@ -69,6 +72,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], dialogs = [];
         page.on("pageerror", (e) => errors.push(e.message));
         page.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss(); });
@@ -76,14 +80,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.goto("http://magpie.test/?view=agents");
         await page.locator(`${row("codex")} .ag-st`).waitFor();
         const tr = (k) => page.evaluate(([k, lang]) => (lang === "en" ? k : I18N[lang]?.[k]), [k, lang]);
-        for (const k of [said, title, button]) assert.ok(await tr(k), `${lang} has ${k.slice(0, 40)}`);
+        for (const k of [said, title, manage, only]) assert.ok(await tr(k), `${lang} has ${k.slice(0, 40)}`);
         const want = (await tr(said));
         const wantTitle = (await tr(title)).replaceAll("{agent}", "Codex");
         const st = page.locator(`${row("codex")} .ag-st`);
         assert.ok((await st.textContent()).startsWith(want), await st.textContent());
-        const go = st.locator("button.ag-acc");
-        assert.equal(await go.textContent(), await tr(button));
-        assert.equal(await go.getAttribute("title"), wantTitle);
+        assert.equal(await st.locator(".ag-st-t").getAttribute("title"), wantTitle);
+        const go = st.locator("button.ag-acc.ag-who");
+        assert.equal(await go.locator(".v").textContent(), "me@example.com");
         // the twin not failing over says what it always did
         assert.equal(await page.locator(`${row("codex@wsl:Ubuntu-24.04")} .ag-st`).textContent(),
           (await tr(plain)).replace("{agent}", "Codex"));
@@ -94,6 +98,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(box && box.x >= 0 && box.x + box.width <= width, `button off screen: ${JSON.stringify(box)}`);
         const top = await page.evaluate(() => [document.scrollingElement.scrollTop, document.querySelector("#view-agents")?.scrollTop]);
         await go.click();
+        const menu = page.locator(".proto-menu");
+        await menu.waitFor();
+        const stop = menu.locator(".pm-item", { hasText: (await tr(only)).replace("{agent}", "Codex") });
+        assert.equal(await stop.getAttribute("aria-checked"), "false");
+        await menu.locator(".pm-item", { hasText: await tr(manage) }).click();
         await page.waitForFunction(() => new URL(location.href).searchParams.get("view") === "providers");
         await page.waitForFunction(() => new URL(location.href).searchParams.get("edit") === "codex");
         // its editor, with the accounts to switch off, is what opens

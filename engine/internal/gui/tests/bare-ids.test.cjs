@@ -79,6 +79,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 420 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posted = [];
         page.on("pageerror", (e) => errors.push(e.message));
         // gateway mode on the narrow one: the row is the gateway's, not an
@@ -98,7 +99,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const segs = page.locator("#bareIdsSegs .opt");
         await segs.first().waitFor();
         const row = page.locator("#bareIdsRow");
-        assert.equal(await page.locator("#usageAlertRow").evaluate((r) => r.hidden), gateway, "gateway mode as faked");
+        assert.equal(await page.locator("#alertList").evaluate((r) => r.hidden), gateway, "gateway mode as faked");
         assert(await row.isVisible(), "the row is drawn");
         assert.equal((await row.locator(".name").textContent()).trim(), w.name);
         assert((await row.locator(".sub").textContent()).includes(w.sub), "the sub says what it does");

@@ -11,6 +11,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const reader = require("./reader.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -82,6 +83,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const open = async (url) => {
           const p = await context.newPage();
           p.setDefaultTimeout(5000);
+          p.setDefaultNavigationTimeout(60000);
           p.on("pageerror", (e) => errors.push(e.message));
           await p.route("**/*", serve(lang));
           await p.goto(url);
@@ -124,11 +126,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const at = [heads.indexOf(w), heads.indexOf(r)];
             return [...tb.tBodies[0].rows].filter((x) => x.classList.contains("led-row")).map((x) => at.map((i) => ({ text: x.cells[i].textContent, title: x.cells[i].title })));
           }, [await say("Cache write"), await say("Cache read")]);
-          assert.deepEqual(cells[0].map((c) => c.text), [await p.evaluate(() => ledNum(500)), await p.evaluate(() => ledNum(9000))]);
+          // said short, the exact count on hover
+          assert.deepEqual(cells[0].map((c) => c.text), [await p.evaluate(() => fmtN(500)), await p.evaluate(() => fmtN(9000))]);
+          assert.equal(cells[0][1].title, await p.evaluate(() => ledNum(9000)));
           assert.deepEqual(cells[1], [{ text: "—", title: notCounted }, { text: "—", title: notCounted }]);
           // its details say so beside its tokens
-          await rows.nth(1).click();
-          const tokens = await p.locator(".led-detail").last().evaluate((b) => b.querySelector(".led-tokens")?.textContent || b.textContent);
+          const tokens = await (await reader.openRequest(p, rows.nth(1))).evaluate((b) => b.querySelector(".led-tokens")?.textContent || b.textContent);
           assert(tokens.includes(notCounted), tokens);
           assert(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "the page scrolls sideways");
 

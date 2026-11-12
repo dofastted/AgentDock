@@ -2,9 +2,9 @@ package sessions
 
 import (
 	"encoding/json"
+	"html"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +12,7 @@ import (
 	"github.com/tidwall/jsonc"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Factory's Droid keeps a session under its sessions folder
@@ -71,6 +72,9 @@ func readDroidStart(path string) (droidStart, bool) {
 var droidCallers listMemo[string]
 
 func droidFiles() []file {
+	if !Reads("droid") {
+		return nil
+	}
 	root := filepath.Join(FactoryDir(), "sessions")
 	a, _ := filepath.Glob(filepath.Join(root, "*.jsonl"))
 	b, _ := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
@@ -86,14 +90,14 @@ func droidFiles() []file {
 		if !stat(&f) {
 			continue
 		}
-		calling, _ := callers.get(p, f.size, f.mod, func() (string, bool) {
+		calling, _ := callers.get(p, f.size, f.mod.Time(), func() (string, bool) {
 			s, ok := readDroidStart(p)
 			return s.Calling, ok
 		})
 		// what it spent and on which model are in its settings
 		m := file{path: strings.TrimSuffix(p, ".jsonl") + ".settings.json"}
 		if stat(&m) {
-			f.manifest = m.path
+			f.w().manifest = m.path
 			f.size += m.size
 			if m.mod.After(f.mod) {
 				f.mod = m.mod
@@ -149,20 +153,71 @@ func droidText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// droidTools are a message's tool calls, by name.
-func droidTools(raw json.RawMessage) []string {
+// droidTools are a message's tool calls: each tool's name, and the skill
+// a call of Droid's Skill tool calls up ({"skill":"<name>"}).
+func droidTools(raw json.RawMessage) [][2]string {
 	var blocks []struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		Input struct {
+			Skill    any    `json:"skill"`
+			FilePath string `json:"file_path"`
+			Path     string `json:"path"`
+		} `json:"input"`
 	}
 	json.Unmarshal(raw, &blocks)
-	var out []string
+	var out [][2]string
 	for _, b := range blocks {
 		if b.Type == "tool_use" && b.Name != "" {
-			out = append(out, b.Name)
+			skill, _ := b.Input.Skill.(string)
+			if b.Name != "Skill" {
+				skill = ""
+			}
+			if strings.EqualFold(b.Name, "Read") {
+				skill = routedSkill(b.Input.FilePath + b.Input.Path)
+			}
+			out = append(out, [2]string{b.Name, strings.TrimSpace(skill)})
 		}
 	}
 	return out
+}
+
+// droidPicked is what droid says, in the <system-notification> it puts
+// after a prompt, of each skill the user called up by typing /<name> (or
+// a builtin one droid ran for them); <skill filePath="…"> and
+// <name>…</name> follow it, the name HTML-escaped.
+const droidPicked = "selected the following skill for immediate execution"
+
+// droidSlashSkills are the skills a prompt calls up by /<name>: one for
+// each notification droid added. A /<name> no skill has gets none, and
+// is sent as typed.
+func droidSlashSkills(text string) []string {
+	var out []string
+	for rest := text; ; {
+		i := strings.Index(rest, droidPicked)
+		if i < 0 {
+			return out
+		}
+		rest = rest[i+len(droidPicked):]
+		j := strings.Index(rest, "<skill filePath=\"")
+		if j < 0 {
+			return out
+		}
+		rest = rest[j:]
+		k := strings.Index(rest, "\">\n<name>")
+		if k < 0 || strings.ContainsRune(rest[:k], '\n') {
+			continue
+		}
+		rest = rest[k+len("\">\n<name>"):]
+		name, after, ok := strings.Cut(rest, "</name>")
+		if !ok || strings.ContainsRune(name, '\n') {
+			continue
+		}
+		rest = after
+		if name = strings.TrimSpace(html.UnescapeString(name)); name != "" {
+			out = append(out, name)
+		}
+	}
 }
 
 // droidCarry is what a read of a Droid transcript carries on with: where
@@ -189,8 +244,8 @@ func parseDroid(f file, old *state) *state {
 	var s *state
 	var c droidCarry
 	var off int64
-	if old != nil && old.Droid != nil && old.Droid.Tail.holds(f.path) {
-		s, c, off = old.clone(), *old.Droid, old.Droid.Tail.Off
+	if old != nil && old.more().Droid != nil && old.more().Droid.Tail.holds(f.path) {
+		s, c, off = old.clone(), *old.more().Droid, old.more().Droid.Tail.Off
 		s.dropUse(c.Date, c.Model, c.Tokens)
 	} else {
 		s = &state{}
@@ -205,9 +260,9 @@ func parseDroid(f file, old *state) *state {
 		c.Tail = markTail(f.path, end, 0, end)
 	}
 	c.Date, c.Model, c.Tokens = "", "", Tokens{}
-	if f.manifest != "" {
+	if f.m().manifest != "" {
 		var st droidSettings
-		if b, err := os.ReadFile(f.manifest); err == nil && json.Unmarshal(b, &st) == nil && st.Usage != nil {
+		if b, err := os.ReadFile(f.m().manifest); err == nil && json.Unmarshal(b, &st) == nil && st.Usage != nil {
 			when := s.Last
 			if when.IsZero() {
 				when = time.Unix(0, s.Mod)
@@ -218,7 +273,7 @@ func parseDroid(f file, old *state) *state {
 			s.use(c.Date, c.Model, c.Tokens)
 		}
 	}
-	s.Droid = &c
+	s.own().Droid = &c
 	return s
 }
 
@@ -232,9 +287,9 @@ func droidLineOf(s *state, c *droidCarry, b []byte, main bool) {
 		c.Started = true
 		var st droidStart
 		if l.Type == "session_start" && json.Unmarshal(b, &st) == nil {
-			s.ID, s.Cwd, s.Named = st.ID, st.Cwd, title(st.Title)
-			if s.Named == "New Session" {
-				s.Named = "" // Droid's until it names one
+			s.ID, s.Cwd, s.own().Named = st.ID, st.Cwd, title(st.Title)
+			if s.more().Named == "New Session" {
+				s.own().Named = "" // Droid's until it names one
 			}
 			if st.LastCwd != "" {
 				s.Cwd = st.LastCwd
@@ -258,12 +313,15 @@ func droidLineOf(s *state, c *droidCarry, b []byte, main bool) {
 	switch l.Message.Role {
 	case "user":
 		text := droidText(l.Message.Content)
+		for _, k := range droidSlashSkills(text) {
+			s.tool(at, "", k)
+		}
 		if strings.TrimSpace(text) == "" || !main {
 			return
 		}
 		if strings.HasPrefix(strings.TrimSpace(text), "<") {
-			if s.First == "" {
-				s.First = untagged(text)
+			if s.more().First == "" {
+				s.own().First = untagged(text)
 			}
 			return
 		}
@@ -275,15 +333,15 @@ func droidLineOf(s *state, c *droidCarry, b []byte, main bool) {
 		if main {
 			s.day(dateOf(at)).Replies++
 		}
-		for _, name := range droidTools(l.Message.Content) {
-			s.tool(at, name, "")
+		for _, c := range droidTools(l.Message.Content) {
+			s.tool(at, c[0], c[1])
 		}
 	}
 }
 
 // droidSlot is the tail droid gives a custom model's id made of its name
 // ("custom:Kimi-K2-[Groq]-0").
-var droidSlot = regexp.MustCompile(`(-\[[^\]]*\])?-\d+$`)
+var droidSlot = lazyre.New(`(-\[[^\]]*\])?-\d+$`)
 
 // droidModelName is a session's model as it is priced: a custom one
 // ("custom:<id>") is the model its entry in droid's settings asks for —

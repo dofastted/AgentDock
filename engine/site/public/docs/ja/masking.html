@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>プライバシーマスキング · magpie ドキュメント</title>
+<title>プライバシーマスキング：キーや個人情報を LLM へ送らない · magpie ドキュメント</title>
 <meta name="description" content="magpie のローカルなプライバシーマスキングの使い方：リクエストがコンピュータを出る前に何をマスクするか、応答でどう戻るか、効いているかの確かめ方、そして制限。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/masking">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/masking">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/masking">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/masking">
+<link rel="canonical" href="https://usemagpie.ai/docs/ja/masking">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="プライバシーマスキング">
 <meta property="og:description" content="キー、パスワード、個人情報をコンピュータに留める：送る前にマスクし、応答で元に戻します。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/ja/masking">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "プライバシーマスキング",
+   "description": "magpie のローカルなプライバシーマスキングの使い方：リクエストがコンピュータを出る前に何をマスクするか、応答でどう戻るか、効いているかの確かめ方、そして制限。",
+   "inLanguage": "ja",
+   "url": "https://usemagpie.ai/docs/ja/masking",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/ja/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "ドキュメント",
+     "item": "https://usemagpie.ai/docs/ja/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "プライバシーマスキング",
+     "item": "https://usemagpie.ai/docs/ja/masking"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/ja/docker">Docker</a>
     <a class="toc-only" href="/docs/ja/privacy">プライバシー</a>
     <a class="toc-only" href="/docs/ja/masking">プライバシーマスキング</a>
+    <a class="toc-only" href="/docs/ja/mcp-router">MCP ルーター</a>
+    <a class="toc-only" href="/docs/ja/library">ライブラリ</a>
+    <a class="toc-only" href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a class="toc-only" href="/docs/ja/local-models">ローカルモデル</a>
+    <a class="toc-only" href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
@@ -92,7 +152,7 @@
       <li><b>ページを開く</b><span class="ui">設定</span> → <span class="ui">プライバシー</span> を開きます。</li>
       <li><b>シークレットをマスク</b><span class="ui">マスクするもの</span> の <span class="ui">シークレットをマスク</span> を <span class="ui">オン</span> にします。API キー、秘密鍵、トークン、パスワードが対象です。</li>
       <li><b>必要なら個人情報も</b><span class="ui">個人情報をマスク</span> を <span class="ui">オン</span> にすると、メールアドレス、電話番号、ID 番号、銀行カード番号もマスクされます。オンにすると、その下に個人情報の種類ごとのスイッチが並びます。</li>
-      <li><b>自分の語</b><span class="ui">マスクする語</span> に、ベンダーに見せたくない名前、コードネーム、ホスト名をカンマ区切りで入れます。<span class="ui">マスクする語の大文字・小文字を区別しない</span> をオンにすると、<em>Nightjar</em> で <em>NIGHTJAR</em> もマスクされます。magpie が知らないシークレット（自分のゲートウェイのキーなど）は <span class="ui">マスクルール</span> に、先頭の文字列か正規表現で追加します。</li>
+      <li><b>自分の語</b><span class="ui">マスクする語</span> に、ベンダーに見せたくない名前、コードネーム、ホスト名を 1 行に 1 つずつ入れます（カンマ区切りで貼り付けると 1 つずつの行になります）。<span class="ui">マスクする語の大文字・小文字を区別しない</span> をオンにすると、<em>Nightjar</em> で <em>NIGHTJAR</em> もマスクされます。magpie が知らないシークレット（自分のゲートウェイのキーなど）は <span class="ui">マスクルール</span> に、先頭の文字列か正規表現で追加します。</li>
       <li><b>試す</b><span class="ui">試す</span> にテキストを貼ると、ベンダーが実際に受け取る内容が表示されます。貼った内容は保存されません。</li>
     </ol>
     <p>変更は次のリクエストから効き、再起動もエージェント側の変更もいりません。実際にマスクするのは組み込みプラグイン <span class="ui">プライバシーマスキング</span>（<code>redact</code>、<span class="ui">設定</span> → <span class="ui">プラグイン</span>）で、何かのマスクが求められている間は常にオンです。</p>
@@ -110,10 +170,10 @@
     <h2 id="what"><a class="anchor" href="#what">マスクされるもの</a></h2>
     <div class="table-wrap"><table>
       <tr><th>スイッチ</th><th>見つけるもの</th></tr>
-      <tr><td><span class="ui">シークレットをマスク</span></td><td>秘密鍵のブロック（<code>-----BEGIN … PRIVATE KEY-----</code>）。形で見分ける API キー：<code>sk-…</code>（OpenAI、Anthropic、OpenRouter）、<code>ghp_</code>/<code>github_pat_</code>、<code>glpat-</code>、<code>AIza…</code>、<code>xox…-</code>、<code>sk_live_</code>、<code>AKIA</code>/<code>ASIA</code>、<code>hf_</code>、<code>gsk_</code>、<code>xai-</code>、<code>npm_</code>、<code>pypi-</code>、<code>dop_v1_</code>、<code>SG.</code>、それに <code>oc_sk_…</code> のような中継サービスのキー。JWT。<code>user:password@host</code> のパスワード。<code>.env</code> や設定ファイルでシークレットの名前が付いたフィールドの値：<code>DB_PASSWORD=…</code>、<code>api_key: …</code>、<code>client_secret</code>、<code>token</code>、<code>credential</code>。それと自分の <span class="ui">マスクルール</span>。</td></tr>
-      <tr><td><span class="ui">個人情報をマスク</span></td><td>メールアドレス、中国本土の携帯番号、チェックサムの合う中国の身分証番号と銀行カード番号。既定でオンのもの：米国の社会保障番号、パスポート番号（<em>passport</em>、护照、パスポートの後）、IBAN、誕生日（<em>birthday</em>、<em>DOB</em>、生日の近くにある、一年以上前の日付。今日の日付はそのまま）、MAC アドレス、シリアル番号（<em>S/N</em> の後）。エージェントがほぼ毎回送るので、自分でオンにするまでオフのもの：ホームフォルダのユーザー名、ユーザー名とコンピュータ名（<code>user@host</code>）、パブリック IP アドレス、クラウドストレージのバケット。</td></tr>
-      <tr><td><span class="ui">マスクする語</span></td><td>入れた語そのままを <code>{{TERM_…}}</code> に。</td></tr>
-      <tr><td><span class="ui">ローカルモデルで検出</span></td><td><span class="ui">検出方法</span> の中にあります。このコンピュータで動くモデルが、ルールでは見つからない自由文中の名前や住所を見つけます。<span class="ui">シークレットをマスク</span> か <span class="ui">個人情報をマスク</span> がオンのときに使え、見つけたものは同じスイッチに従います。横のメニューでモデルを選べます：AstrLink Guard（中国語と英語、39 MB のダウンロード、コードでの誤検出が少ない。既定）か OpenAI の Privacy Filter（1.6 GB、GPU を使える、コード中の普通の値も多く隠す）。</td></tr>
+      <tr><td><span class="ui">シークレットをマスク</span></td><td>秘密鍵のブロック（<code>-----BEGIN … PRIVATE KEY-----</code>）。形で見分ける API キー：<code>sk-…</code>（OpenAI、Anthropic、OpenRouter）、<code>ghp_</code>/<code>github_pat_</code>、<code>glpat-</code>、<code>AIza…</code>、<code>xox…-</code>、<code>sk_live_</code>、<code>AKIA</code>/<code>ASIA</code>、<code>hf_</code>、<code>gsk_</code>、<code>xai-</code>、<code>npm_</code>、<code>pypi-</code>、<code>dop_v1_</code>、<code>SG.</code>、それに <code>oc_sk_…</code> のような中継サービスのキー。JWT。<code>user:password@host</code> のパスワード。<code>.env</code> や設定ファイルでシークレットの名前が付いたフィールドの値：<code>DB_PASSWORD=…</code>、<code>api_key: …</code>、<code>client_secret</code>、<code>token</code>、<code>credential</code>。それと自分の <span class="ui">マスクルール</span>。 ウォレットの秘密鍵も、ウォレットが書き出す形で探します：Bitcoin の WIF、BIP32 の <code>xprv</code>、Ethereum と TRON の <code>0x</code> 鍵、Solana の鍵と <code>id.json</code> のキーペア、Sui の <code>suiprivkey1…</code>、Aptos の <code>ed25519-priv-0x…</code>、Stellar のシード、NEAR の <code>ed25519:…</code>、Nostr の <code>nsec1…</code>、age の ID、Zcash の拡張支払鍵、<em>seed</em> や <em>ニーモニック</em> の後の、どの語も BIP39 の単語リストにある 12〜25 語のシードフレーズ。決まった接頭辞のない鍵は検証を通ったときだけ置き換えます：WIF と <code>xprv</code> はチェックサム、Solana の鍵は後半の公開鍵、Stellar のシードは CRC で確かめるので、Solana のトランザクション署名はそのまま送られます。<code>0x</code> 鍵はトランザクションハッシュと同じ形なので、鍵の名前の後（<code>PRIVATE_KEY=</code>、<code>--private-key</code>、<code>new Wallet(…)</code>、私钥）でだけ置き換えます。ハッシュ、ストレージスロット、sha256 の値はそのまま送られます。取引所の API キー、シークレット、<code>passphrase</code> はフィールド名で置き換えます。</td></tr>
+      <tr><td><span class="ui">個人情報をマスク</span></td><td>メールアドレス、中国本土の携帯番号（11 桁の ID は別：<code>order_id</code> の値や 订单号 の後ろのものはそのまま）、チェックサムの合う中国の身分証番号と銀行カード番号。既定でオンのもの：米国の社会保障番号、パスポート番号（<em>passport</em>、护照、パスポートの後）、IBAN、誕生日（<em>birthday</em>、<em>DOB</em>、生日の近くにある、一年以上前の日付。今日の日付はそのまま）、MAC アドレス、シリアル番号（<em>S/N</em> の後）。エージェントがほぼ毎回送るので、自分でオンにするまでオフのもの：ホームフォルダのユーザー名（毎回同じ仮の名前で送るので、モデルにはプレースホルダーではなく普通のフォルダに見えます）、ユーザー名とコンピュータ名（<code>user@host</code>）、パブリック IP アドレス（<code>public-ip-kvxqmrtz</code> のような名前として送るので、モデルはパブリックなアドレスだとわかったまま接続に使い、コマンドの中で本物のアドレスに戻ります）、クラウドストレージのバケット。ウォレットやコントラクトのアドレス（<code>0x</code> と 16 進 40 桁）は公開情報なのでそのまま送ります。秘密鍵は引き続きマスクします。</td></tr>
+      <tr><td><span class="ui">マスクする語</span></td><td>入れた語そのままを <code>{{TERM_…}}</code> に。日付（<em>1990-05-12</em> など）を入れると、同じ日のどの書き方もマスクされます：<em>1990/5/12</em>、<em>1990.05.12</em>、<em>1990年5月12日</em>、<em>19900512</em>、<em>May 12, 1990</em>。<em>13/05/1990</em> のような日が先の書き方は、日と月を取り違えようがないときだけです。別の日付や <em>1990.5.12.1</em> のようなバージョン番号はマスクされません。</td></tr>
+      <tr><td><span class="ui">ローカルモデルで検出</span></td><td><span class="ui">検出方法</span> の中にあります。このコンピュータで動くモデルが、ルールでは見つからない自由文中の名前や住所を見つけます。オフにしない限りオンで、最初にマスクするリクエストで AstrLink Guard をダウンロードします。ダウンロードが終わるまではルールだけでマスクします。<span class="ui">シークレットをマスク</span> か <span class="ui">個人情報をマスク</span> がオンのときに使え、見つけたものは同じスイッチに従います。横のメニューでモデルを選べます：AstrLink Guard（中国語と英語、39 MB のダウンロード、コードでの誤検出が少ない、Mac では Neural Engine で動く。既定）か OpenAI の Privacy Filter（1.6 GB、GPU を使える、コード中の普通の値も多く隠す）。その下の <span class="ui">信頼度のしきい値</span> は、値をマスクするのにモデルがどれだけ確かである必要があるかです。既定は Privacy Filter が 0.5、AstrLink Guard が公開元の 0.8。上げると普通の値のマスクは減りますが、本物の名前や住所もそのまま送られやすくなります。誤検出の多くはモデルのあとのルールが既に外すので、既定値は測った中で本物の値を最も逃さない値です。</td></tr>
     </table></div>
     <p>プレースホルダーは「種類 + 鍵付きハッシュの 8 文字」です。同じ値はいつも同じプレースホルダーになるので、会話は毎ターン同じに読め、ベンダーのプロンプトキャッシュも有効なままです。値はメモリにだけ置かれます。</p>
 
@@ -151,8 +211,9 @@
       <li><b>思考はベンダーが書いたまま。</b>署名付きの thinking ブロック、Gemini の thoughts、Responses の暗号化された推論はベンダーが署名したものなので、署名が合うよう変えずに送り返します。中で置き換えるのは、リクエストの他の場所ですでにマスクした値だけです。</li>
       <li><b>ID とツール定義はそのまま：</b>モデル ID、メッセージや呼び出しの ID、UUID、ツール名、MCP サーバー名、ツールのスキーマ（説明文はマスクされます）。ベンダーやツールが検証できるようにするためです。</li>
       <li><b>画像とファイルのデータはそのまま送られます。</b>スクリーンショット内の文字はマスクされません。</li>
-      <li><b>動かなければ送りません。</b>マスクがオンなのに動かないとき（<span class="ui">プライバシーマスキング</span> プラグインを手で止めた、ローカルモデルがオンなのに応答しない）、リクエストは何も送らなかったことを示す 503 になります。マスクなしで送ることはありません。</li>
-      <li><b>ローカルモデルは外せます。</b>すべてのアドレスがこのコンピュータかローカルネットワーク上にあるプロバイダ（Ollama、LM Studio）は、<span class="ui">リクエストをマスクしない</span> でそのまま送れます。CLI では <code>magpie provider set ollama unmasked=yes</code>。ログにはマスク後の内容が残ります。</li>
+      <li><b>動かなければ送りません。</b>マスクがオンなのに動かないとき（<span class="ui">プライバシーマスキング</span> プラグインを手で止めた、自分でオンにしたローカルモデルが応答しない）、リクエストは何も送らなかったことを示す 503 になります。マスクなしで送ることはありません。既定でオンのモデルが応答しないときは、ルールだけでマスクします。</li>
+      <li><b>プロバイダごとに外せます。</b>プロバイダの <span class="ui">リクエストをマスクしない</span> をオンにすると、そのリクエストはそのまま送られます。このコンピュータやローカルネットワーク上のモデル（Ollama、LM Studio）のほか、選べばほかのどのプロバイダでも、サブスクリプションやプラグインのプロバイダでもかまいません。ローカルでないものでオンにすると、エディタはそのベンダーにマスクせずに届くと注意します。まだマスクするプロバイダへフォールバックしうるリクエストはマスクされます。CLI では <code>magpie provider set ollama unmasked=yes</code>。</li>
+      <li><b>マスクされるリクエストをそちらへ送ることもできます。</b><span class="ui">設定 › プライバシー</span> の <span class="ui">マスクせずに送る先</span> でそのようなモデルを選ぶと、マスクの対象を含むエージェントのリクエストはそのままそのモデルへ送られ、本当の名前のまま答えられます。マスクするものがないリクエストはこれまでどおりの送り先へ。そのモデルが失敗したらリクエストも失敗し、マスクしてベンダーへ送り直すことはありません。初期設定はオフです。</li>
       <li><b>モデルにはプレースホルダーしか見えません。</b>マスクされた値を読んだり推論したりはできず、受け渡すだけです。モデルが読む必要のある値は <span class="ui">マスクしない</span> へ。</li>
       <li><b>ルールは形で見つけます。</b>他の国の形式の電話番号や自由文中の名前には、<span class="ui">ローカルモデルで検出</span>、または自分の <span class="ui">マスクする語</span> と <span class="ui">マスクルール</span> が必要です。まず自分のテキストを <span class="ui">試す</span> で確かめてください。</li>
     </ul>
@@ -171,10 +232,20 @@
     <a href="/docs/ja/docker">Docker</a>
     <a href="/docs/ja/privacy">プライバシー</a>
     <a href="/docs/ja/masking">プライバシーマスキング</a>
+    <a href="/docs/ja/mcp-router">MCP ルーター</a>
+    <a href="/docs/ja/library">ライブラリ</a>
+    <a href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a href="/docs/ja/local-models">ローカルモデル</a>
+    <a href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/ja/contributors">コントリビューター</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
   </div>
 </div></footer>

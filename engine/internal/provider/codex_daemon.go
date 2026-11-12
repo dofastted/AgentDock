@@ -164,9 +164,19 @@ const codexDaemonRecheck = 5 * time.Second
 
 // noteCodexSwitch remembers, when Codex's account changes from one to
 // another, the app-server left running on the one before.
-func noteCodexSwitch(from, to string) {
+func noteCodexSwitch(from, to string) { noteCodexSwitchBy(from, to, false) }
+
+// noteCodexSwitchBy is noteCodexSwitch, byMagpie saying magpie made the
+// switch by itself (switchLoginBy).
+func noteCodexSwitchBy(from, to string, byMagpie bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// the Codex app's app-servers are found and restarted on
+	// KeepCodexAppOnItsProvider's own look, whatever this listing finds.
+	// A switch by hand off an account known held is one off a used-up
+	// account, as SwitchWhenSpent's is: a turn left open on it when quota
+	// ran out mid-turn is restarted past once quiet (xiaoq6285 on Discord)
+	codexAppSwitched(codexHeldKnown(from), byMagpie)
 	ps, err := listProcesses(ctx)
 	known := err == nil
 	codexDaemonMu.Lock()
@@ -200,9 +210,20 @@ func noteLeft(left *leftDaemon, pid int, from, to string) {
 // it isn't running or is on the account Codex is.
 func CodexDaemonStale() string {
 	codexDaemonMu.Lock()
-	defer codexDaemonMu.Unlock()
 	recheckLeft()
-	return codexDaemonLeft.user
+	was := codexDaemonLeft.user
+	codexDaemonMu.Unlock()
+	return leftOnAccount(was)
+}
+
+// leftOnAccount is was, the account an app-server is left on, or "" when
+// Codex's provider takes no ChatGPT account (CodexNoAccount): the
+// app-server goes by none, so nothing is to be restarted for it.
+func leftOnAccount(was string) string {
+	if was == "" || codexNoAccount() {
+		return ""
+	}
+	return was
 }
 
 // CodexAppStale answers the account the Codex desktop app is still signed
@@ -212,9 +233,10 @@ func CodexDaemonStale() string {
 // until it is quit and opened again.
 func CodexAppStale() string {
 	codexDaemonMu.Lock()
-	defer codexDaemonMu.Unlock()
 	recheckLeft()
-	return codexAppLeft.user
+	was := codexAppLeft.user
+	codexDaemonMu.Unlock()
+	return leftOnAccount(was)
 }
 
 // recheckLeft forgets an app-server left on an account before that has
@@ -235,9 +257,24 @@ func recheckLeft() {
 	if findCodexDaemon(ps, codexHome()) != codexDaemonLeft.pid {
 		codexDaemonLeft = leftDaemon{}
 	}
-	if findCodexApp(ps) != codexAppLeft.pid {
+	// one that went with none in its place left an app still on nothing
+	// new while it runs (codexAppGotNone): the app read no sign-in
+	// afresh, so it is still said
+	if p := findCodexApp(ps); p != codexAppLeft.pid && (p != 0 || !codexAppStillOpen()) {
 		codexAppLeft = leftDaemon{}
 	}
+}
+
+// codexAppStillOpen is whether the Codex desktop app is known to run
+// (CodexAppOpen), for an app-server gone with none in its place.
+func codexAppStillOpen() bool {
+	if CodexAppOpen == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	open, known := CodexAppOpen(ctx)
+	return open && known
 }
 
 // DismissCodexDaemon stops saying the app-server is on another account.
@@ -258,31 +295,59 @@ func DismissCodexApp() {
 // Codex desktop app runs for itself: 0 when it isn't open. On macOS that
 // is ChatGPT.app's (or Codex.app's) bundled codex, `…/CodexCLI.app/
 // Contents/MacOS/codex [-c k=v…] app-server --analytics-default-enabled …`;
-// on Windows the Store app's `…\WindowsApps\OpenAI.Codex_…\codex.exe
-// app-server`. Not the managed daemon, nor an app-server's helpers or
-// proxy, nor an editor's codex.
+// on Windows the Store app's (OpenAI.Codex, ChatGPT.exe), which copies its
+// codex out of WindowsApps and runs it from %LOCALAPPDATA%:
+// `C:\Users\…\AppData\Local\OpenAI\Codex\bin\<hash>\codex.exe -c … app-server
+// --analytics-default-enabled …` (26.1021 on the Windows box); on Linux
+// the official app's (the chatgpt deb, rpm or Arch package, 26.1027):
+// `/usr/lib/chatgpt/resources/codex -c … app-server
+// --analytics-default-enabled …`. Not the
+// managed daemon, nor an app-server's helpers or proxy, nor an editor's
+// codex.
 func findCodexApp(ps []proc.Process) int {
 	for _, p := range ps {
-		if isManagedDaemon(p.Args) {
-			continue
+		// not another program's, run from the app's codex with --listen
+		if isCodexAppOwnServer(p.Args) {
+			return p.PID
 		}
-		// the program's own path: ps leaves a path's spaces unquoted, so
-		// "…/Codex Computer Use.app/Contents/MacOS/…" reads as one named Codex
-		exe, rest := splitExe(p.Args)
-		if !strings.Contains(exe, ".app/Contents/") && !strings.Contains(exe, `\WindowsApps\OpenAI.`) {
-			continue
-		}
-		if base := strings.ToLower(exe[strings.LastIndexAny(exe, `/\`)+1:]); base != "codex" && base != "codex.exe" {
-			continue
-		}
-		f := strings.Fields(rest)
-		i := slices.Index(f, "app-server")
-		if i < 0 || i+1 < len(f) && !strings.HasPrefix(f[i+1], "-") {
-			continue
-		}
-		return p.PID
 	}
 	return 0
+}
+
+// isCodexAppServer is findCodexApp's test of one command line.
+func isCodexAppServer(args string) bool {
+	if isManagedDaemon(args) {
+		return false
+	}
+	// the program's own path: ps leaves a path's spaces unquoted, so
+	// "…/Codex Computer Use.app/Contents/MacOS/…" reads as one named Codex
+	exe, rest := splitExe(args)
+	if !strings.Contains(exe, ".app/Contents/") && !windowsCodexApp(exe) && !linuxCodexApp(exe) {
+		return false
+	}
+	if base := strings.ToLower(exe[strings.LastIndexAny(exe, `/\`)+1:]); base != "codex" && base != "codex.exe" {
+		return false
+	}
+	f := strings.Fields(rest)
+	i := slices.Index(f, "app-server")
+	return i >= 0 && (i+1 >= len(f) || strings.HasPrefix(f[i+1], "-"))
+}
+
+// windowsCodexApp is whether exe is the Windows Codex app's codex: the one
+// it runs from %LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\, or one in its
+// package under WindowsApps.
+func windowsCodexApp(exe string) bool {
+	e := strings.ToLower(exe)
+	return strings.Contains(e, `\appdata\local\openai\codex\bin\`) || strings.Contains(e, `\windowsapps\openai.`)
+}
+
+// linuxCodexApp is whether exe is the Linux Codex app's codex: the one in
+// its resources, /usr/lib/chatgpt/resources/codex in OpenAI's packages
+// (the deb's and the Arch package's, chatgpt 26.1027). Not a codex the
+// user installed (npm's, a release's): those run from a folder of their
+// own.
+func linuxCodexApp(exe string) bool {
+	return strings.HasPrefix(exe, "/") && strings.HasSuffix(exe, "/chatgpt/resources/codex")
 }
 
 // RestartCodexDaemon has Codex restart its app-server, which reads the
@@ -305,7 +370,11 @@ func restartCodexDaemon(ctx context.Context, home string) error {
 	if err != nil {
 		return err
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	// run as its own responsible process: the daemon it leaves running
+	// works in the folder of every codex attached to it, and macOS would
+	// otherwise ask for ~/Desktop and the like in magpie's name
+	// (reformed9448 on Discord)
+	if out, err := proc.CombinedOutputOwn(ctx, cmd); err != nil {
 		if msg := lastLine(out); msg != "" {
 			return errors.New("codex app-server daemon restart: " + msg)
 		}
@@ -532,3 +601,55 @@ func splitExe(args string) (exe, rest string) {
 
 // CodexHome is the Codex home magpie wires and signs Codex in through.
 func CodexHome() string { return codexHome() }
+
+// CodexPIDs lists the Codex processes running now that may hold a thread
+// sending to magpie's gateway: the Codex app's app-server, the managed
+// daemon, the CLI's sessions, an editor's codex. A relay magpie leaves at
+// quit for them ends once they all have (codexrelay).
+func CodexPIDs(ctx context.Context) []int {
+	ps, err := listProcesses(ctx)
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, p := range ps {
+		exe, _ := splitExe(p.Args)
+		base := strings.ToLower(exe[strings.LastIndexAny(exe, `/\`)+1:])
+		if p.PID != os.Getpid() && (base == "codex" || base == "codex.exe" || isCodexAppServer(p.Args) || isManagedDaemon(p.Args)) {
+			pids = append(pids, p.PID)
+		}
+	}
+	return pids
+}
+
+// StopIdleCodexDaemon stops Codex's app-server daemon for the Codex home
+// magpie signs Codex in through, when it runs with no codex session on it,
+// and says whether it did. An update of Codex by npm on Windows asks it
+// first (agent.UpdateCLI): the daemon, which has no idle exit and which
+// magpie restarts (KeepCodexDaemonCurrent), holds the package's codex.exe,
+// which npm can't remove while it runs (EPERM), and the update stopped
+// partway. The next codex started starts it again. One with sessions on it
+// is left: they hold codex.exe too.
+func StopIdleCodexDaemon(ctx context.Context) (bool, error) {
+	home := codexHome()
+	ps, err := listProcesses(ctx)
+	if err != nil {
+		return false, err
+	}
+	if findCodexDaemon(ps, home) == 0 || codexClients(ps, home) > 0 {
+		return false, nil
+	}
+	codexRestarting.Lock()
+	defer codexRestarting.Unlock()
+	cmd, err := codexDaemonCommand(ctx, home, "stop")
+	if err != nil {
+		return false, err
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if msg := lastLine(out); msg != "" {
+			return false, errors.New("codex app-server daemon stop: " + msg)
+		}
+		return false, errors.New("codex app-server daemon stop: " + err.Error())
+	}
+	return true, nil
+}

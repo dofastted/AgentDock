@@ -17,6 +17,12 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+// the rows a group's editor folds under Advanced, opened
+const openAdvanced = async (page) => {
+  const d = page.locator(".rt-gedit .rt-gadv");
+  await d.waitFor({ state: "attached" });
+  if (!(await d.evaluate((e) => e.open))) await d.locator(":scope > summary").click();
+};
 
 const assets = path.resolve(__dirname, "../assets");
 const MODEL = "workbuddy/hy4-preview";
@@ -60,12 +66,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const open = async (posts, refuse) => {
           const page = await (await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" })).newPage();
           page.setDefaultTimeout(5000);
-          page.setDefaultNavigationTimeout(20000); // the page's first load, slow on a busy machine
+          page.setDefaultNavigationTimeout(60000); // the page's first load, slow on a busy machine
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serve(lang, posts, refuse));
-          await page.goto(`http://magpie.test/?view=routing&newgroup=${encodeURIComponent(MODEL)}`);
-          const ed = page.locator("#view-routing:not([hidden]) .rt-gedit");
+          await page.goto(`http://magpie.test/?view=groups&newgroup=${encodeURIComponent(MODEL)}`);
+          const ed = page.locator("#view-groups:not([hidden]) .rt-gedit");
           await ed.waitFor();
           await ed.locator("input").first().fill("Hy4 preview");
           // the reader wheels down until Add itself is under the pointer's
@@ -93,18 +99,25 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const clickAdd = async () => {
             for (let i = 0; i < 80; i++) {
               const done = await page.evaluate(() => {
-                const v = document.querySelector("#view-routing");
+                const v = document.querySelector("#view-groups");
                 return v.scrollTop + v.clientHeight >= v.scrollHeight - 1;
               });
               if (done) break;
               await page.mouse.wheel(0, 120);
               await page.waitForTimeout(60);
             }
-            let now = await seen();
+            // and back up until the whole of Add is in the view: a press on
+            // its middle, with its top still under the header, can land on
+            // the header in WebKit
+            const whole = () => add.evaluate((btn) => {
+              const r = btn.getBoundingClientRect(), v = btn.closest("main.view").getBoundingClientRect();
+              return r.top >= v.top && r.bottom <= v.bottom;
+            });
+            let now = (await whole()) && (await seen());
             for (let i = 0; i < 80 && !now; i++) {
-              await page.mouse.wheel(0, -120);
+              await page.mouse.wheel(0, -60);
               await page.waitForTimeout(60);
-              now = await seen();
+              now = (await whole()) && (await seen());
             }
             assert.ok(now, "Add is under the pointer's reach to be clicked");
             await page.mouse.click(now.x, now.y);
@@ -121,7 +134,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // column on purpose (plugins/routing/routing.css), so the label is above its field
         // there — beside is only what a wide window can ask for.
         const oneColumn = width <= 760;
-        const rows = await ed.evaluate((e, oneColumn) => [...e.children].filter((c) => c.matches("label") && !c.hidden && c.offsetParent).map((l) => {
+        await openAdvanced(page); // Levels and the rest folded under it, measured too
+        const rows = await ed.evaluate((e, oneColumn) => [...e.children, ...(e.querySelector(":scope > .rt-gadv > .inner")?.children || [])].filter((c) => c.matches("label") && !c.hidden && c.offsetParent).map((l) => {
           const f = l.nextElementSibling, a = l.getBoundingClientRect(), b = f.getBoundingClientRect();
           const beside = a.right <= b.left + 1 && Math.abs(a.top - b.top) < 12;
           const above = a.bottom <= b.top + 1 && a.left <= b.left + 1;

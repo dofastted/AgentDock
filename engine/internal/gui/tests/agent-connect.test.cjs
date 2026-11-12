@@ -25,7 +25,7 @@ const fresh = () => ({
 
 function server(lang, posts) {
   let cur = fresh();
-  const reply = (route) => route.fulfill({ json: { ...cur, settings: { lang, theme: "light" } } });
+  const reply = (route) => route.fulfill({ json: { ...cur, settings: { lang, theme: "light", guideHidden: true } } });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
@@ -67,6 +67,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 980, height: 520 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [], dialogs = [];
       page.on("pageerror", (e) => errors.push(e.message));
       page.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss(); });

@@ -13,6 +13,9 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
+// docIP is an address's stand-in: public-ip- and eight lowercase letters
+var docIP = regexp.MustCompile(`public-ip-[a-z]{8}`)
+
 // The kinds of personal data the user turned on or off in settings
 // (redactKinds) are what the vendor doesn't see, the others as their
 // defaults say; what it answers with a placeholder comes back as the value.
@@ -21,7 +24,7 @@ func TestRedactedKinds(t *testing.T) {
 	var got []byte
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ = io.ReadAll(r.Body)
-		p := regexp.MustCompile(`\{\{IP_[a-z2-7]{8}\}\}`).FindString(string(got))
+		p := docIP.FindString(string(got))
 		chunk := func(s string) string {
 			b, _ := json.Marshal(map[string]any{"id": "c1", "model": "m1", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": s}}}})
 			return "data: " + string(b)
@@ -44,7 +47,9 @@ func TestRedactedKinds(t *testing.T) {
 		t.Fatalf("%d %s", code, body)
 	}
 	sent := string(got)
-	if strings.Contains(sent, ssn) || strings.Contains(sent, ip) || !strings.Contains(sent, "{{SSN_") || !strings.Contains(sent, "{{IP_") {
+	// an address goes as a public-ip- name, not a placeholder, so the
+	// model uses it rather than asking for the real one
+	if strings.Contains(sent, ssn) || strings.Contains(sent, ip) || !strings.Contains(sent, "{{SSN_") || !docIP.MatchString(sent) || strings.Contains(sent, "{{IP_") {
 		t.Fatalf("SSN (on by default) or IP (turned on) went out: %s", sent)
 	}
 	if !strings.Contains(sent, "s3://"+bucket+"/x") || !strings.Contains(sent, "/Users/"+user+"/src") {

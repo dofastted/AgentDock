@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -295,6 +296,31 @@ func TestClaudeMemRunsFromTheCgroup(t *testing.T) {
 	}
 }
 
+// The cgroup path walked is a "/" path whatever the host reads it on.
+// filepath's root is "\" on Windows, so the walk there never reached "/"
+// and read \memory.max forever, holding the whole suite (#4113).
+func TestClaudeMemWalkEndsAtRoot(t *testing.T) {
+	root := memFixture(t, map[string]string{
+		"proc/self/cgroup": "0::/system.slice/magpie.service\n",
+		"sys/fs/cgroup/system.slice/magpie.service/memory.max": "536870912\n",
+	})
+	done := make(chan struct{})
+	var limit int64
+	var why string
+	go func() {
+		limit, why = memLimit("linux", root)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("the cgroup walk never ended at \"/\"")
+	}
+	if limit != 536870912 || !strings.Contains(why, "system.slice/magpie.service") {
+		t.Fatalf("limit %d (%s)", limit, why)
+	}
+}
+
 // Memory not read is not known, and bounds nothing: never 0 or 1 places
 // from files that weren't there, nor on another system.
 func TestClaudeMemRunsUnknownBoundsNothing(t *testing.T) {
@@ -315,6 +341,28 @@ func TestClaudeMemRunsUnknownBoundsNothing(t *testing.T) {
 	t.Cleanup(func() { memGOOS, memRoot = oldGOOS, oldRoot })
 	if n, why := claudeRunsMost(); n != 0 {
 		t.Fatalf("unknown memory bounded runs to %d (%s)", n, why)
+	}
+}
+
+// A test's root is not this computer, even one naming this computer's
+// system: holding nothing, it leaves memory unknown to every reader that
+// falls back on the computer's memory. The computer's memory stood in for
+// such a root, so each read the test machine's (#5118: a Codex turn's
+// limit on an "unknown" machine was 998 MiB on ubuntu CI, 1994 MiB on WSL).
+func TestAFixtureRootIsNotThisComputer(t *testing.T) {
+	oldGOOS, oldRoot := memGOOS, memRoot
+	memGOOS, memRoot = runtime.GOOS, t.TempDir()
+	t.Cleanup(func() { memGOOS, memRoot = oldGOOS, oldRoot })
+	if n, why := bodyRoomSize(); n != 0 {
+		t.Errorf("body room %d MiB (%s), want none", n>>20, why)
+	}
+	runBudget.Once = sync.Once{}
+	t.Cleanup(func() { runBudget.Once = sync.Once{} })
+	if n, why := claudeRunBudget(); n != claudeRunUnknown {
+		t.Errorf("run budget %d MiB (%s), want the unknown %d MiB", n>>20, why, claudeRunUnknown>>20)
+	}
+	if n := codexBodyLimit(); n != defaultBodyLimit {
+		t.Errorf("Codex turn limit %d MiB, want %d MiB", n>>20, defaultBodyLimit>>20)
 	}
 }
 

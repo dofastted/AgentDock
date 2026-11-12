@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"context"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -92,8 +94,8 @@ func (p *Provider) remoteMagpieEndpoints() {
 	for _, suf := range []string{
 		"/v1/messages/count_tokens", "/v1/messages",
 		"/v1/chat/completions", "/v1/responses", "/v1/systemone",
-		"/v1/embeddings", "/v1/rerank",
-		"/v1/audio/transcriptions", "/v1/audio/translations",
+		"/v1/embeddings", "/v1/rerank", "/v1/decisions",
+		"/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech",
 		"/v1/images/generations", "/v1/images/edits",
 		"/v1/videos", "/v1",
 	} {
@@ -108,13 +110,22 @@ func (p *Provider) remoteMagpieEndpoints() {
 
 // listHeaders are the headers p's model list is asked with: a remote
 // magpie is asked for its image, video and decision models too, and its prices.
+// Its key goes as x-api-key whatever the user's headers say (remoteKey).
+// A list is no turn of a conversation: ${sessionId} and ${threadId} in a
+// value are an id of the list's own (conversation.go).
 func (p Provider) listHeaders() map[string]string {
+	h := p.SentHeaders(context.Background())
 	if !p.IsRemoteMagpie() {
-		return p.Headers
+		return h
 	}
-	h := maps.Clone(p.Headers)
+	h = maps.Clone(h)
 	if h == nil {
 		h = map[string]string{}
+	}
+	for k := range h {
+		if strings.EqualFold(k, "x-api-key") {
+			delete(h, k)
+		}
 	}
 	h[DrawersHeader] = "1"
 	h[VideomakersHeader] = "1"
@@ -142,6 +153,13 @@ func (p Provider) listHeadersAt(u string) map[string]string {
 	}
 	id := openCodeSession("")
 	h["X-Opencode-Session"], h["X-Opencode-Session-Id"] = id, id
+	// as OpenCode 2 asks its gateway (#3491), unless the user set their own
+	if !slices.ContainsFunc(slices.Collect(maps.Keys(h)), func(k string) bool { return strings.EqualFold(k, "User-Agent") }) {
+		h["User-Agent"] = OpenCodeUserAgent()
+	}
+	if !slices.ContainsFunc(slices.Collect(maps.Keys(h)), func(k string) bool { return strings.EqualFold(k, "x-opencode-client") }) {
+		h["X-Opencode-Client"] = "cli"
+	}
 	return h
 }
 
@@ -164,4 +182,19 @@ func (p Provider) remotePrice(model string) (catalog.Price, bool) {
 func (p Provider) RemotePriced(model string) bool {
 	_, ok := p.remotePrice(model)
 	return ok
+}
+
+// RemoteVia is the magpies a remote magpie's model passes through to its
+// vendor, as its list said, that magpie last (catalog's magpie_via.go);
+// nil for another provider's, or a list from a magpie from before.
+func (p Provider) RemoteVia(model string) []string {
+	if !p.IsRemoteMagpie() {
+		return nil
+	}
+	for _, m := range p.liveByID(model) {
+		if len(m.Via) > 0 {
+			return m.Via
+		}
+	}
+	return nil
 }

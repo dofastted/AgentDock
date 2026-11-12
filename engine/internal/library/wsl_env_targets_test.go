@@ -30,7 +30,7 @@ func TestWSLTargetsHonorDiscoveryDir(t *testing.T) {
 		t.Fatalf("gemini@wsl isn't a target: %v", ids(Targets()))
 	}
 	wantSkills := filepath.Join(h, ".gemini", "skills")
-	if gem.Skills != wantSkills || gem.Instructions != filepath.Join(h, ".gemini", "GEMINI.md") || gem.MCP == nil || gem.MCP.Path != filepath.Join(h, ".gemini", "settings.json") || !gem.Copy || !gem.MCP.WSL || gem.MCP.Distro != "Debian" {
+	if gem.Skills != wantSkills || gem.Instructions != filepath.Join(h, ".gemini", "GEMINI.md") || gem.MCP == nil || gem.MCP.Path != filepath.Join(h, ".gemini", "settings.json") || !gem.Copy && gem.Store == "" || !gem.MCP.WSL || gem.MCP.Distro != "Debian" {
 		t.Errorf("gemini@wsl: %+v mcp %+v", gem, gem.MCP)
 	}
 	if within(gem.Skills, home()) && !within(gem.Skills, h) {
@@ -42,7 +42,7 @@ func TestWSLTargetsHonorDiscoveryDir(t *testing.T) {
 		ID: "omp#work@wsl:Debian", Name: "omp · work · WSL Debian",
 		WSL: "Debian", Home: h, Dir: prof, Path: filepath.Join(prof, "config.yml"),
 	})
-	if omp == nil || omp.Agent.ID != "omp#work@wsl:Debian" || omp.Skills != filepath.Join(prof, "skills") || omp.MCP == nil || omp.MCP.Path != filepath.Join(prof, "mcp.json") || !omp.Copy {
+	if omp == nil || omp.Agent.ID != "omp#work@wsl:Debian" || omp.Skills != filepath.Join(prof, "skills") || omp.MCP == nil || omp.MCP.Path != filepath.Join(prof, "mcp.json") || !omp.Copy && omp.Store == "" {
 		t.Errorf("omp#work@wsl: %+v mcp %+v", omp, omp.MCP)
 	}
 

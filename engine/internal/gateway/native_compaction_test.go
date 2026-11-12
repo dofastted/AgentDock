@@ -517,7 +517,7 @@ func TestNativeCompactionWriterGoneSaysWhy(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			[]string{"set not to serve gpt-5.5 (Names & levels)", "let me@example.com serve gpt-5.5 again"},
+			[]string{"set not to serve gpt-5.5 (Model settings)", "let me@example.com serve gpt-5.5 again"},
 			[]string{"no longer signed in", "switched off in magpie", "paused"}},
 		{"signed out", "gone@example.com", func(t *testing.T) {},
 			[]string{"gone@example.com is no longer signed in to magpie", "sign in to gone@example.com again"},
@@ -801,4 +801,293 @@ func TestNativeCompactionCompactKeepsTheKeysAccounts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A trigger Codex asks of a provider set to compact natively is kept only
+// when a key that lists the model can be asked it on the Responses API.
+// When the vendor's lists hold the model to a key that speaks no
+// Responses there (its key is set to Chat, so WithKey leaves it no
+// Responses URL), the trigger is not kept: magpie summarises instead,
+// which the listed key reads, as it does when native compaction is off.
+// Before, the trigger was kept because the provider (whose setting is
+// what kept it) carries it, and then refused saying none of the keys that
+// serve the model can be asked it on Responses — a dead end, when
+// magpie's summary was one turn away.
+func TestNativeCompactionTriggerSummarisedWhenNoListedKeyCarriesIt(t *testing.T) {
+	noRests()
+	t.Cleanup(noRests)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// the summary comes back through the chat key, the one whose list
+	// holds the model
+	f := &fake{t: t, reply: sse(
+		`data: {"id":"c1","model":"m1","choices":[{"delta":{"content":"SUMM"}}]}`,
+		`data: {"id":"c1","choices":[{"delta":{"content":"ARY"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`)}
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	// the first key is set to chat: it serves the model, but not on
+	// Responses; the second speaks nothing in particular and would carry
+	// the compaction, but the vendor's list doesn't hold the model to it
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "kchat", KeyProtocol: provider.Chat, Models: []string{"m1"}}
+	p.Chat = up.URL + "/v1"
+	p.Responses = up.URL + "/v1"
+	p.Keys = []provider.KeyAccount{{Key: "kresp"}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive("fake", up.URL+"/v1", []catalog.Model{
+		{ID: "m1", Keys: []string{provider.KeyID("kchat")}},
+		{ID: "m2", Keys: []string{provider.KeyID("kresp")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) })
+	nativeOn(t, "fake")
+	code, body := nativeAsk(t, "fake/m1", compactTurn)
+	if code != 200 || f.calls != 1 || !strings.Contains(string(f.got), "CONTEXT CHECKPOINT COMPACTION") || strings.Contains(string(f.got), "compaction_trigger") {
+		t.Fatalf("%d, the relay asked %d times: %s", code, f.calls, body)
+	}
+	// the summary went by the chat key, the only one that lists the model;
+	// the responses key, whose own list lacks it, was never asked
+	if f.path != "/v1/chat/completions" || f.head.Get("Authorization") != "Bearer kchat" {
+		t.Errorf("the summary didn't go by the listed key: %s %q", f.path, f.head.Get("Authorization"))
+	}
+	if !strings.Contains(body, magpieCompaction) || strings.Contains(body, "gAAAAB") {
+		t.Errorf("Codex got %s", body)
+	}
+}
+
+// A trigger Codex asks of a provider whose listed key can be asked the
+// compaction on Responses still goes to it as Codex sent it — the gate
+// that summarises when no listed key carries it changes nothing here —
+// and the key whose own list lacks the model stays unasked, as an
+// ordinary request leaves it.
+func TestNativeCompactionTriggerThroughTheListedKeyThatCarriesIt(t *testing.T) {
+	noRests()
+	t.Cleanup(noRests)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	f := &fake{t: t, reply: nativeSealedReply("gAAAAB-sealed-by-listed")}
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	// neither key is set to a protocol, so the first can be asked the
+	// compaction on Responses; the vendor's list holds the model to it
+	// alone, and another model to the second
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "kcarries", Models: []string{"m1"}}
+	p.Chat = up.URL + "/v1"
+	p.Responses = up.URL + "/v1"
+	p.Keys = []provider.KeyAccount{{Key: "kother"}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive("fake", up.URL+"/v1", []catalog.Model{
+		{ID: "m1", Keys: []string{provider.KeyID("kcarries")}},
+		{ID: "m2", Keys: []string{provider.KeyID("kother")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(400) })
+	nativeOn(t, "fake")
+	code, body := nativeAsk(t, "fake/m1", compactTurn)
+	if code != 200 || f.calls != 1 {
+		t.Fatalf("%d, the relay asked %d times: %s", code, f.calls, body)
+	}
+	if !strings.Contains(string(f.got), `{"type":"compaction_trigger"}`) || strings.Contains(string(f.got), "CONTEXT CHECKPOINT COMPACTION") {
+		t.Errorf("the relay wasn't asked Codex's own compaction: %s", f.got)
+	}
+	if f.path != "/v1/responses" || f.head.Get("Authorization") != "Bearer kcarries" {
+		t.Errorf("the trigger didn't go by the listed key: %s %q", f.path, f.head.Get("Authorization"))
+	}
+	if !strings.Contains(body, `"encrypted_content":"gAAAAB-sealed-by-listed"`) || strings.Contains(body, magpieCompaction) {
+		t.Errorf("Codex got %s", body)
+	}
+}
+
+// Deciding whether a provider set to compact natively keeps Codex's
+// trigger asks nothing of its routing. The decision is made on every one
+// of Codex's turns, compacting or not, before the turn is planned; a plan
+// weighs the keys, and a provider routed in turn would move its turn along
+// for a request that never went (a plan in the decision did: each turn
+// began two keys along, not one).
+func TestNativeCompactionDecisionLeavesTheTurnsAlone(t *testing.T) {
+	noRests()
+	t.Cleanup(noRests)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	setHome(t, t.TempDir())
+	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k1", Models: []string{"m1"}, Routing: provider.Rotate,
+		Responses: "http://127.0.0.1:1/v1", Keys: []provider.KeyAccount{{Key: "k2"}, {Key: "k3"}}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	nativeOn(t, "fake")
+	s := New()
+	first := func() string {
+		q, _, _ := provider.Resolve("fake/m1")
+		cs, _ := s.plan(q, "m1", provider.Responses)
+		return cs[0].p.Key
+	}
+	if !s.nativeCompactionFor("fake/m1") {
+		t.Fatal("a provider set to compact natively, whose keys carry it, doesn't keep the trigger")
+	}
+	next := map[string]string{"k1": "k2", "k2": "k3", "k3": "k1"}
+	for range 3 {
+		was := first()
+		s.nativeCompactionFor("fake/m1")
+		if now := first(); now != next[was] {
+			t.Fatalf("a turn began at %s, the next at %s: the decision moved the turn along", was, now)
+		}
+	}
+}
+
+// echo_ts (Discord #feedback): Codex's turns on GitHub Copilot, compacted
+// natively there, and its auto-review on codex-auto-review through the
+// ChatGPT sign-in. The review carries the conversation's history, the
+// Copilot compaction in it, and OpenAI refused every review: 400
+// invalid_encrypted_content "The encrypted content P4ih...bDU could not be
+// verified". A seal goes only to its writer: the review, a call beside
+// the conversation, goes without it, its instructions and tool evidence
+// kept; a turn of the conversation on a model the writer doesn't serve is
+// refused saying why, never relayed to be refused there.
+func TestForeignCompactionLeftOutOfAutoReview(t *testing.T) {
+	const seal = "P4ihCopilotSealedThisbDU"
+	copilotFake(t, "gho_echo_ts", func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/models":
+			io.WriteString(w, `{"data":[{"id":"gpt-5.3-codex","name":"GPT-5.3-Codex","model_picker_enabled":true,"policy":{"state":"enabled"},"supported_endpoints":["/responses"],"capabilities":{"type":"chat"}}]}`)
+		case "/responses":
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, nativeSealedReply(seal))
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	var mu sync.Mutex
+	var openai []string
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		openai = append(openai, r.URL.Path+" "+string(b))
+		mu.Unlock()
+		if strings.Contains(string(b), seal) {
+			w.WriteHeader(400)
+			io.WriteString(w, `{"error":{"message":"The encrypted content P4ih...bDU could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_encrypted_content"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(
+			`data: {"type":"response.created","response":{"id":"r1"}}`,
+			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":9,"output_tokens":2}}}`))
+	})
+	g := &fake{t: t, reply: sse(`data: {"type":"response.completed","response":{"id":"resp_o","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)}
+	up := httptest.NewServer(g)
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{ID: "other", Name: "Other", Key: "k2", Models: []string{"m1"}, Responses: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	nativeOn(t, "copilot")
+	if code, body := nativeAsk(t, "copilot/gpt-5.3-codex", compactTurn); code != 200 || !strings.Contains(body, seal) {
+		t.Fatalf("Copilot's compaction: %d %s", code, body)
+	}
+	ask := func(path, model, kind string) (int, string) {
+		t.Helper()
+		body := `{"model":"` + model + `","stream":true,"instructions":"You are the reviewer","input":[
+		  {"type":"message","role":"developer","content":[{"type":"input_text","text":"approval policy: on-request"}]},
+		  {"type":"compaction","encrypted_content":"` + seal + `"},
+		  {"type":"message","role":"user","content":[{"type":"input_text","text":"clean the build folder"}]},
+		  {"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"command\":[\"ls\",\"build\"]}"},
+		  {"type":"function_call_output","call_id":"call_1","output":"app.o main.o"},
+		  {"type":"message","role":"user","content":[{"type":"input_text","text":"Review: rm -rf build"}]}]}`
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", CodexPath+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer chatgpt-token")
+		req.Header.Set("chatgpt-account-id", "acct-1")
+		if kind != "" {
+			req.Header.Set("x-openai-subagent", kind)
+		}
+		New().Handler().ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	kept := func(t *testing.T, got string) {
+		t.Helper()
+		if strings.Contains(got, seal) || strings.Contains(got, `"compaction"`) {
+			t.Errorf("Copilot's seal went on: %s", got)
+		}
+		for _, want := range []string{"You are the reviewer", "approval policy: on-request", "clean the build folder", `"function_call_output"`, "app.o main.o", "Review: rm -rf build"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%q left out: %s", want, got)
+			}
+		}
+	}
+
+	t.Run("the auto-review on codex-auto-review, through the sign-in", func(t *testing.T) {
+		mu.Lock()
+		openai = nil
+		mu.Unlock()
+		code, body := ask("/responses", "codex-auto-review", "guardian")
+		mu.Lock()
+		defer mu.Unlock()
+		if code != 200 || len(openai) != 1 {
+			t.Fatalf("%d %s\nOpenAI got %q", code, body, openai)
+		}
+		kept(t, openai[0])
+	})
+	t.Run("the auto-review on a model of another provider's", func(t *testing.T) {
+		g.got = nil
+		code, body := ask("/responses", "other/m1", "guardian")
+		if code != 200 || g.calls == 0 {
+			t.Fatalf("%d %s", code, body)
+		}
+		kept(t, string(g.got))
+	})
+	t.Run("a subagent on a model of another provider's", func(t *testing.T) {
+		g.got = nil
+		code, body := ask("/responses", "other/m1", "collab_spawn")
+		if code != 200 {
+			t.Fatalf("%d %s", code, body)
+		}
+		kept(t, string(g.got))
+	})
+	t.Run("a thread's title on a model of another provider's", func(t *testing.T) {
+		g.got = nil
+		code, body := ask("/responses", "other/m1", "thread_title")
+		if code != 200 || strings.Contains(string(g.got), seal) {
+			t.Fatalf("%d %s\nother got %s", code, body, g.got)
+		}
+	})
+	t.Run("a turn on one of Codex's own models is refused saying why", func(t *testing.T) {
+		mu.Lock()
+		openai = nil
+		mu.Unlock()
+		code, body := ask("/responses", "gpt-5.5", "")
+		if code != 400 || !strings.Contains(body, "compacted natively") || !strings.Contains(body, "copilot") {
+			t.Errorf("%d %s", code, body)
+		}
+		code, body = ask("/responses/compact", "gpt-5.5", "")
+		if code != 400 || !strings.Contains(body, "compacted natively") {
+			t.Errorf("compact: %d %s", code, body)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(openai) != 0 {
+			t.Errorf("OpenAI was sent Copilot's seal: %q", openai)
+		}
+	})
+	t.Run("a turn on another provider's model is refused as before", func(t *testing.T) {
+		calls := g.calls
+		code, body := ask("/responses", "other/m1", "")
+		if code != 400 || !strings.Contains(body, "compacted natively") || g.calls != calls {
+			t.Errorf("%d %s", code, body)
+		}
+	})
+	t.Run("the writer still reads it", func(t *testing.T) {
+		mu.Lock()
+		openai = nil
+		mu.Unlock()
+		if code, body := ask("/responses", "copilot/gpt-5.3-codex", "guardian"); code != 200 {
+			t.Errorf("%d %s", code, body)
+		}
+	})
 }

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"maps"
+	"slices"
 	"testing"
 )
 
@@ -80,6 +81,30 @@ func TestGroupImagesFromAMemberThatSees(t *testing.T) {
 	}
 }
 
+// A group takes every kind a member takes, not text and image alone
+// (#2898, #6135), and says nothing of the kinds when no member did.
+func TestGroupInputsAreItsMembers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	entries := []Entry{
+		{ID: "a/m", Model: "m", Provider: Provider{ID: "a"}, Images: true, Inputs: []string{"text", "image"}, Outputs: []string{"text"}},
+		{ID: "b/m", Model: "m", Provider: Provider{ID: "b"}, Images: true, Inputs: []string{"text", "image", "video"}, Outputs: []string{"text"}},
+		{ID: "a/n", Model: "n", Provider: Provider{ID: "a"}},
+		{ID: "b/n", Model: "n", Provider: Provider{ID: "b"}},
+	}
+	got := map[string]Entry{}
+	for _, g := range groupEntries(entries) {
+		got[g.Model] = g
+	}
+	if g := got["m"]; !slices.Equal(g.Inputs, []string{"text", "image", "video"}) || !slices.Equal(g.Outputs, []string{"text"}) {
+		t.Errorf("group of m takes %v, gives %v", g.Inputs, g.Outputs)
+	}
+	if g, ok := got["n"]; !ok || g.Inputs != nil || g.Outputs != nil {
+		t.Errorf("group of n, no member said of: %+v (%v)", g, ok)
+	}
+}
+
 // A group whose first member is a ChatGPT account's model is still magpie's
 // to list to a signed-in Codex: the backend lists the model, not the group.
 func TestCodexListedKeepsGroups(t *testing.T) {
@@ -101,5 +126,62 @@ func TestCodexListedKeepsGroups(t *testing.T) {
 	// Codex offers /fast on the group, a ChatGPT GPT model being in it
 	if !ms[0].Fast || ms[1].Fast {
 		t.Errorf("fast: group %v, model %v", ms[0].Fast, ms[1].Fast)
+	}
+}
+
+// A group keeps what Kimi Code's list says of its models (always thinks,
+// loads tools mid-conversation, its default effort) when every member says
+// it, and has none of it when one member doesn't (jiabubu on Discord: a Kimi
+// model put in a group lost always_thinking and dynamically_loaded_tools in
+// Kimi Code).
+func TestGroupSharesKimiFacts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	e := func(p, m string, always, dynamic bool, def string) Entry {
+		return Entry{ID: p + "/" + m, Model: m, Name: m, Provider: Provider{ID: p}, Reasoning: true,
+			Efforts: []string{"low", "medium", "high"}, AlwaysThinks: always, DynamicTools: dynamic, DefaultEffort: def}
+	}
+	type facts struct {
+		always, dynamic bool
+		def             string
+	}
+	got := map[string]facts{}
+	for _, g := range groupEntries([]Entry{
+		e("kimi-code", "kimi-k3", true, true, "high"), e("kimi-code-cn", "kimi-k3", true, true, "high"),
+		e("kimi-code", "kimi-k2.7", true, true, "high"), e("or", "kimi-k2.7", false, false, ""),
+		e("kimi-code", "kimi-k2.8", true, false, "medium"), e("kimi-code-cn", "kimi-k2.8", true, true, "high"),
+	}) {
+		got[g.ID] = facts{g.AlwaysThinks, g.DynamicTools, g.DefaultEffort}
+	}
+	want := map[string]facts{
+		AutoPrefix + "kimi-k3":   {true, true, "high"},
+		AutoPrefix + "kimi-k2.7": {},
+		AutoPrefix + "kimi-k2.8": {always: true},
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// WorkBuddy AI lists deepseek-v4.1-flash under its paid id, -sg, so the
+// two editions' one model merged by id alone stayed two (Kts6M2fwWN43967
+// on X). The twin joins the group; another vendor's -sg id, and WorkBuddy
+// AI's other models, are unchanged.
+func TestAutoGroupsEditionTwins(t *testing.T) {
+	e := func(p, m string) Entry {
+		return Entry{ID: p + "/" + m, Model: m, Name: "DeepSeek-V4.1-Flash", Provider: Provider{ID: p}}
+	}
+	gs := autoGroups([]Entry{e("workbuddy", "deepseek-v4.1-flash"), e("workbuddy-ai", "deepseek-v4.1-flash-sg")}, nil)
+	if len(gs) != 1 || gs[0].ID != "auto-deepseek-v4-1-flash" || len(gs[0].Members) != 2 {
+		t.Fatalf("groups: %+v", gs)
+	}
+	if gs := autoGroups([]Entry{e("workbuddy", "deepseek-v4.1-flash"), e("other", "deepseek-v4.1-flash-sg")}, nil); len(gs) != 0 {
+		t.Errorf("another vendor's -sg model merged: %+v", gs)
+	}
+	// the user's own "same as" is read first
+	same := map[string]string{"workbuddy-ai/deepseek-v4.1-flash-sg": "deepseek-v4.1-flash-sg"}
+	if gs := autoGroups([]Entry{e("workbuddy", "deepseek-v4.1-flash"), e("workbuddy-ai", "deepseek-v4.1-flash-sg")}, same); len(gs) != 0 {
+		t.Errorf("the user's own same-as lost: %+v", gs)
 	}
 }

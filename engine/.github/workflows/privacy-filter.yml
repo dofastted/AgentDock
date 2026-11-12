@@ -48,7 +48,7 @@ jobs:
         if: matrix.target != 'windows-amd64' && matrix.target != 'darwin-amd64'
         run: |
           mkdir t && cd t && unzip -q ../pf-serve-${{ matrix.target }}.zip
-          for p in pf-serve pf-serve-vulkan; do
+          for p in pf-serve pf-serve-vulkan pf-serve-base; do
             [ -f "$p" ] || continue
             ./"$p" | tee out.txt; grep -q usage out.txt
           done

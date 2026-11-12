@@ -99,6 +99,26 @@ func RefreshUsage(ctx context.Context, provider, user string) {
 	toldUsage()
 }
 
+// RefreshEach is RefreshUsage of each of cards, read side by side: a
+// gateway key told some cards has every one of them read again on a
+// Refresh of them all, and one after another, a saved Claude account's
+// /usage about 5 seconds each, a few of them outlasted the gateway's 30
+// seconds (#5443). Each read is bounded as RefreshUsage's is.
+func RefreshEach(ctx context.Context, cards []SubscriptionQuota) {
+	var wg sync.WaitGroup
+	for _, q := range cards {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			refreshCards(ctx, q.Provider, q.User)
+		}()
+	}
+	wg.Wait()
+	if len(cards) > 0 {
+		toldUsage() // the menu bar shows the same cards (#2357), told once
+	}
+}
+
 // RefreshReport is RefreshUsage answering the cards it read, as
 // QuotaReport tells them: magpie quota refresh (#2104), which reads the
 // card the Usage page's refresh button does and shows only it. A process
@@ -153,7 +173,7 @@ func refreshCards(ctx context.Context, provider, user string) (subs, plans, bala
 		out := fetchSubscriptionUsage(ctx)
 		now := time.Now()
 		noteDailyCredits(out, now)
-		noteQuotaHistory(out, now)
+		noteCardHistory(out, now)
 		c := &subscriptionUsageCache
 		c.Lock()
 		c.data = cacheCards(c.data, out, seq, true)
@@ -162,6 +182,28 @@ func refreshCards(ctx context.Context, provider, user string) (subs, plans, bala
 	}()
 	wg.Wait()
 	return subs, plans, balances
+}
+
+// keepCardRead keeps q, an account's card read outside a refresh of it
+// (the keep-alive's run, renewClaude), as refreshCards keeps a card read
+// again: in place of the card, newer reads standing, with its history,
+// and the menu bar told. A card the Usage page doesn't have (hidden, or
+// nothing read yet) isn't added.
+func keepCardRead(q SubscriptionQuota, seq uint64) {
+	out := []SubscriptionQuota{q}
+	c := &subscriptionUsageCache
+	c.Lock()
+	has := slices.ContainsFunc(c.data, func(k SubscriptionQuota) bool {
+		return k.Provider == q.Provider && strings.EqualFold(k.User, q.User)
+	})
+	if has {
+		c.data = cacheCards(c.data, out, seq, true)
+	}
+	c.Unlock()
+	if has {
+		noteQuotaHistory(out, time.Now())
+		toldUsage()
+	}
 }
 
 // cacheCards commits a batch without overwriting cards read by a newer

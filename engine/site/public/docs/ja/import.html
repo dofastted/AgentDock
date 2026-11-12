@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Add to magpie · magpie ドキュメント</title>
+<title>Add to magpie：リンク 1 つでモデルをすべてのエージェントへ · magpie ドキュメント</title>
 <meta name="description" content="インポートリンク：ユーザーにリンクを 1 つ渡すだけで、あなたのモデルが彼らの使うすべてのエージェントに入ります。リンク形式、パラメータ、リンクビルダー、Add to magpie ボタン。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/import">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/import">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/import">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/import">
+<link rel="canonical" href="https://usemagpie.ai/docs/ja/import">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Add to magpie">
 <meta property="og:description" content="リンク 1 つで、あなたのモデルをユーザーのすべてのエージェントへ。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/ja/import">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Add to magpie",
+   "description": "インポートリンク：ユーザーにリンクを 1 つ渡すだけで、あなたのモデルが彼らの使うすべてのエージェントに入ります。リンク形式、パラメータ、リンクビルダー、Add to magpie ボタン。",
+   "inLanguage": "ja",
+   "url": "https://usemagpie.ai/docs/ja/import",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/ja/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "ドキュメント",
+     "item": "https://usemagpie.ai/docs/ja/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Add to magpie",
+     "item": "https://usemagpie.ai/docs/ja/import"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/ja/docker">Docker</a>
     <a class="toc-only" href="/docs/ja/privacy">プライバシー</a>
     <a class="toc-only" href="/docs/ja/masking">プライバシーマスキング</a>
+    <a class="toc-only" href="/docs/ja/mcp-router">MCP ルーター</a>
+    <a class="toc-only" href="/docs/ja/library">ライブラリ</a>
+    <a class="toc-only" href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a class="toc-only" href="/docs/ja/local-models">ローカルモデル</a>
+    <a class="toc-only" href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a class="toc-only" href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="/docs/ja/import">magpie に追加</a>
     <a href="/docs/integrate">アプリ連携</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
@@ -133,15 +193,19 @@
       <tr><td><code>website</code></td><td>あなたのサイト（https）。プロバイダのページに表示されます。</td></tr>
       <tr><td><code>keys</code></td><td>ユーザーがキーを作成するページ（https）。リンクにキーがないとき、ダイアログからこのページへリンクします。</td></tr>
       <tr><td><code>icon</code></td><td>独自の画像（https）：PNG、JPEG、GIF、WebP、ICO、SVG のいずれかで、最大 1&nbsp;MB。ユーザーがインポートを確認した後に magpie が一度だけダウンロードし、プロバイダと一緒に保存します。省略すると、magpie は <code>catalog</code> のベンダーのロゴか、シンプルなマークを表示します。</td></tr>
+      <tr><td><code>balance</code></td><td>キーの残高を読む URL（https）。いずれかのベース URL と同じホストでなければなりません。magpie はチャットのリクエストと同じようにキーを付けて問い合わせます。URL 内の <code>{key}</code> はキーに置き換わります。省略すると、magpie は知っているベンダーの残高を読み、リレーには new-api と sub2api がキーの残高を返す場所（<code>/api/usage/token</code>、<code>/v1/usage</code>）を問い合わせます。残高が別の場所で返る場合に指定してください。</td></tr>
+      <tr><td><code>balance_path</code></td><td>JSON 応答のどこに金額があるか：ドット区切りのパスで、リストの要素は番号で指定します（<code>data.balance</code>、<code>balance_infos.0.total_balance</code>）。独自の単位からの計算もできます（<code>$ data.quota / 500000</code>）。前に <code>$</code> または <code>¥</code> を付けると通貨、後ろに <code>%</code> を付けると 1 を 100% として表示します。複数の金額は <code>;</code> で区切り、それぞれに <code>ラベル:</code> を付けられます。<code>balance</code> が必要です。</td></tr>
+      <tr><td><code>balance_method</code></td><td><code>GET</code>（既定）、または本文なしの <code>POST</code>。<code>balance</code> が必要です。</td></tr>
       <tr><td><code>preset</code><span class="req">または name</span></td><td>プリセット id。そのエンドポイント、カタログ、ページが使われます。<code>name</code> で名前を変えられます。</td></tr>
       <tr><td><code>region</code></td><td>リージョンのあるプリセットで、どのリージョンを使うか。</td></tr>
     </table></div>
     <p>プリセットを使わない場合、<code>chat</code>、<code>responses</code>、<code>anthropic</code>、<code>gemini</code> のうち少なくとも 1 つが必要です。対応する API はすべて指定してください。各エージェントはネイティブに話せるものを使います。ベース URL は <b>https</b> でなければなりません。ただし <code>localhost</code>、ループバック、プライベートアドレス、<code>*.local</code> 宛ては、モデルサーバーが通常 TLS なしで動くため、http も使えます。クエリ、フラグメント、認証情報は含められません。</p>
+    <p>リンクでは残高のために他のヘッダーやトークンを設定できません。アカウント全体のアクセストークンは 1 つのキーより価値があり、URL はブラウザの履歴に残るからです。トークンが必要な残高は、プロバイダの編集画面で設定してください。</p>
 
     <h3 id="presets">プリセット</h3>
     <p>magpie が組み込みで知っているベンダーです。<code>magpie presets</code> で最新の一覧を表示できます。</p>
     <div class="chips">
-      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
+      <span class="chip"><code>anthropic</code></span><span class="chip"><code>openai</code></span><span class="chip"><code>google</code></span><span class="chip"><code>deepseek</code></span><span class="chip"><code>xai</code></span><span class="chip"><code>moonshot</code><span>Kimi</span></span><span class="chip"><code>moonshot-cn</code></span><span class="chip"><code>kimi-code</code></span><span class="chip"><code>kimi-code-cn</code></span><span class="chip"><code>zhipu</code><span>GLM · api · coding</span></span><span class="chip"><code>zai</code><span>api · coding</span></span><span class="chip"><code>minimax</code></span><span class="chip"><code>minimax-cn</code></span><span class="chip"><code>stepfun</code><span>plan · api</span></span><span class="chip"><code>stepfun-cn</code><span>plan · api</span></span><span class="chip"><code>xiaomi</code><span>MiMo</span></span><span class="chip"><code>longcat</code></span><span class="chip"><code>baidu-qianfan</code><span>千帆 · personal · team · api</span></span><span class="chip"><code>tencent-cloud</code><span>plan · cn · intl · enterprise · enterprise-intl</span></span><span class="chip"><code>huaweicloud</code><span>plan · api</span></span><span class="chip"><code>volcengine</code><span>火山方舟 · coding · agent · api</span></span><span class="chip"><code>qwen</code></span><span class="chip"><code>qwen-cn</code></span><span class="chip"><code>qwen-token-plan</code></span><span class="chip"><code>bailian-token-plan</code></span><span class="chip"><code>qwencloud</code><span>ap-southeast-1 · us-east-1 · eu-central-1 · ap-northeast-1 · cn-hongkong · cn-beijing</span></span><span class="chip"><code>qwencloud-token-plan</code></span><span class="chip"><code>mistral</code></span><span class="chip"><code>voyage</code></span><span class="chip"><code>groq</code></span><span class="chip"><code>bedrock</code></span><span class="chip"><code>ollama-cloud</code></span><span class="chip"><code>openrouter</code></span><span class="chip"><code>vercel</code></span><span class="chip"><code>opencode-go</code></span><span class="chip"><code>clinepass</code></span><span class="chip"><code>opencode-zen</code></span><span class="chip"><code>kilo</code></span><span class="chip"><code>commandcode</code></span><span class="chip"><code>together</code></span><span class="chip"><code>fireworks</code></span><span class="chip"><code>siliconflow</code><span>cn · intl</span></span><span class="chip"><code>nvidia</code></span><span class="chip"><code>modelscope</code><span>魔搭</span></span><span class="chip"><code>aihubmix</code></span><span class="chip"><code>pipellm</code></span><span class="chip"><code>302ai</code></span><span class="chip"><code>cherryin</code></span><span class="chip"><code>yylx</code><span>auto · global · cn</span></span><span class="chip"><code>ollama</code></span><span class="chip"><code>lmstudio</code></span>
     </div>
     <p>プリセットのあるベンダーなら、キーを付けるだけです：<code>magpie://import?preset=deepseek&amp;key=sk-…</code>。一覧に追加したい場合は <a href="https://github.com/yetone/magpie/issues">issue を作成</a>してください。</p>
 
@@ -164,6 +228,9 @@
         <label class="m-custom">Web サイト <i>任意</i><input name="website" placeholder="https://acme.example"></label>
         <label class="m-custom">キーのページ <i>任意</i><input name="keys" placeholder="https://acme.example/keys"></label>
         <label class="m-custom">アイコン <i>任意、https</i><input name="icon" placeholder="https://acme.example/logo.svg"></label>
+        <label class="m-custom">残高 URL <i>任意、ベース URL と同じホスト</i><input name="balance" class="mono" placeholder="https://api.acme.example/v1/dashboard/balance"></label>
+        <label class="m-custom">残高の項目 <i>任意</i><input name="balance_path" class="mono" placeholder="data.balance"></label>
+        <label class="m-custom">残高のメソッド<select name="balance_method"><option value="">GET</option><option value="POST">POST</option></select></label>
       </form>
       <div class="out">
         <div class="row"><span>Web リンク</span><code id="o-web"></code><button class="copy" data-copy="o-web">コピー</button></div>
@@ -238,6 +305,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
       <li><b>https のみ。</b>このマシンとローカルネットワーク宛て以外の http は拒否されます。<code>file:</code>、URL 内の認証情報、その他のスキームは即座に拒否されます。</li>
       <li><b>読み込みは一度だけ。</b>アプリ内では、リンクの内容がウィンドウに一度だけ渡されます。再読み込みしてもダイアログは再表示されません。</li>
       <li><b>アイコンは埋め込まず、取得する。</b><code>icon=</code> の URL は magpie がダウンロードします。ユーザーがインポートを確認した後だけ、https 経由だけ、自身のアイコンフォルダへだけ — 最大 1&nbsp;MB で、形式もチェックされます。取得は usemagpie.ai のアイコンプロキシを経由するので、あなたのサーバーに見えるのはユーザーの IP ではなく Cloudflare のアドレスです。リクエストは Cloudflare から出るため、ユーザー自身のマシンやローカルネットワークには届きません。ループバックやローカルネットワークの名前は、リクエストの前に拒否されます。ページとダイアログがリモートの画像を直接読み込むことはありません。</li>
+      <li><b>残高はあなたのホストでだけ読む。</b><code>balance=</code> のホストがリンク内のどのベース URL のものでもなければ、リンク全体が拒否されます。キーがリクエストの行き先以外へ送られることはありません。問い合わせはユーザーがプロバイダを追加した後だけです。</li>
       <li><b>キーはサーバーを通らない。</b>Web リンクはパラメータをフラグメントに置きます。キーは最終的に <code>~/.config/magpie/providers.json</code> にのみ保存され、ユーザー本人しか読めません。</li>
     </ul>
     <div class="note"><b>リンク内のキーは機密情報です。</b>キーをリンクに入れるのは、そのユーザー本人しか見られないページだけにし、できれば magpie 用に発行した、取り消し可能なキーを使ってください。共有キーを公開リンクに入れてはいけません。</div>
@@ -265,8 +333,18 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     <a href="/docs/ja/docker">Docker</a>
     <a href="/docs/ja/privacy">プライバシー</a>
     <a href="/docs/ja/masking">プライバシーマスキング</a>
+    <a href="/docs/ja/mcp-router">MCP ルーター</a>
+    <a href="/docs/ja/library">ライブラリ</a>
+    <a href="/docs/ja/claude-code-models">Claude Code で他のモデル</a>
+    <a href="/docs/ja/codex-models">Codex で他のモデル</a>
+    <a href="/docs/ja/gemini-cli-models">Gemini CLI で他のモデル</a>
+    <a href="/docs/ja/subscriptions">サブスクを任意のエージェントで</a>
+    <a href="/docs/ja/local-models">ローカルモデル</a>
+    <a href="/docs/ja/opencode-models">OpenCode で他のモデル</a>
+    <a href="/docs/ja/alternatives">CC Switch・CCR との比較</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/ja/contributors">コントリビューター</a>
     <a href="https://github.com/yetone/magpie-releases/releases">リリース</a>
   </div>
 </div></footer>
@@ -294,9 +372,9 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     ["anthropic", "Anthropic"], ["openai", "OpenAI"], ["google", "Google Gemini"], ["deepseek", "DeepSeek"], ["xai", "xAI"],
     ["moonshot", "Kimi"], ["moonshot-cn", "Kimi（中国）"], ["kimi-code", "Kimi Code"], ["kimi-code-cn", "Kimi Code（中国）"], ["zhipu", "Zhipu GLM"],
     ["zai", "Z.ai"], ["minimax", "MiniMax"], ["minimax-cn", "MiniMax（中国）"], ["stepfun", "StepFun"], ["stepfun-cn", "StepFun（中国）"],
-    ["xiaomi", "Xiaomi MiMo"], ["baidu-qianfan", "Baidu Qianfan"], ["tencent-cloud", "Tencent Cloud"],
-    ["huaweicloud", "Huawei Cloud MaaS"], ["volcengine", "Volcengine Ark"], ["qwen", "Qwen"], ["qwen-cn", "Qwen（中国）"], ["qwen-token-plan", "Qwen Token Plan"], ["bailian-token-plan", "Alibaba Cloud Bailian Token Plan"],
-    ["mistral", "Mistral"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"],
+    ["xiaomi", "Xiaomi MiMo"], ["longcat", "LongCat"], ["baidu-qianfan", "Baidu Qianfan"], ["tencent-cloud", "Tencent Cloud"],
+    ["huaweicloud", "Huawei Cloud MaaS"], ["volcengine", "Volcengine Ark"], ["qwen", "Qwen"], ["qwen-cn", "Qwen（中国）"], ["qwen-token-plan", "Qwen Token Plan"], ["bailian-token-plan", "Alibaba Cloud Bailian Token Plan"], ["qwencloud", "Qwen Cloud"], ["qwencloud-token-plan", "Qwen Cloud Token Plan"],
+    ["mistral", "Mistral"], ["voyage", "Voyage AI"], ["groq", "Groq"], ["bedrock", "Amazon Bedrock"], ["ollama-cloud", "Ollama Cloud"], ["nous", "Nous Portal"], ["openrouter", "OpenRouter"], ["vercel", "Vercel AI Gateway"],
     ["opencode-go", "OpenCode Go"], ["clinepass", "ClinePass"], ["opencode-zen", "OpenCode Zen"], ["kilo", "Kilo Gateway"], ["commandcode", "Command Code"],
     ["together", "Together AI"], ["fireworks", "Fireworks"], ["siliconflow", "SiliconFlow"], ["nvidia", "NVIDIA NIM"], ["modelscope", "ModelScope"],
     ["aihubmix", "AiHubMix"], ["pipellm", "PipeLLM"], ["302ai", "302.AI"], ["cherryin", "CherryIN"], ["yylx", "鱼鱼连线"],
@@ -312,6 +390,7 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
     "tencent-cloud": [["", "プラン · 中国"], ["cn", "従量課金 · 中国"], ["intl", "従量課金 · グローバル"], ["enterprise", "Enterprise プラン · 中国"], ["enterprise-intl", "Enterprise プラン · グローバル"]],
     "huaweicloud": [["", "Token Plan"], ["api", "従量課金"]],
     "volcengine": [["", "Coding Plan"], ["agent", "Agent Plan"], ["api", "従量課金"]],
+    "qwencloud": [["", "ap-southeast-1"], ["us-east-1", "us-east-1"], ["eu-central-1", "eu-central-1"], ["ap-northeast-1", "ap-northeast-1"], ["cn-hongkong", "cn-hongkong"], ["cn-beijing", "cn-beijing"]],
     "bedrock": [["", "us-east-1"], ["us-east-2", "us-east-2"], ["us-west-2", "us-west-2"], ["eu-central-1", "eu-central-1"], ["eu-west-1", "eu-west-1"], ["eu-west-3", "eu-west-3"], ["ap-northeast-1", "ap-northeast-1"], ["ap-southeast-1", "ap-southeast-1"], ["ap-southeast-2", "ap-southeast-2"], ["ap-south-1", "ap-south-1"]],
     "siliconflow": [["", "中国"], ["intl", "グローバル"]],
     "yylx": [["", "自動"], ["global", "グローバル"], ["cn", "中国本土"]],
@@ -371,6 +450,18 @@ href = <span class="s">"https://usemagpie.ai/import#"</span> + urlencode({
           el("icon").classList.add("bad");
           errs.push("icon= は https の画像 URL にしてください。そうでないと magpie は無視します。");
         }
+      }
+      {
+        const v = put("balance");
+        let ok = !v;
+        if (v) try {
+          const u = new URL(v);
+          ok = u.protocol === "https:" && !u.username && !u.password && !u.hash
+            && ["chat", "responses", "anthropic", "gemini"].some((k) => { try { return new URL(el(k).value.trim()).host.toLowerCase() === u.host.toLowerCase(); } catch { return false; } });
+        } catch {}
+        el("balance").classList.toggle("bad", !ok);
+        if (!ok) errs.push("balance= は https の URL で、いずれかのベース URL と同じホストにしてください。そうでないと magpie はリンクを拒否します。");
+        if (v) { put("balance_path"); put("balance_method"); }
       }
     }
     put("key");

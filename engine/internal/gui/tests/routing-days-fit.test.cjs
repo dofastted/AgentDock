@@ -17,7 +17,9 @@ const ymd = (d) => [d.getFullYear(), d.getMonth() + 1, d.getDate()].map((n) => S
 const allDays = Array.from({ length: 30 }, (_, i) => ({ day: ymd(new Date(now.getTime() - i * 864e5)), requests: 100 + i }));
 const at = (i) => new Date(now.getTime() - (i + 1) * 60e3).toISOString();
 const who = { id: "fixture-key", provider: "fixture", name: "Fixture", who: "key-1", kind: "key", model: "model-a", routing: "", used: 0 };
-const routes = Array.from({ length: 4 }, (_, i) => ({
+// a day's requests fill the window, as a day of 100 or more does: the bar
+// held when a day comes in needs the room under it to scroll into
+const routes = Array.from({ length: 12 }, (_, i) => ({
   id: 100 - i, seq: 100 - i, time: at(i), agent: "fixture", model: "model-a", provider: "fixture",
   order: [who], tries: [{ id: who.id, model: "model-a", start: at(i), done: true, status: 200, ms: 1200 }],
   done: true, status: 200, ms: 1200, tokens: 3000,
@@ -67,6 +69,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], asked = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, allDays, asked));

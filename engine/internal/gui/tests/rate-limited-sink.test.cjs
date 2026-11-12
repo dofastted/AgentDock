@@ -92,6 +92,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 900, height: 720 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
@@ -130,6 +131,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 1100, height: 1400 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
@@ -142,7 +144,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.match(await stage.textContent(), new RegExp(w.row));
       await page.waitForFunction((s) => document.body.innerText.includes(s), zh ? "已排到最后" : "so it went to the back");
 
-      // the providers with several accounts: set at once
+      // the providers with several accounts, on the Routing groups page:
+      // set at once
+      await page.evaluate(() => window.show("groups"));
       const pool = page.locator(".rt-pool", { hasText: "WorkBuddy AI" });
       await pool.waitFor();
       // the pool sits under the window's foot: wheeled to, as the reader

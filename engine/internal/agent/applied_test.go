@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,52 @@ func TestDriftBypassed(t *testing.T) {
 	}
 }
 
+// ifccod7391564 on X: the prompts magpie's bridge gives Claude Code, in
+// magpie's own work folder, go into its history.jsonl too. They reached
+// magpie, so they are no use round it: only the user's own prompts there
+// count as Claude Code bypassing magpie.
+func TestClaudeBridgePromptsArentBypass(t *testing.T) {
+	home, _ := codexHome(t, "", "")
+	managed := claudeManaged
+	claudeManaged = func() string { return filepath.Join(home, "managed-settings.json") }
+	t.Cleanup(func() { claudeManaged = managed })
+	defer func(s time.Time) { started = s }(started)
+	started = time.Now().Add(-time.Hour)
+	defer func(f func(string) time.Time) { lastSeen = f }(lastSeen)
+	lastSeen = func(string) time.Time { return time.Time{} }
+	a := claude(home)
+	if err := a.Apply("model", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	m := appliedLoad()
+	r := m["claude"]
+	r.At = time.Now().Add(-10 * time.Minute)
+	m["claude"] = r
+	appliedSave(m)
+	hist := filepath.Join(home, ".claude", "history.jsonl")
+	at := time.Now().Add(-5 * time.Minute).UnixMilli()
+	var lines string
+	for _, project := range []string{
+		"/private/var/folders/xz/6c5sgg_n3sgdlpc209dpp2n80000gn/T/magpie-claude-work-501", // the reporter's Mac
+		"/tmp/magpie-claude-work-1000/",
+		`C:\\Users\\me\\AppData\\Local\\Temp\\magpie-claude-work`,
+		"C:/Users/me/AppData/Local/Temp/magpie-claude-work",
+		"/mnt/c/Users/me/AppData/Local/Temp/magpie-claude-work",
+	} {
+		lines += fmt.Sprintf(`{"display":"[Pasted text #1 +30 lines]","timestamp":%d,"project":"%s","sessionId":"s"}`+"\n", at, project)
+	}
+	os.WriteFile(hist, []byte(lines), 0o600)
+	if d := a.Drift(); d != nil {
+		t.Fatalf("magpie's own prompts counted as bypass: %+v", d)
+	}
+	// the user's own prompt, in a folder of theirs, still does: even one
+	// whose name only starts like magpie's
+	os.WriteFile(hist, []byte(lines+fmt.Sprintf(`{"display":"hi","timestamp":%d,"project":"/Users/me/magpie-claude-workshop","sessionId":"u"}`+"\n", at)), 0o600)
+	if d := a.Drift(); d == nil || d.Kind != "bypassed" {
+		t.Fatalf("the user's own prompt: %+v", d)
+	}
+}
+
 // A profile that sets its own provider wins over magpie's top level.
 func TestCodexDriftProfile(t *testing.T) {
 	home, read := codexHome(t, "", "")
@@ -151,13 +198,18 @@ func TestDriftUnwiredEveryAgent(t *testing.T) {
 	managed := claudeManaged
 	claudeManaged = func() string { return filepath.Join(home, "managed-settings.json") }
 	t.Cleanup(func() { claudeManaged = managed })
-	almaApp := startAlma(t) // Alma keeps its providers in the app
+	almaApp := startAlma(t)       // Alma keeps its providers in the app
+	shelleyApp := startShelley(t) // so does Shelley its models
 	// OpenHanako gives the model to an agent of its own
 	os.MkdirAll(filepath.Join(home, ".hanako", "agents", "hana"), 0o755)
 	os.WriteFile(filepath.Join(home, ".hanako", "agents", "hana", "config.yaml"), []byte("agent:\n  name: Hana\n"), 0o644)
+	// Craft Agents, once it has run and saved its config
+	craftFixture(t, home)
 	// AstrBot is connected once it has written its settings
 	os.MkdirAll(filepath.Join(home, ".astrbot", "data"), 0o755)
 	os.WriteFile(filepath.Join(home, ".astrbot", "data", "cmd_config.json"), []byte(astrbotConfig), 0o644)
+	// QwenPaw, once it has written its agents' settings
+	qwenpawFixture(t, home)
 	for _, a := range All() {
 		// agy's gateway is in the command that starts it, in no file (its
 		// Check is TestAgy's)
@@ -211,6 +263,7 @@ func TestDriftUnwiredEveryAgent(t *testing.T) {
 				return nil
 			})
 			n += almaApp.repoint(gateway.URL(), "http://127.0.0.1:9")
+			n += shelleyApp.repoint(gateway.URL(), "http://127.0.0.1:9")
 			if n == 0 {
 				t.Fatal("no file holds the gateway's URL")
 			}
@@ -269,6 +322,7 @@ func TestCodexDriftReached(t *testing.T) {
 		at++
 		db.Exec(`INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body) VALUES (?, 0, ?, 'codex_api::endpoint::responses_websocket', ?)`,
 			at, level, "responses_websocket.connect{}: "+body)
+		forgetReached()
 	}
 	log("INFO", "connecting to websocket: "+ws)
 	log("ERROR", "failed to connect to websocket: IO error: Connection refused (os error 61), url: "+ws)
@@ -303,5 +357,37 @@ func TestDriftInstalledMagpie(t *testing.T) {
 	os.WriteFile(cfg, []byte("openai_base_url = \"http://127.0.0.1:9999"+gateway.CodexPath+"\"\nmodel = \"fake/m1\"\n"), 0o644)
 	if d := cx.Drift(); d == nil || d.Kind != "unwired" {
 		t.Fatalf("wired to neither: %+v", d)
+	}
+}
+
+// Whether the installed magpie wired the agent is looked up in the bytes
+// already read, not in a copy of the file and two strings of it: each
+// field's drift asked, 5 MB a poll of a Codex config.toml of 1.5 MB.
+func TestInstalledWiringReadsNoCopy(t *testing.T) {
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:3426")
+	home, _ := codexHome(t, "", "")
+	cx := codex(home)
+	var cfg strings.Builder
+	cfg.WriteString("openai_base_url = \"http://" + gateway.DefaultAddr + gateway.CodexPath + "\"\nmodel = \"fake/m1\"\n")
+	for i := range 20000 {
+		fmt.Fprintf(&cfg, "[projects.\"/Users/someone/work/project-%05d\"]\ntrust_level = \"trusted\"\n", i)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.WriteFile(path, []byte(cfg.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(path, old, old)
+	if !cx.theInstalled() {
+		t.Fatal("the installed magpie's wiring not seen")
+	}
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	for range 10 {
+		cx.theInstalled()
+	}
+	runtime.ReadMemStats(&m1)
+	if n := m1.TotalAlloc - m0.TotalAlloc; n > 1<<20 {
+		t.Fatalf("10 looks at an unchanged config allocated %d bytes", n)
 	}
 }

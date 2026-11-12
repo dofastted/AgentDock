@@ -15,11 +15,11 @@ const { reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const words = {
-  en: { name: "Ask again after a refusal", head: "Replies", never: "Never ask again", all: "All", sub: "Claude Code then switches to its own fallback model" },
-  zh: { name: "被拒答后再问", head: "回复", never: "不再问", all: "全部", sub: "Claude Code 随后会像直连 Anthropic API 时一样" },
-  "zh-TW": { name: "被拒答後再問", head: "回覆", never: "不再問", all: "全部", sub: "Claude Code 隨後會像直連 Anthropic API 時一樣" },
-  ja: { name: "拒否のあと聞き直す", head: "応答", never: "聞き直さない", all: "すべて", sub: "フォールバックモデルに切り替えます" },
-  de: { name: "Nach einer Ablehnung erneut fragen", head: "Antworten", never: "Nie", all: "Alle", sub: "wechselt dann selbst zu seinem Ausweichmodell" },
+  en: { name: "Ask again after a refusal", head: "Routing", never: "Never ask again", all: "All", sub: "Claude Code then switches to its own fallback model" },
+  zh: { name: "被拒答后再问", head: "路由", never: "不再问", all: "全部", sub: "Claude Code 随后会像直连 Anthropic API 时一样" },
+  "zh-TW": { name: "被拒答後再問", head: "路由", never: "不再問", all: "全部", sub: "Claude Code 隨後會像直連 Anthropic API 時一樣" },
+  ja: { name: "拒否のあと聞き直す", head: "ルーティング", never: "聞き直さない", all: "すべて", sub: "フォールバックモデルに切り替えます" },
+  de: { name: "Nach einer Ablehnung erneut fragen", head: "Weiterleitung", never: "Nie", all: "Alle", sub: "wechselt dann selbst zu seinem Ausweichmodell" },
 };
 
 function serve(lang, saved) {
@@ -55,6 +55,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width, height: 900 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const saved = [];
@@ -62,7 +63,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await watchSettingsReads(page);
       await page.goto("http://magpie.test/?view=settings&tab=models");
       await settingsDrawn(page); // rows found are the ones that stay (#1659)
-      const row = page.locator("#replyList #refusalRetriesRow");
+      const row = page.locator("#routeList #refusalRetriesRow");
       await row.waitFor();
       // scrolled to as a reader does, with the wheel: WebKit at 420 put
       // back a scroll made from script
@@ -75,14 +76,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }
       assert.equal(await row.locator(".name").textContent(), w.name);
       assert((await row.locator(".sub").textContent()).includes(w.sub));
-      for (const part of [".name", ".sub", ".segs"]) {
+      // its explanation rests out of sight, shown whole in the row's hover card
+      // (settings-hints.test.cjs)
+      assert.equal(await row.locator(".sub").first().evaluate((e) => getComputedStyle(e).getPropertyValue("--hint").trim()), "1", "the explanation shows at rest");
+      for (const part of [".name", ".segs"]) {
         const fit = await row.locator(part).first().evaluate((e) => {
           const r = e.getBoundingClientRect();
           return e.scrollWidth <= e.clientWidth + 1 && r.width > 0 && r.right <= innerWidth + 1;
         });
         assert(fit, `${part} fits at ${width}`);
       }
-      assert.equal(await page.locator("#replyList").evaluate((l) => l.previousElementSibling.textContent.trim()), w.head);
+      assert.equal(await page.locator("#routeList").evaluate((l) => l.previousElementSibling.textContent.trim()), w.head);
       const opts = row.locator(".segs button");
       assert.deepEqual(await opts.allTextContents(), [w.never, "1", "2", "3", w.all]);
       const all = row.locator(".segs button", { hasText: w.all });

@@ -87,6 +87,38 @@ func TestHistoryKeepsDaysAndDropsOld(t *testing.T) {
 	}
 }
 
+// Today's plain file, however big, takes no room from the days before it:
+// it is kept whatever its size, and is a fraction of it once gzipped. A busy
+// day counted plain dropped every day before it, and the Context tab
+// listed only today's sessions (linkaww on Discord).
+func TestHistoryTodayTakesNoRoomFromPastDays(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	now := historyNoon(t)
+	dir := HistoryDir()
+	saveRoute(Route{ID: 1, Time: now, Model: "a", Done: true})
+	var want []string
+	for i := 3; i >= 1; i-- {
+		day := now.AddDate(0, 0, -i).Format(dayForm)
+		if err := os.WriteFile(filepath.Join(dir, day+".jsonl.gz"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, day)
+	}
+	want = append(want, now.Format(dayForm))
+	// today's file past the whole budget (sparse: no bytes written)
+	if err := os.Truncate(filepath.Join(dir, now.Format(dayForm)+".jsonl"), historyBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	pruneHistory(dir, now)
+	var left []string
+	for _, d := range historyFiles(dir) {
+		left = append(left, d.day)
+	}
+	if !slices.Equal(left, want) {
+		t.Fatalf("kept %v, want %v: the days before today dropped for today's size", left, want)
+	}
+}
+
 // A route that began on a day gzipped already, its reply streamed past
 // midnight and past that hour's prune, is kept with the day's other
 // routes: its file is added to the day's .gz, not written over it, and the
@@ -548,5 +580,37 @@ func BenchmarkHistoryLook(b *testing.B) {
 	for b.Loop() {
 		f.Write(one)
 		History("")
+	}
+}
+
+// A day that is over, asked for the first time, parses only its latest
+// routes too: every route of a busy day's .gz was parsed to keep the last
+// historyMax of them, and a small server opening the Usage page's Context
+// tab ran out of memory (Yayoi_no_yume on X).
+func TestHistoryParsesOnlyAGzDaysLatest(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := HistoryDir()
+	os.MkdirAll(dir, 0o700)
+	day := time.Now().AddDate(0, 0, -2)
+	at := day.Add(-time.Hour)
+	n := historyMax + historySlack + 3000
+	var buf bytes.Buffer
+	z := gzip.NewWriter(&buf)
+	for i := 1; i <= n; i++ {
+		b, _ := json.Marshal(Route{ID: int64(i), Model: "m", Time: at.Add(time.Duration(i) * time.Millisecond)})
+		z.Write(append(b, '\n'))
+	}
+	z.Close()
+	os.WriteFile(filepath.Join(dir, day.Format(dayForm)+".jsonl.gz"), buf.Bytes(), 0o600)
+	history.mu.Lock()
+	history.counts = nil
+	historyParsed.Store(0)
+	history.mu.Unlock()
+	days, rs, cut := History(day.Format(dayForm))
+	if len(days) != 1 || days[0].Requests != n || len(rs) != historyMax || !cut || rs[len(rs)-1].ID != int64(n) || rs[0].ID != int64(n-historyMax+1) {
+		t.Fatalf("days %+v, %d routes, cut %v", days, len(rs), cut)
+	}
+	if n := historyParsed.Load(); n > historyMax+historySlack {
+		t.Fatalf("parsed %d routes for a day's latest %d", n, historyMax)
 	}
 }

@@ -104,14 +104,15 @@ var (
 
 // beginHandover starts the new version and hands the gateway over to it
 // in the background, the caller quitting (leave) once that is done. False
-// when this restart can't hand over: the caller restarts as before.
-func beginHandover(bundle, exe string, window bool, view string) bool {
+// when this restart can't hand over: the caller restarts as before. quiet,
+// a restart by itself: the Mac's new one opens in the background.
+func beginHandover(bundle, exe string, window bool, view string, quiet bool) bool {
 	if !handsOver() {
 		return false
 	}
 	ho := &handover{gw: served.Load(), quit: make(chan func(), 1)}
 	if bundle != "" {
-		ho.fallback = func() error { return update.Relaunch(bundle, window) }
+		ho.fallback = func() error { return update.Relaunch(bundle, window, quiet) }
 	} else {
 		ho.fallback = func() error { return relaunchBinary(exe, "", window, view) }
 	}
@@ -126,7 +127,7 @@ func beginHandover(bundle, exe string, window bool, view string) bool {
 	}
 	ho.offer = offer
 	if bundle != "" {
-		err = openBeside(bundle, window)
+		err = openBeside(bundle, window, quiet)
 	} else {
 		err = startBeside(exe, window, view)
 	}
@@ -201,6 +202,10 @@ func (ho *handover) run() {
 	}
 	ho.offer.Withdraw()
 	handedOver.Store(true)
+	// and is gone by the end of its drain and a little after, whatever
+	// holds its quit up: the copy an update left lived on hidden for
+	// three hours in #4938, writing beside the new one
+	quitBy(gateway.HandedOffDrain() + quitGrace)
 	log.Printf("update: magpie %s (pid %d) serves the gateway now; this one finishes its requests and quits", c.Hello.Version, c.Hello.PID)
 	if onHandedOver != nil {
 		onHandedOver()
@@ -213,6 +218,31 @@ func (ho *handover) run() {
 	}
 	ho.offer.Close()
 	quit()
+}
+
+// quitGrace is how long past the gateway's drain a magpie that handed it
+// over has to quit (quitBy), for what its end flushes; exitNow is
+// os.Exit, which tests stand in for.
+var (
+	quitGrace = 3 * time.Minute
+	exitNow   = os.Exit
+)
+
+// quitDeadline is the deadline quitBy set, nil before a handover.
+var quitDeadline atomic.Pointer[time.Timer]
+
+// quitBy exits the process after d unless it has ended by then: a
+// magpie that handed the gateway over is hidden, serves nothing, and has
+// nothing left for anyone, and its quit waiting on something that never
+// comes left it running for hours (#4938).
+func quitBy(d time.Duration) {
+	t := time.AfterFunc(d, func() {
+		log.Printf("update: still running %s after handing the gateway over; exiting", d)
+		exitNow(0)
+	})
+	if old := quitDeadline.Swap(t); old != nil {
+		old.Stop()
+	}
 }
 
 // fallbackWait is how long a handover given up waits for the requests in

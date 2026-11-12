@@ -4,6 +4,9 @@
   "name": "usemagpie",
   "main": "worker.js",
   "compatibility_date": "2026-09-01",
+  // the contributors page's list, from git history (credits-cli.mjs); a
+  // build that can't read git or GitHub keeps the last list, or none
+  "build": { "command": "node credits-cli.mjs wall" },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -17,6 +20,12 @@
   // the ledger of releases the Stable channel is chosen from (worker.js,
   // "The Stable channel"), kept by the cron every quarter hour
   "kv_namespaces": [{ "binding": "LEDGER", "id": "716b22ec7d4c496abb7b3dc085258fde" }],
-  "triggers": { "crons": ["*/15 * * * *"] },
+  // RELEASES: each release's files, copied from GitHub by the five-minute
+  // cron and served at /files (files.js)
+  "r2_buckets": [{ "binding": "RELEASES", "bucket_name": "magpie-releases" }],
+  // PLUGINS: Discover's counts, each plugin's users and likes
+  // (pluginstats.js)
+  "d1_databases": [{ "binding": "PLUGINS", "database_name": "magpie-plugins", "database_id": "ec0a0670-9de4-4906-8534-ac83c8ba3cd6" }],
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *"] },
   "observability": { "enabled": true }
 }

@@ -78,6 +78,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         const page = await browser.newPage({ viewport: where === "panel" ? { width: 420, height: 640 } : { width: 1100, height: 700 } });
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const fx = fixture(lang);
@@ -92,14 +93,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(await page.locator(`${cd} .ag-st-t`).textContent(), await said(3));
           menu = page.locator(`${cd} > .ag-menu`);
         } else {
-          assert.equal(await page.locator(`${cd} .ag-sum .vt`).textContent(), "DeepSeek Pro, DeepSeek Flash +1");
+          assert.equal(await page.locator(`${cd} .ag-sum .vt`).textContent(), await page.evaluate(() => t("All {n} models", { n: 3 })));
           await page.locator(`${cd} .ag-sum`).click();
           menu = page.locator(`${cd} .ag-open .ag-menu`);
           await page.waitForFunction((sel) => document.querySelector(sel)?.getBoundingClientRect().height > 0, `${cd} .ag-open .ag-menu`);
           assert.equal(await page.locator(`${cd} .ag-conn-said`).textContent(), await said(3));
         }
         assert.equal(await menu.count(), 1, "no models button");
-        assert.equal(await menu.locator(".v").textContent(), "DeepSeek Pro, DeepSeek Flash +1");
+        assert.equal(await menu.locator(".v").textContent(), await page.evaluate(() => t("All {n} models", { n: 3 })));
 
         const y = await page.evaluate(() => scrollY);
         await menu.click();
@@ -118,7 +119,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await page.locator(where === "window" ? `${cd} .ag-st-t` : `${cd} .ag-conn-said`).textContent(), await said(2));
         // and back in
         await box.locator(".am-mr", { hasText: "DeepSeek Flash" }).click();
-        await page.waitForFunction(() => document.querySelector(".ag-menu .v")?.textContent === "DeepSeek Pro, DeepSeek Flash +1");
+        await page.waitForFunction(() => document.querySelector(".ag-menu .v")?.textContent === t("All {n} models", { n: 3 }));
         await page.waitForTimeout(150);
         assert.deepEqual(fx.posts.at(-1), []);
 

@@ -26,7 +26,7 @@ const PLUGINS = [
   { id: "middleware", name: "JS gateway plugins", sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers", one: "1 gateway plugin on", many: "{n} gateway plugins on" },
   { id: "otel", name: "Observability", sub: "Send each request's traces and metrics to an OpenTelemetry collector, such as Langfuse", one: "Sending to a collector", many: "Sending to a collector" },
   { id: "redact", name: "Privacy masking", sub: "Secrets, personal data and your own words go to vendors as placeholders, and come back as they were", one: "Masking is on", many: "Masking is on" },
-  { id: "rotation", name: "Routing strategies", sub: "The routings besides Smart: In order, In turn, Least used first, Weekly pace, By weight, Free first and Speed first", one: "1 provider or group routed so", many: "{n} providers and groups routed so" },
+  { id: "rotation", name: "Routing strategies", sub: "The routings besides Smart: In order, Until used up, In turn, Least used first, Use before expiry, By weight, Free first, Speed first and Cheapest first", one: "1 provider or group routed so", many: "{n} providers and groups routed so" },
   { id: "routing", name: "Routing", sub: "Each request as the gateway routes it, the accounts it weighed and what each answered, and your routing groups", one: "1 group in use", many: "{n} groups in use" },
   { id: "search", name: "Web search", sub: "Models that can't search the web search with a provider that can, or a search API", one: "1 search source set up", many: "{n} search sources set up" },
   { id: "sessions", name: "Sessions", sub: "Your agents' past conversations: read, search, resume and export them", one: "Recording gateway conversations", many: "Recording gateway conversations" },
@@ -53,6 +53,11 @@ function builtins(st, broken, config) {
     const on = chosen || inUse > 0;
     const f = { id: p.id, name: p.name, sub: p.sub, on, chosen, source: inUse > 0 && !chosen ? "in use" : "preset", state: on ? "active" : "off", inUse, use: inUse === 1 ? p.one : inUse > 1 ? p.many : undefined, broken };
     if (p.id === "gateway") Object.assign(f, { schema: GATEWAY_SCHEMA, config });
+    // as the manifests say them: the page each has, or is used on
+    const page = { gateway: "gateway", library: "library", redact: "masking", routing: "routing", sessions: "sessions", usage: "usage" }[p.id];
+    const opens = { budget: "gateway", groups: "groups", rotation: "providers", warmups: "providers", middleware: "plugins", tools: "plugins" }[p.id];
+    if (page) f.page = page;
+    if (opens) f.opens = opens;
     return f;
   });
 }
@@ -112,7 +117,10 @@ function server(lang, posts, broken) {
 const tabs = (page) => page.evaluate(() => [...document.querySelectorAll("#nav button[data-view]")].filter((b) => !b.hidden && b.offsetParent && getComputedStyle(b).display !== "none").map((b) => b.dataset.view));
 const viewShown = (page) => page.evaluate(() => [...document.querySelectorAll("main.view")].filter((v) => !v.hidden).map((v) => v.id));
 // the tabs with Sessions and Library off, the preset's masking on
+// (Routing groups has a tab of its own in the sidebar only, from 1024
+// points; under it Routing's page opens them)
 const KEPT = ["agents", "providers", "routing", "gateway", "usage", "masking", "plugins"];
+const keptAt = (width) => (width >= 1024 ? KEPT.flatMap((k) => (k === "routing" ? [k, "groups"] : [k])) : KEPT);
 const rowsOf = (page) => page.evaluate(() => [...document.querySelectorAll("#builtinList .feat-row")].map((r) => {
   const b = r.querySelector('[role="switch"]');
   return { id: r.dataset.id, name: r.querySelector(".name").textContent, on: b.getAttribute("aria-checked"), disabled: b.disabled, why: r.querySelector(".feat-why")?.textContent || "" };
@@ -137,6 +145,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, posts));
@@ -144,7 +153,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForSelector("#nav button.on");
         const side = await page.evaluate(() => document.body.classList.contains("side-nav"));
         assert.equal(side, width >= 1024, `${where}: the layout`);
-        if (width >= 800) assert.deepEqual(await tabs(page), KEPT, `${where}: Sessions' and Library's tabs gone`);
+        if (width >= 800) assert.deepEqual(await tabs(page), keptAt(width), `${where}: Sessions' and Library's tabs gone`);
         // an address kept for a page switched off opens Agents
         assert.deepEqual(await viewShown(page), ["view-agents"], `${where}: ?view=sessions`);
         // Settings has no Features tab of its own, and Observability's is off
@@ -186,26 +195,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // nothing wider than the window
         assert.ok(await page.evaluate(() => { const v = document.querySelector("#view-plugins"); return v.scrollWidth <= v.clientWidth + 1; }), `${where}: fits`);
 
-        // the Gateway page's setting, under its row, from its schema: in
-        // the page's language, its value in the app's menu, saved as picked
-        const set = page.locator('#builtinList .feat-set[data-of="gateway"][data-setting="callsPage"]');
-        assert.equal(await set.locator(".name").textContent(), await page.evaluate(() => t("Recent calls at a time")), where);
-        if (lang !== "en") assert.notEqual(await set.locator(".name").textContent(), "Recent calls at a time", `${where}: translated`);
-        assert.equal(await page.evaluate(() => document.querySelector('#builtinList .feat-set').previousElementSibling.dataset.id), "gateway", `${where}: under its row`);
-        assert.equal((await set.locator(".proto.pick").textContent()).trim(), "20", where);
-        await set.locator(".proto.pick").click();
-        await page.locator(".proto-menu .pm-item", { hasText: "50" }).click();
-        await page.waitForFunction(() => document.querySelector('#builtinList .feat-set .proto.pick')?.textContent.trim() === "50");
-        assert.deepEqual(posts, [["gateway", { callsPage: 50 }]], `${where}: posted`);
-        assert.equal(await page.evaluate(() => document.querySelectorAll(".proto-menu").length), 0, `${where}: the menu closed`);
-        posts.length = 0;
-        assert.ok(await page.evaluate(() => { const v = document.querySelector("#view-plugins"); return v.scrollWidth <= v.clientWidth + 1; }), `${where}: the setting fits`);
-
+        // the Gateway page's setting is on the Gateway page, by its calls
+        // (gateway-own-settings): none here. A row with no Settings leads to
+        // the page it is used on, as its sidebar names it
+        assert.equal(await page.locator("#builtinList .feat-set").count(), 0, `${where}: no form here`);
+        for (const [id, v] of [["budget", "gateway"], ["rotation", "providers"], ["middleware", "plugins"], ["tools", "plugins"]]) {
+          const say = await page.evaluate((v) => document.querySelector(`#nav [data-view="${v}"]`).textContent, v);
+          assert.equal((await page.locator(`#builtinList [data-id="${id}"] .feat-go`).textContent()).trim(), say, `${where}: ${id} leads to ${v}`);
+        }
         // Library switched on: its tab is back at once, the page stays
         await page.locator('#builtinList [data-id="library"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="library"] [aria-checked="true"]');
         assert.deepEqual(posts, [["library", true]], where);
-        if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...KEPT.slice(1)], `${where}: Library back`);
+        if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...keptAt(width).slice(1)], `${where}: Library back`);
         assert.deepEqual(await viewShown(page), ["view-plugins"], `${where}: Plugins stays`);
         // Observability's, Routing's and Usage's rows can be below the fold:
         // the reader scrolls to them with the wheel, since the page puts back
@@ -213,8 +215,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // too. The wheel turns over what shows of the list (its top may have
         // scrolled away, and a wheel there scrolls nothing), as often as the
         // row needs: at 420 the rows wrap and Usage's is more than one turn
-        // down
-        const below = (id) => page.evaluate((id) => { const r = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect(), foot = document.querySelector("footer.foot"); return r.bottom > Math.min(document.getElementById("view-plugins").getBoundingClientRect().bottom, foot && foot.offsetParent ? foot.getBoundingClientRect().top : Infinity); }, id);
+        // down. Below the window counts too: the view can be taller than it
+        const below = (id) => page.evaluate((id) => { const r = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect(), foot = document.querySelector("footer.foot"); return r.bottom > Math.min(innerHeight, document.getElementById("view-plugins").getBoundingClientRect().bottom, foot && foot.offsetParent ? foot.getBoundingClientRect().top : Infinity); }, id);
         const wheelTo = async (id) => {
           for (let i = 0; i < 5 && await below(id); i++) {
             const at = await page.evaluate(() => { const l = document.getElementById("builtinList").getBoundingClientRect(), v = document.getElementById("view-plugins").getBoundingClientRect(); return { x: l.x + 20, y: (Math.max(l.top, v.top) + Math.min(l.bottom, v.bottom)) / 2 }; });
@@ -224,25 +226,47 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           }
           assert.equal(await below(id), false, `${where}: ${id}'s row reached by the wheel`);
         };
+        // the wheel's own check only sees the list's foot: a last wheel that
+        // clamps at the list's end can carry a row's switch under the sticky
+        // Plugins head, or past the view's top, where the head takes the
+        // click and it waits out its timeout (#3498, red 1 of 3 in WebKit).
+        // Wheel over what shows of the list, as the wheel above does, toward
+        // the window's middle (a row low in the window can be under the
+        // view's floating To the bottom button), till the switch's centre
+        // is on the switch, and say so
+        const clearOfHead = (id) => page.evaluate((id) => { const s = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`), b = s.getBoundingClientRect(), hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return !!hit && (hit === s || s.contains(hit)); }, id);
+        const outFromUnder = async (id) => {
+          for (let i = 0; i < 20 && !(await clearOfHead(id)); i++) {
+            const at = await page.evaluate(() => { const l = document.getElementById("builtinList").getBoundingClientRect(), v = document.getElementById("view-plugins").getBoundingClientRect(); return { x: l.x + 20, y: (Math.max(l.top, v.top) + Math.min(l.bottom, v.bottom)) / 2 }; });
+            const low = await page.evaluate((id) => document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect().top > innerHeight / 2, id);
+            await page.mouse.move(at.x, at.y);
+            await page.mouse.wheel(0, low ? 50 : -50);
+            await page.waitForFunction(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))));
+          }
+          assert.equal(await clearOfHead(id), true, `${where}: ${id}'s switch clear of the sticky head`);
+        };
         // and Observability: its Settings tab is back
         await wheelTo("otel");
+        await outFromUnder("otel");
         await page.locator('#builtinList [data-id="otel"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="otel"] [aria-checked="true"]');
         assert.ok(await page.locator("#setTab-otel").evaluate((b) => getComputedStyle(b).display !== "none"), `${where}: Observability back`);
         // Routing switched off: its tab and the panel's go, the page stays.
         await wheelTo("routing");
+        await outFromUnder("routing");
         await page.locator('#builtinList [data-id="routing"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="routing"] [aria-checked="false"]');
         assert.deepEqual(posts.at(-1), ["routing", false], where);
-        if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...KEPT.slice(1).filter((k) => k !== "routing")], `${where}: Routing gone`);
+        if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...keptAt(width).slice(1).filter((k) => k !== "routing" && k !== "groups")], `${where}: Routing gone`);
         assert.deepEqual(await viewShown(page), ["view-plugins"], `${where}: Plugins stays`);
         // and Usage: its tab goes
         const usageSwitch = page.locator('#builtinList [data-id="usage"] [role="switch"]');
         await wheelTo("usage");
+        await outFromUnder("usage");
         await usageSwitch.click();
         await page.waitForSelector('#builtinList [data-id="usage"] [aria-checked="false"]');
         assert.deepEqual(posts.at(-1), ["usage", false], where);
-        if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...KEPT.slice(1).filter((k) => k !== "routing" && k !== "usage")], `${where}: Usage gone`);
+        if (width >= 800) assert.deepEqual(await tabs(page), ["agents", "library", ...keptAt(width).slice(1).filter((k) => k !== "routing" && k !== "groups" && k !== "usage")], `${where}: Usage gone`);
         assert.deepEqual(await viewShown(page), ["view-plugins"], `${where}: Plugins stays`);
         // Discover brings the search back
         await pluginTabs(page, side).nth(1).click();
@@ -264,6 +288,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 420, height: 700 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang, posts, "/config/plugins.yml doesn't parse: yaml: line 2"));

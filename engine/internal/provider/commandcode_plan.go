@@ -114,35 +114,49 @@ func cmdLogins() []cmdLogin {
 
 type cmdSeen struct {
 	plan string
-	at   time.Time
+	// until is, on a key's plan (cmdKeyPlanID), when the plan's period
+	// ends: the month's credits come back then, on the Credits window.
+	until *time.Time
+	at    time.Time
 }
 
 // ---- allowance ----------------------------------------------------------------
 
 // cmdPlans names the plans as the CLI does, by their id's start, longest
-// first, with the dollars of credits each gives a month (its getPlanInfo;
-// "individual-pro-v1" is the old Pro, $80 of them).
+// first, with the credits each gives a month (its getPlanInfo, unchanged
+// in command-code 1.88.2; "individual-pro-v1" is the old Pro, 80 of
+// them), and whether those credits are usage-value units. On Go, GOAT
+// and Pro a credit is not a dollar: Command Code's usage limits page says
+// "on Go, GOAT and Pro, credits are usage-value units - full-allowance
+// models like GLM-5.2 get $1 of usage per credit, and lower-allowance
+// models draw proportionally more credits per dollar". GOAT's 70 credits
+// are the "$100 on DeepSeek V4.1 Flash" (and on Ling 3.1 Flash) its
+// pricing page says, and $70 on GLM-5.2; Pro's 80 are "up to $110". So
+// the month of those plans is said in credits, as the Command Code
+// plugin does since 0.1.20 (plugins #556). Provider is pay as you go,
+// $15 a month for API access with no credits in it: no month of credits.
 var cmdPlans = []struct {
 	id, name string
 	monthly  float64
+	units    bool // credits are usage-value units, not dollars
 }{
-	{"individual-provider", "Provider", 15}, {"individual-pro-v1", "Pro", 80}, {"individual-goat", "GOAT", 70},
-	{"individual-ultra", "Ultra", 300}, {"individual-max", "Max", 150}, {"individual-pro", "Pro", 30},
-	{"individual-go", "Go", 10}, {"teams-pro", "Teams Pro", 40},
+	{"individual-provider", "Provider", 0, false}, {"individual-pro-v1", "Pro", 80, true}, {"individual-goat", "GOAT", 70, true},
+	{"individual-ultra", "Ultra", 300, false}, {"individual-max", "Max", 150, false}, {"individual-pro", "Pro", 30, true},
+	{"individual-go", "Go", 10, true}, {"teams-pro", "Teams Pro", 40, false},
 }
 
-func cmdPlanOf(id string) (name string, monthly float64) {
+func cmdPlanOf(id string) (name string, monthly float64, units bool) {
 	id = strings.ReplaceAll(strings.ToLower(id), "_", "-")
 	for _, p := range cmdPlans {
 		if strings.HasPrefix(id, p.id) {
-			return p.name, p.monthly
+			return p.name, p.monthly, p.units
 		}
 	}
-	return "", 0
+	return "", 0, false
 }
 
 func cmdPlanName(id string) string {
-	name, _ := cmdPlanOf(id)
+	name, _, _ := cmdPlanOf(id)
 	return name
 }
 
@@ -241,15 +255,19 @@ func cmdLeft(c cmdCredits) (monthly, left float64, ok bool) {
 }
 
 // cmdQuotaOf makes the credits reply into the plan's windows: the 5-hour
-// and weekly limits, and the month's credits as one more. A card's
+// and weekly limits, and the month's credits as one more, renewing at
+// until, the plan's period's end (nil when that isn't known). A card's
 // Balance is shown instead of its windows — it is a key's money, not an
 // allowance — so, set beside them, it hid both limits on the Usage page,
 // the panel and the TUI. The dollars are a window when the plan is known,
 // used of the CLI's pool (the plan's month of credits, or what is left of
 // it if more, and the bought and free ones) as its /usage bar is; a reply
-// with neither windows nor a plan is a Balance still.
-func cmdQuotaOf(q SubscriptionQuota, c cmdCredits) SubscriptionQuota {
-	name, planMonthly := cmdPlanOf(c.Credits.PlanID)
+// with neither windows nor a plan is a Balance still. On a plan whose
+// credits are usage-value units (Go, GOAT, Pro) the bar is the month's
+// credits alone, said as credits, and the bought and free ones, dollars
+// at model cost, are said beside it, not added to a pool of another unit.
+func cmdQuotaOf(q SubscriptionQuota, c cmdCredits, until *time.Time) SubscriptionQuota {
+	name, planMonthly, units := cmdPlanOf(c.Credits.PlanID)
 	if name != "" {
 		q.Plan = name
 	}
@@ -257,10 +275,18 @@ func cmdQuotaOf(q SubscriptionQuota, c cmdCredits) SubscriptionQuota {
 	monthly, left, known := cmdLeft(c)
 	switch {
 	case !known:
+	case planMonthly > 0 && units:
+		pool := max(planMonthly, monthly)
+		display := money("", pool-monthly) + " / " + money("", pool) + " credits"
+		if extra := left - monthly; extra > 0 {
+			display += " + " + money("$", extra) + " extra"
+		}
+		q.Windows = append(q.Windows, QuotaWindow{Name: "Credits", Used: min(100, 100*(pool-monthly)/pool),
+			Display: display, ResetsAt: until})
 	case planMonthly > 0:
 		pool := max(planMonthly, monthly) + left - monthly
 		q.Windows = append(q.Windows, QuotaWindow{Name: "Credits", Used: min(100, 100*(pool-left)/pool),
-			Display: money("$", pool-left) + " / " + money("$", pool)})
+			Display: money("$", pool-left) + " / " + money("$", pool), ResetsAt: until})
 	case len(q.Windows) == 0:
 		q.Balance = money("$", left)
 	}
@@ -315,10 +341,17 @@ func cmdKeyWindows(ctx context.Context, src planQuotaSource, key string) (string
 	if len(cmdWindows(c)) == 0 {
 		return cmdPlanName(c.Credits.PlanID), []QuotaWindow{}, nil
 	}
+	var until *time.Time
 	if c.Credits.PlanID == "" {
-		c.Credits.PlanID = cmdKeyPlanID(ctx, key)
+		c.Credits.PlanID, until = cmdKeyPlanID(ctx, key)
 	}
-	q := cmdQuotaOf(SubscriptionQuota{}, c)
+	if until != nil && !until.After(time.Now()) {
+		// a period end already past (the pair kept while the endpoint
+		// can't be read, or a renewal not yet in its reply) says nothing
+		// about when the credits come back
+		until = nil
+	}
+	q := cmdQuotaOf(SubscriptionQuota{}, c, until)
 	return q.Plan, q.Windows, nil
 }
 
@@ -327,21 +360,24 @@ var cmdKeyPlans = struct {
 	m map[string]cmdSeen // plan is the subscription's id here
 }{m: map[string]cmdSeen{}}
 
-func cmdKeyPlanID(ctx context.Context, key string) string {
+// cmdKeyPlanID is the key's subscription's plan id, and the end of its
+// period, for the Credits window's reset: asked at most every ten minutes,
+// and the pair read before kept while it can't be read.
+func cmdKeyPlanID(ctx context.Context, key string) (string, *time.Time) {
 	cmdKeyPlans.Lock()
 	seen, had := cmdKeyPlans.m[key]
 	cmdKeyPlans.Unlock()
 	if had && time.Since(seen.at) < 10*time.Minute {
-		return seen.plan
+		return seen.plan, seen.until
 	}
-	id, _, _, _, ok := cmdSubscription(ctx, cmdAuth{APIKey: key})
+	id, _, until, _, ok := cmdSubscription(ctx, cmdAuth{APIKey: key})
 	if !ok {
-		return seen.plan
+		return seen.plan, seen.until
 	}
 	cmdKeyPlans.Lock()
-	cmdKeyPlans.m[key] = cmdSeen{id, time.Now()}
+	cmdKeyPlans.m[key] = cmdSeen{plan: id, until: until, at: time.Now()}
 	cmdKeyPlans.Unlock()
-	return id
+	return id, until
 }
 
 // ---- signing in ---------------------------------------------------------------

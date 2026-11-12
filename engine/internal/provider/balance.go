@@ -1,13 +1,16 @@
 package provider
 
 // What is left on an API key, as the vendor's own balance endpoint tells
-// it: DeepSeek, Kimi, OpenRouter, SiliconFlow, StepFun, Command Code, Ollama Cloud and AiHubMix are known by their hosts
-// (AiHubMix tells the whole account's to its access token, BalanceToken);
+// it: DeepSeek, Kimi, OpenRouter, StepFun, Command Code, Ollama Cloud,
+// AiHubMix and Zhipu/Z.ai pay-as-you-go keys are known by their hosts
+// (AiHubMix tells the whole account's to its access token, BalanceToken;
+// SiliconFlow's query is gone, siliconFlowRetired);
 // any other provider can name an endpoint and where the amount sits in its
 // reply (BalanceURL, BalancePath), the way a relay's own usage query does,
 // with {key} where it wants the key in the URL (withBalanceKey).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,12 +20,13 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // balanceSource is where one provider's balance is asked and how the
@@ -52,6 +56,9 @@ func balanceSourceOf(p Provider) (balanceSource, bool) {
 		// instead of the key
 		return balanceSource{p.BalanceURL, func(b []byte) (string, error) { return readBalancePath(b, path) }, p.BalanceToken, nil, nil}, true
 	}
+	if src, ok := zhipuBalanceSource(p); ok {
+		return src, true
+	}
 	hosts := []string{hostOf(p.Chat), hostOf(p.Responses), hostOf(p.Anthropic)}
 	for _, h := range hosts {
 		switch h {
@@ -64,15 +71,17 @@ func balanceSourceOf(p Provider) (balanceSource, bool) {
 		case "openrouter.ai":
 			return balanceSource{"https://openrouter.ai/api/v1/credits", readOpenRouter, "", nil, nil}, true
 		case "api.siliconflow.cn":
-			return balanceSource{"https://api.siliconflow.cn/v1/user/info", readSiliconFlow("¥"), "", siliconFlowGone("https://cloud.siliconflow.cn (余额充值 → 代金券)"), nil}, true
+			return balanceSource{"https://api.siliconflow.cn/v1/user/info", readSiliconFlow("¥"), "", siliconFlowGone("https://cloud.siliconflow.cn", " (余额充值 → 代金券)"), nil}, true
 		case "api.siliconflow.com":
-			return balanceSource{"https://api.siliconflow.com/v1/user/info", readSiliconFlow("$"), "", siliconFlowGone("https://cloud.siliconflow.com"), nil}, true
+			return balanceSource{"https://api.siliconflow.com/v1/user/info", readSiliconFlow("$"), "", siliconFlowGone("https://cloud.siliconflow.com", ""), nil}, true
 		case "api.stepfun.com":
 			return balanceSource{"https://api.stepfun.com/v1/accounts", readStepFun("¥"), "", nil, nil}, true
 		case "api.stepfun.ai":
 			return balanceSource{"https://api.stepfun.ai/v1/accounts", readStepFun("$"), "", nil, nil}, true
 		case "api.commandcode.ai":
 			return balanceSource{"https://api.commandcode.ai/alpha/billing/credits", readCommandCode, "", nil, nil}, true
+		case "api-inference.modelscope.cn":
+			return balanceSource{modelScopeBalanceURL, readModelScope, "", nil, nil}, true
 		case "ollama.com":
 			// the credits bought past the plan's allowance (#1888)
 			return balanceSource{ollamaBalanceURL, readOllamaCredits, "", nil, nil}, true
@@ -80,11 +89,14 @@ func balanceSourceOf(p Provider) (balanceSource, bool) {
 			if p.BalanceToken != "" {
 				return balanceSource{"https://aihubmix.com/api/user/self", readAiHubMixAccount, p.BalanceToken, nil, nil}, true
 			}
-			return balanceSource{"https://aihubmix.com/dashboard/billing/remain", readAiHubMix, "", nil, nil}, true
+			return balanceSource{aiHubMixKeyRemain, readAiHubMix, "", nil, nil}, true
 		}
 	}
 	return balanceSource{}, false
 }
+
+// aiHubMixKeyRemain is AiHubMix's query for what is left on a key
+const aiHubMixKeyRemain = "https://aihubmix.com/dashboard/billing/remain"
 
 // balancePathOf is the balance field of a provider that named its Balance
 // URL.
@@ -189,6 +201,11 @@ func keyQueryOf(p Provider) Provider {
 // without its token (keyQueryOf).
 func BalanceQuery(p Provider) (balanceURL, field string) {
 	p = keyQueryOf(p)
+	if u := probedBalanceURL(p); u != "" {
+		// a relay added by hand, its query found (balance_probe.go)
+		p.BalanceURL = u
+		return u, balancePathOf(p)
+	}
 	return p.BalanceURL, p.BalancePath
 }
 
@@ -253,7 +270,7 @@ func newAPIUserHint(msg string) string {
 	if !strings.Contains(strings.ToLower(msg), "new-api-user") {
 		return msg
 	}
-	return "add the header New-Api-User = your user ID (shown in the site's personal settings) to this provider's Headers; the relay said: " + msg
+	return "fill in your user ID (shown in the site's personal settings) under this provider's Account balance, beside its access token; the relay said: " + msg
 }
 
 // TakesBalanceToken says the provider's vendor tells the account's balance
@@ -383,6 +400,11 @@ const (
 func SplitWords(split []BalancePart) string {
 	out := make([]string, 0, len(split))
 	for _, p := range split {
+		if p.Expires != nil {
+			// through the last day it counts: "¥20.00 until Nov 13"
+			out = append(out, p.Text+" until "+p.Expires.Add(-time.Second).Format("Jan 2"))
+			continue
+		}
 		out = append(out, strings.ToLower(p.Label)+" "+p.Text)
 	}
 	return strings.Join(out, " · ")
@@ -468,10 +490,13 @@ func readSiliconFlow(sign string) func([]byte) (string, error) {
 // siliconFlowGone words SiliconFlow's answer to /v1/user/info since it
 // retired the query on 2026-08-14 (410, {"code":20092,"message":"This
 // endpoint is deprecated and is no longer available.","data":null}, #1094):
-// it has no API for the balance in its place yet, and the balance given
-// before 2025-12 is a voucher now, so both are read on the console. A key
-// refused for itself (401 30014) is still said as it came.
-func siliconFlowGone(console string) func(int, []byte) error {
+// it has no API for the balance in its place yet (its release notes of
+// 2026-08-11 promise an account-level one "in due course", and none is
+// listed up to 2026-11), and the balance given before 2025-12 is a voucher
+// now, so both are read on the console, where the card's button opens
+// (siliconFlowRetired). A key refused for itself (401 30014) is still
+// said as it came.
+func siliconFlowGone(console, where string) func(int, []byte) error {
 	return func(status int, b []byte) error {
 		var r struct {
 			Code int `json:"code"`
@@ -480,8 +505,120 @@ func siliconFlowGone(console string) func(int, []byte) error {
 		if status != http.StatusGone && r.Code != 20092 {
 			return nil
 		}
-		return fmt.Errorf("SiliconFlow retired its balance query (/v1/user/info) and has no API for it in its place yet; the balance and vouchers are on %s", console)
+		return siliconFlowRetired{console, where}
 	}
+}
+
+// siliconFlowRetired is SiliconFlow's retired balance query: not a read
+// that failed for now, so its card says where the balance is shown and
+// opens that console (SeeAt), and keeps no balance read before the query
+// went (nam.haid on Discord: every SiliconFlow card said only
+// "Allowance unavailable").
+type siliconFlowRetired struct{ console, where string }
+
+func (e siliconFlowRetired) Error() string {
+	return "SiliconFlow retired its balance query (/v1/user/info) and has no API for it in its place yet; the balance and vouchers are on " + e.console + e.where
+}
+
+// zhipuBalanceSource is Zhipu's (BigModel's) and Z.ai's account report,
+// /api/biz/account/query-customer-account-report on the API's own host,
+// which their consoles read and which takes the API key as a Bearer: it
+// is not in docs.bigmodel.cn, so a reply in another shape is said as
+// unread, never as a balance. Asked with a GLM Coding Plan's endpoints it
+// isn't: the plan's windows are that key's card (planQuotaSourceOf), and
+// its cash balance, ¥0 for most, would be noise beside them. nam.haid on
+// Discord: a Zhipu key had no card at all.
+func zhipuBalanceSource(p Provider) (balanceSource, bool) {
+	host, payg := "", false
+	for _, base := range []string{p.Chat, p.Responses, p.Anthropic} {
+		h := hostOf(base)
+		if !zhipuHost(h) {
+			continue
+		}
+		if strings.Contains(base, "/api/coding/") {
+			return balanceSource{}, false
+		}
+		host = strings.ToLower(h)
+		payg = payg || basePath(strings.TrimRight(strings.TrimSpace(base), "/")) == zhipuPaygPath
+	}
+	if host == "" {
+		return balanceSource{}, false
+	}
+	sign := "¥"
+	if host == "api.z.ai" {
+		sign = "$"
+	}
+	u := "https://" + host + zhipuAccountReport
+	return balanceSource{u, readZhipuBalance(u, sign, payg), "", nil, nil}, true
+}
+
+// zhipuAccountReport is the account report's path on both hosts.
+const zhipuAccountReport = "/api/biz/account/query-customer-account-report"
+
+// readZhipuBalance reads the account report, as BigModel and Z.ai answer
+// it to a key (asked 2026-11-03):
+//
+//	{"code":200,"msg":"操作成功","data":{"balance":0E-9,"rechargeAmount":0.000000,
+//	  "giveAmount":0.000000,"totalSpendAmount":0E-9,"todaySpendAmount":null,
+//	  "availableBalance":0E-9,"frozenBalance":0E-9,"creditBalance":null,
+//	  "availableCreditBalance":null,"creditStatus":"NOT_OPEN",…},"success":true}
+//
+// availableBalance being what is left to spend, the frozen part taken
+// out. A refusal comes 200 too, in the platform's envelope ({"code":1000,
+// "msg":"身份验证失败。","success":false}): a refused key is said as one
+// (zhipuRefused), any other code with its words. Asked at only the
+// Anthropic endpoint, which a Coding Plan's key shares, an account that
+// was never paid or given anything has no card (errNoBalance); at the
+// pay-as-you-go endpoint its ¥0.00 is the balance it has.
+func readZhipuBalance(u, sign string, payg bool) func([]byte) (string, error) {
+	return func(b []byte) (string, error) {
+		if code, msg, ok := zhipuEnvelope(b); ok {
+			if ZhipuKeyRefused(code) {
+				return "", zhipuRefused(u, zhipuKeyRefusal{msg})
+			}
+			if msg == "" {
+				msg = "refused"
+			}
+			return "", fmt.Errorf("%s answered the balance read with code %d: %s", zhipuVendor(u), code, msg)
+		}
+		var r struct {
+			Data *struct {
+				Available any `json:"availableBalance"`
+				Balance   any `json:"balance"`
+				Recharged any `json:"rechargeAmount"`
+				Given     any `json:"giveAmount"`
+			} `json:"data"`
+		}
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		if err := d.Decode(&r); err != nil {
+			return "", err
+		}
+		if r.Data == nil {
+			return "", fmt.Errorf("%s's account report has no data in it", zhipuVendor(u))
+		}
+		v, ok := number(r.Data.Available)
+		if !ok {
+			return "", fmt.Errorf("%s's account report has no availableBalance in it", zhipuVendor(u))
+		}
+		if !payg {
+			bal, _ := number(r.Data.Balance)
+			paid, _ := number(r.Data.Recharged)
+			given, _ := number(r.Data.Given)
+			if v == 0 && bal == 0 && paid == 0 && given == 0 {
+				return "", errNoBalance
+			}
+		}
+		return money(sign, v), nil
+	}
+}
+
+// zhipuVendor names the vendor of a Zhipu or Z.ai URL.
+func zhipuVendor(u string) string {
+	if hostOf(u) == "api.z.ai" {
+		return "Z.ai"
+	}
+	return "Zhipu"
 }
 
 // readStepFun: {"object":"account","type":"prepaid","balance":26.00,
@@ -503,6 +640,34 @@ func readStepFun(sign string) func([]byte) (string, error) {
 		}
 		return money(sign, v), nil
 	}
+}
+
+// modelScopeBalanceURL is ModelScope's 魔粒 balance in its OpenAPI
+// (modelscope.cn/.well-known/openapi.json, GET /magicubes/balance), asked
+// with the same API token API-Inference takes, as a Bearer (jiabubu on
+// Discord). The page's daily list (/magicubes/transactions) is not in the
+// OpenAPI, so what is spent a day is the card's own trend.
+const modelScopeBalanceURL = "https://modelscope.cn/openapi/v1/magicubes/balance"
+
+// readModelScope: {"success":true,"data":{"total_balance":1500,
+// "available_balance":1300,"frozen_amount":200},"request_id":"…"}, in 魔粒.
+// What can be spent is available_balance: the total holds what running
+// tasks have frozen. A refusal ({"success":false,"message":…}) is told
+// by balanceRefusal before this.
+func readModelScope(b []byte) (string, error) {
+	var r struct {
+		Data struct {
+			Available any `json:"available_balance"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		return "", err
+	}
+	v, ok := number(r.Data.Available)
+	if !ok {
+		return "", errors.New("no balance in the reply")
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64) + " 魔粒", nil
 }
 
 // readAiHubMix: {"object":"list","total_usage":12.5}, what is left on the
@@ -601,6 +766,10 @@ type BalancePart struct {
 	Percent *float64 `json:"percent,omitempty"`
 	// Error is why the amount couldn't be read, its Text then "—".
 	Error string `json:"error,omitempty"`
+	// Expires is when the part counts no more, for a balance typed with
+	// credit that expires (key_balance_own.go); the GUI says in how many
+	// days, its Label then empty
+	Expires *time.Time `json:"expires,omitempty"`
 }
 
 // joinBalanceParts is the amounts on one line, as Balance tells them:
@@ -1191,7 +1360,12 @@ func balanceSegmentOf(raw, path string) (balanceSegment, error) {
 // false when there is no way to ask it. A key given limits and no quota of
 // its own has what its fullest window has left: what it can spend now.
 func Balance(ctx context.Context, p Provider) (amount string, ok bool, err error) {
-	amount, _, _, ws, ok, err := balanceRead(ctx, p)
+	amount, _, _, ws, _, ok, err := balanceRead(ctx, p)
+	if !ok && errors.Is(err, errNoBalance) {
+		// a relay added by hand whose balance was found nowhere: no
+		// balance to ask, as with no Balance URL
+		return "", false, nil
+	}
 	if err == nil && amount == "" && len(ws) > 0 {
 		left := ws[0].Limit - ws[0].Amount
 		for _, w := range ws[1:] {
@@ -1206,24 +1380,38 @@ func Balance(ctx context.Context, p Provider) (amount string, ok bool, err error
 // the user wrote each apart (nil for a vendor magpie reads itself), what a
 // vendor's balance is made of when it tells that (split), and the
 // key's own usage windows when its reply tells them (a sub2api key's
-// limits, readSub2APIKeyLimits).
-func balanceRead(ctx context.Context, p Provider) (amount string, parts, split []BalancePart, ws []QuotaWindow, ok bool, err error) {
+// limits, readSub2APIKeyLimits), and whether what it tells is the
+// account's, the same to each of its keys (wide, balanceAccountWide).
+func balanceRead(ctx context.Context, p Provider) (amount string, parts, split []BalancePart, ws []QuotaWindow, wide, ok bool, err error) {
 	ctx = p.Via(ctx)
 	p = keyQueryOf(p)
+	// the editor's check asks with the form's headers as they are, a user
+	// id typed as a header's name among them (userIDHeader)
+	p.Headers = userIDHeader(p.Headers)
 	src, ok := balanceSourceOf(p)
+	if !ok && probesBalance(p) {
+		// a relay added by hand: its balance where relays tell it, or
+		// no card (balance_probe.go)
+		u, found := probeBalance(ctx, p)
+		if !found {
+			return "", nil, nil, nil, false, false, errNoBalance
+		}
+		p.BalanceURL = u
+		src, ok = balanceSourceOf(p)
+	}
 	if !ok && p.Account == nil && p.Key != "" && openCodeZen(p) {
 		// a balance the vendor keeps from the key: said so, not left out
-		return "", nil, nil, nil, true, errOpenCodeNoBalance
+		return "", nil, nil, nil, false, true, errOpenCodeNoBalance
 	}
 	if !ok || p.Account != nil || p.Key == "" {
-		return "", nil, nil, nil, false, nil
+		return "", nil, nil, nil, false, false, nil
 	}
 	if src.token != "" && p.BalanceURL != "" {
 		switch balanceURLPath(p.BalanceURL) {
 		case newAPIKeyUsage:
-			return "", nil, nil, nil, true, errKeyUsageWithToken(p.BalanceURL)
+			return "", nil, nil, nil, false, true, errKeyUsageWithToken(p.BalanceURL)
 		case sub2APIKeyUsage:
-			return "", nil, nil, nil, true, errSub2APIKeyUsageWithToken(p.BalanceURL)
+			return "", nil, nil, nil, false, true, errSub2APIKeyUsageWithToken(p.BalanceURL)
 		}
 	}
 	method := http.MethodGet
@@ -1231,18 +1419,18 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts, split [
 		// the method the user named goes with their own Balance URL only;
 		// a vendor magpie knows is asked as it answers
 		if method, err = balanceMethodOf(p.BalanceMethod); err != nil {
-			return "", nil, nil, nil, true, err
+			return "", nil, nil, nil, false, true, err
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, withBalanceKey(src.url, p.Key, true), nil)
 	if err != nil {
-		return "", nil, nil, nil, true, err
+		return "", nil, nil, nil, false, true, err
 	}
 	if src.token != "" {
 		// a named endpoint still gets the provider's headers, which is
 		// where a new-api relay's New-Api-User goes
 		if p.BalanceURL != "" {
-			for k, v := range p.Headers {
+			for k, v := range p.SentHeaders(ctx) {
 				req.Header.Set(k, withBalanceKey(v, p.Key, false))
 			}
 		}
@@ -1251,18 +1439,18 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts, split [
 		for k, v := range AuthHeaders(p, Chat) {
 			req.Header.Set(k, v)
 		}
-		for k, v := range p.Headers {
+		for k, v := range p.SentHeaders(ctx) {
 			req.Header.Set(k, withBalanceKey(v, p.Key, false))
 		}
 	}
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		if k := url.QueryEscape(p.Key); k != "" && strings.Contains(err.Error(), k) {
 			// the URL in the error has the key in it: not shown on a card
-			return "", nil, nil, nil, true, errors.New(strings.ReplaceAll(err.Error(), k, Mask(p.Key)))
+			return "", nil, nil, nil, false, true, errors.New(strings.ReplaceAll(err.Error(), k, Mask(p.Key)))
 		}
-		return "", nil, nil, nil, true, err
+		return "", nil, nil, nil, false, true, err
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -1273,23 +1461,23 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts, split [
 		if res.StatusCode >= 300 {
 			msg = res.Status + ": " + msg
 		}
-		return "", nil, nil, nil, true, errors.New(msg)
+		return "", nil, nil, nil, false, true, errors.New(msg)
 	}
 	if res.StatusCode >= 300 && src.failed != nil {
 		if err := src.failed(res.StatusCode, b); err != nil {
-			return "", nil, nil, nil, true, err
+			return "", nil, nil, nil, false, true, err
 		}
 	}
 	if res.StatusCode >= 300 {
 		// what a JSON reply says, on one line; a page of HTML says nothing
 		msg := strings.Join(strings.Fields(string(b)), " ")
 		if !strings.HasPrefix(msg, "{") {
-			return "", nil, nil, nil, true, errors.New(res.Status)
+			return "", nil, nil, nil, false, true, errors.New(res.Status)
 		}
 		if r := []rune(msg); len(r) > 200 {
 			msg = string(r[:200]) + "…"
 		}
-		return "", nil, nil, nil, true, fmt.Errorf("%s: %s", res.Status, msg)
+		return "", nil, nil, nil, false, true, fmt.Errorf("%s: %s", res.Status, msg)
 	}
 	if p.BalanceURL != "" {
 		if sub2APIKeyLimits(p) {
@@ -1300,17 +1488,45 @@ func balanceRead(ctx context.Context, p Provider) (amount string, parts, split [
 			if len(ws) > 0 && strings.TrimSpace(p.BalancePath) == "" {
 				// a key given limits and no quota of its own has no
 				// "remaining": its windows are what it has left
-				return "", nil, nil, ws, true, nil
+				return "", nil, nil, ws, false, true, nil
 			}
-			return "", nil, nil, nil, true, err
+			return "", nil, nil, nil, false, true, err
 		}
-		return joinBalanceParts(parts), parts, nil, ws, true, nil
+		return joinBalanceParts(parts), parts, nil, ws, balanceAccountWide(p, src, b), true, nil
 	}
 	amount, err = src.read(b)
 	if err == nil && src.split != nil {
 		split = src.split(b)
 	}
-	return amount, nil, split, nil, true, err
+	return amount, nil, split, nil, balanceAccountWide(p, src, b), true, err
+}
+
+// balanceAccountWide says what a balance query told is the account's,
+// the same whichever of the account's keys asks, rather than the key's
+// own (mimi on Discord: three keys of one site each showed its $8.39).
+// It goes by what was asked, never the vendor's name: an account query
+// asked with its token; a vendor's own query magpie knows (DeepSeek's
+// /user/balance, Moonshot's /users/me/balance, OpenRouter's /credits,
+// SiliconFlow's, StepFun's, Command Code's and Ollama's), all but
+// AiHubMix's /dashboard/billing/remain, which tells the key's own; and a
+// sub2api key's /v1/usage when the key has no quota or limits of its own
+// (mode "unrestricted"), which tells the user's wallet or the group's
+// subscription. new-api's /api/usage/token and any other query the user
+// named are a key's own.
+func balanceAccountWide(p Provider, src balanceSource, body []byte) bool {
+	if src.token != "" {
+		return true
+	}
+	if p.BalanceURL == "" {
+		return src.url != aiHubMixKeyRemain
+	}
+	if !sub2APIKeyLimits(p) {
+		return false
+	}
+	var r struct {
+		Mode string `json:"mode"`
+	}
+	return json.Unmarshal(body, &r) == nil && r.Mode == "unrestricted"
 }
 
 // OpenCodeConsole is where OpenCode shows a workspace's credits: the
@@ -1372,7 +1588,7 @@ func sub2APIKeyLimits(p Provider) bool {
 // {token} is the key too: it is what a vendor's own error names the value
 // in "Authorization: Bearer {token}" (lx_78654 on Discord, whose header
 // went with "{token}" in it as written, and the vendor refused it).
-var balanceKeyNames = regexp.MustCompile(`(?i)\$?\{\{?\s*(?:key|api[_-]?key|token)\s*\}?\}`)
+var balanceKeyNames = lazyre.New(`(?i)\$?\{\{?\s*(?:key|api[_-]?key|token)\s*\}?\}`)
 
 // withBalanceKey is s with the key in place of its names, escaped for a
 // URL's query when inURL.
@@ -1430,11 +1646,14 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 		defer c.Unlock()
 		return c.data
 	}
+	kept := c.data
 	c.Unlock()
 	ctx, seq := quotaReading(ctx)
 	type job struct {
 		p    Provider
 		user string
+		// own: the key's balance typed by hand, with nothing to ask
+		own bool
 	}
 	var jobs []job
 	for _, p := range All() {
@@ -1443,13 +1662,19 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 		}
 		src, ok := balanceSourceOf(p)
 		zen := !ok && openCodeZen(p)
-		if !ok && !clineKeyCard(p) && !zen {
+		if !ok && !clineKeyCard(p) && !zen && !probesBalance(p) {
+			// a key with a balance the user typed: what is left of it
+			if p.TakesOwnBalance() {
+				for _, k := range ownBalanceKeys(p) {
+					jobs = append(jobs, job{k.p, k.user, true})
+				}
+			}
 			continue
 		}
 		others := 0
 		if src.token != "" || zen {
 			// the account's balance is the same whichever key asks
-			jobs = append(jobs, job{p, ""})
+			jobs = append(jobs, job{p, "", false})
 			continue
 		}
 		for _, k := range p.Keys {
@@ -1457,8 +1682,14 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 				others++
 			}
 		}
+		// a key on a plan with no balance query of its own (a GLM Coding
+		// Plan's, whose windows are its card) has no balance card; a
+		// provider read some other way (ClinePass) keeps its card
+		keyCard := func(q Provider) bool { return !ok || hasBalanceSource(q) }
 		if others == 0 {
-			jobs = append(jobs, job{p, ""})
+			if keyCard(p.atKeyPlan(p.KeyPlan)) {
+				jobs = append(jobs, job{p, "", false})
+			}
 			continue
 		}
 		first := p.KeyName
@@ -1467,21 +1698,28 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 		}
 		// each key asked at its own plan's host (KeyAccount.Plan):
 		// SiliconFlow's China key and its international one
-		jobs = append(jobs, job{p.atKeyPlan(p.KeyPlan), first})
+		if q := p.atKeyPlan(p.KeyPlan); keyCard(q) {
+			jobs = append(jobs, job{q, first, false})
+		}
 		for _, k := range p.Keys {
 			if k.Off || k.Key == "" || k.Key == p.Key {
 				continue
 			}
 			q := p.atKeyPlan(k.Plan)
 			q.Key = k.Key
+			if !keyCard(q) {
+				continue
+			}
 			name := k.Name
 			if name == "" {
 				name = Mask(k.Key)
 			}
-			jobs = append(jobs, job{q, name})
+			jobs = append(jobs, job{q, name, false})
 		}
 	}
-	jobs = slices.DeleteFunc(jobs, func(j job) bool { return !wantsCard(ctx, j.p.ID, j.user) })
+	jobs = slices.DeleteFunc(jobs, func(j job) bool {
+		return !wantsCard(ctx, j.p.ID, j.user) && !sharesAskedCard(ctx, kept, j.p.ID, j.user)
+	})
 	out := make([]SubscriptionQuota, len(jobs))
 	var wg sync.WaitGroup
 	var slots keySlots
@@ -1490,6 +1728,10 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 		go func() {
 			defer wg.Done()
 			defer slots.take(ctx, j.p.ID)()
+			if j.own {
+				out[i], _ = ownBalanceCard(j.p, j.p.Key, j.user)
+				return
+			}
 			q := SubscriptionQuota{Provider: j.p.ID, Name: j.p.Name, Icon: j.p.Icon, User: j.user, Windows: []QuotaWindow{}}
 			if clineKeyCard(j.p) {
 				// ClinePass's limits beside the credits (cline_usage.go)
@@ -1505,13 +1747,25 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 				out[i] = keepReading(ctx, q, keyTag("balance", j.p.Key))
 				return
 			}
-			amount, parts, split, ws, _, err := balanceRead(ctx, j.p)
+			amount, parts, split, ws, wide, _, err := balanceRead(ctx, j.p)
 			if errors.Is(err, errNoBalance) {
-				return // a reply with no balance for this key: no card
+				// a reply with no balance for this key, or a relay where
+				// none was found: the balance typed for it, else no card
+				if j.p.TakesOwnBalance() {
+					out[i], _ = ownBalanceCard(j.p, j.p.Key, j.user)
+				}
+				return
 			}
 			if errors.Is(err, errOpenCodeNoBalance) {
 				// nothing to read or keep: where the balance is shown
 				q.Error, q.SeeAt = err.Error(), OpenCodeConsole
+				out[i] = q
+				return
+			}
+			var gone siliconFlowRetired
+			if errors.As(err, &gone) {
+				// the same: a balance read before the query went is stale
+				q.Error, q.SeeAt = err.Error(), gone.console
 				out[i] = q
 				return
 			}
@@ -1522,6 +1776,7 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 				q.BalanceParts = cardParts(parts)
 				q.BalanceSplit = split
 				q.Windows = append(q.Windows, ws...)
+				q.wideBalance = wide
 				now := time.Now()
 				q.ReadAt = &now
 				// what routing goes by, read just now rather than in a minute
@@ -1534,16 +1789,36 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 	wg.Wait()
 	out = slices.DeleteFunc(out, func(q SubscriptionQuota) bool { return q.Provider == "" })
 	if ctx.Err() == nil {
-		// each balance kept, and drawn over time with its runs-out
+		// each balance kept, and drawn over time with its runs-out, on
+		// the cards themselves (an estimate is neither: noteBalanceHistory)
 		noteBalanceHistory(out, time.Now())
+		// the history of the cards read now and of those kept, a partial
+		// read (one card's refresh) keeping the others
+		h := sharedBalanceHist(slices.Concat(kept, out))
 		c.Lock()
-		c.data = cacheCards(c.data, out, seq, again)
+		// the keys that read one account's balance, told apart afresh
+		// over every card (balance_shared.go)
+		c.data = shareBalances(cacheCards(c.data, out, seq, again), h)
 		if !again {
 			c.at, out = time.Now(), c.data
+		} else {
+			for i := range out {
+				for _, k := range c.data {
+					if k.Provider == out[i].Provider && strings.EqualFold(k.User, out[i].User) {
+						out[i].SharedBalance = k.SharedBalance
+					}
+				}
+			}
 		}
 		c.Unlock()
 	}
 	return out
+}
+
+// hasBalanceSource says magpie knows where p's balance is asked.
+func hasBalanceSource(p Provider) bool {
+	_, ok := balanceSourceOf(p)
+	return ok
 }
 
 // cardParts are the amounts a balance's card shows each apart, the

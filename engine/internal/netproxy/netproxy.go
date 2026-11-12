@@ -12,6 +12,7 @@ package netproxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,7 +28,7 @@ import (
 // Install routes http.DefaultTransport (and so http.DefaultClient) through
 // Func, and http.DefaultClient's requests made on a provider's behalf
 // (With) through a transport of that provider's proxy (Dispatch). Its
-// HTTP/2 connections are checked as the gateway's are (HTTP2Health), and
+// HTTP/2 connections are checked by Go's own pings (HTTP2Health), and
 // the requests magpie sends on its own are written down (probelog).
 func Install() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
@@ -43,7 +44,15 @@ func Install() {
 
 // PingAfter and PingWait: an HTTP/2 connection that has had no frame for
 // PingAfter is pinged, and dropped when no answer comes within PingWait.
-var PingAfter, PingWait = 20 * time.Second, 10 * time.Second
+// The health check is the only probe of a connection whose path has died
+// silently, so a turn in flight on it waits for the next one: PingAfter is
+// how long a vendor's silence before a turn's first byte can cost (#4936,
+// a first try read EOF 20.5s in on a connection whose tunnel a NAT or a
+// relay had dropped). The budget PingAfter+PingWait is also the margin a
+// body under uploadBytes needs on a slow uplink, a ping queued behind it
+// answered only after the last byte (#3909): 20s covers 64KB at about
+// 3KB/s.
+var PingAfter, PingWait = 10 * time.Second, 10 * time.Second
 
 // HTTP2Health is the HTTP/2 setting of a transport to the vendors. Every
 // request to one host shares one HTTP/2 connection, and one gone silent
@@ -53,7 +62,10 @@ var PingAfter, PingWait = 20 * time.Second, 10 * time.Second
 // (#2843). A ping finds it, and the requests on it fail, so a group moves
 // on and the next request dials anew. A live vendor answers a ping
 // whatever its streams are doing, so a long wait for a first byte is
-// never cut by it.
+// never cut by it. But a ping's answer restarts the clock, so a wait of
+// minutes is pinged every PingAfter, which Google's front end ends the
+// connection for: the gateway's transports ping by CalmHTTP2 instead, and
+// this is for http.DefaultTransport's short requests.
 func HTTP2Health() *http.HTTP2Config {
 	return &http.HTTP2Config{SendPingTimeout: PingAfter, PingTimeout: PingWait}
 }
@@ -111,17 +123,42 @@ func Held(ctx context.Context) error {
 // "direct", #1522) goes through its own provider's proxy, never the one
 // it was made under. A provider's leave not to check its certificate
 // (WithUncheckedTLS) goes the same way: it is the outer provider's, and
-// dropped here.
+// dropped here, and so is its ask for HTTP/1.1 (WithHTTP1) and its own
+// TLS identity (WithClientCert).
 func With(ctx context.Context, choice string) context.Context {
-	if choice = strings.TrimSpace(choice); choice == "" && choiceOf(ctx) == "" && uncheckedOf(ctx) == nil {
+	if choice = strings.TrimSpace(choice); choice == "" && choiceOf(ctx) == "" && uncheckedOf(ctx) == nil && http1Of(ctx) == nil && clientCertOf(ctx) == nil {
 		return ctx
 	}
 	ctx = context.WithValue(ctx, choiceKey{}, choice)
+	if clientCertOf(ctx) != nil {
+		ctx = context.WithValue(ctx, clientCertKey{}, (*clientCert)(nil))
+	}
 	if uncheckedOf(ctx) != nil {
 		ctx = context.WithValue(ctx, uncheckedKey{}, map[string]bool(nil))
 	}
+	if http1Of(ctx) != nil {
+		ctx = context.WithValue(ctx, http1Key{}, map[string]bool(nil))
+	}
 	return ctx
 }
+
+// Downloads is ctx for magpie's downloads of plugins — the plugins list,
+// npm's registry, GitHub, the plugins repo's dist branch, Bun itself —
+// which go through the proxy Settings sets for them (PluginProxy) when it
+// names one (JonahFu on X: GitHub reached only through a proxy, the
+// vendors without). Its "" leaves ctx as it is, so they follow the
+// global proxy as every other request does.
+func Downloads(ctx context.Context) context.Context {
+	if c := strings.TrimSpace(settings.Load().PluginProxy); c != "" {
+		return With(ctx, c)
+	}
+	return ctx
+}
+
+// EnvDownloads is Env for a program magpie starts to download plugins
+// (bun add and update, git): plugin downloads' proxy (Downloads), or,
+// when that names none, Env's.
+func EnvDownloads(env []string) []string { return EnvWith(settings.Load().PluginProxy, env) }
 
 // Choice is the proxy ctx names (With), "" when it names none — for a CLI
 // run on a provider's behalf, whose *_PROXY is set from it (EnvWith).
@@ -133,6 +170,19 @@ func choiceOf(ctx context.Context) string {
 	}
 	c, _ := ctx.Value(choiceKey{}).(string)
 	return c
+}
+
+// Resolve is a proxy choice as the proxy it stands for: a saved proxy
+// (settings.NamedProxy, "@id") as its address with its login, any other
+// choice as it is. A reference to a proxy that isn't there is kept as it
+// is, and Parse refuses it: a request meant for a proxy never goes
+// direct for want of one.
+func Resolve(choice string) string {
+	choice = strings.TrimSpace(choice)
+	if a, ok := settings.ResolveProxy(choice); ok {
+		return a
+	}
+	return choice
 }
 
 // forChoice is the proxy a provider's own choice names; nil for "direct".
@@ -154,20 +204,31 @@ var HTTP1 func(u *url.URL) bool
 // base kept for that proxy alone. Connections are so reused among the
 // requests going through one proxy and never carried to another — HTTP/2
 // ones, which a transport shares by host whatever proxy they were dialled
-// through, among them. A request HTTP1 names goes through a clone kept
-// for HTTP/1.1 (http1Only), and one to a host whose certificate the
-// provider's user said not to check (WithUncheckedTLS) through a clone
-// kept for that host alone (uncheckTLS). A host whose IPv6 is taken but
-// goes nowhere is dialed over IPv4 (v4Fallback).
+// through, among them. A move of the global proxy (the settings) drops
+// the idle connections the old one dialled, which a transport, pooling
+// by target host alone, would have carried over the switch (#4523). A
+// request HTTP1 names, one to a host its provider asked HTTP/1.1 of
+// (WithHTTP1), every request under OverHTTP1 (a download trying again
+// after its HTTP/2 transfer broke off), and one to a host whose HTTP/2
+// connection carried a TLS record that didn't decrypt (recordError, for h2Broken after) go
+// through a clone kept for HTTP/1.1 (http1Only), and one to a host whose certificate the provider's user
+// said not to check (WithUncheckedTLS) through a clone kept for that
+// host alone (uncheckTLS), and one made with a provider's own TLS
+// identity (WithClientCert) through a clone kept for it (clientTLS). A host whose IPv6 is taken but goes nowhere
+// is dialed over IPv4 (v4Fallback).
 func Dispatch(base *http.Transport) http.RoundTripper {
 	v4Fallback(base)
-	return &dispatch{base: base, own: map[route]*http.Transport{}}
+	return &dispatch{base: base, own: map[route]*http.Transport{}, moved: Watch()}
 }
 
 type dispatch struct {
 	base *http.Transport
 	mu   sync.Mutex
 	own  map[route]*http.Transport
+	// moved is whether the global proxy moved since the dispatch's last
+	// request: a move drops the idle connections, which would carry the
+	// requests after a switch through the old proxy (#4523).
+	moved func() bool
 }
 
 // route is what a request needs of its transport other than base: a
@@ -177,14 +238,59 @@ type route struct {
 	choice    string
 	h1        bool
 	unchecked string
+	client    string // clientRoute
 }
 
 func (d *dispatch) RoundTrip(req *http.Request) (*http.Response, error) {
-	r := route{choice: choiceOf(req.Context()), h1: HTTP1 != nil && HTTP1(req.URL), unchecked: uncheckedHost(req)}
-	if r == (route{}) {
-		return v4Retry(d.base, req)
+	if d.moved() {
+		d.CloseIdleConnections()
 	}
-	return v4Retry(d.transport(r), req)
+	r := route{choice: Resolve(choiceOf(req.Context())), h1: HTTP1 != nil && HTTP1(req.URL) || http1Asked(req) || overHTTP1(req.Context()) || h2BrokenFor(req), unchecked: uncheckedHost(req), client: clientRoute(req)}
+	t := d.base
+	if r != (route{}) {
+		t = d.transport(r)
+	}
+	res, err := v4Retry(t, req)
+	if r.h1 {
+		return res, err
+	}
+	if err != nil {
+		if recordError(err) {
+			markH2Broken(req)
+		}
+		return res, err
+	}
+	if res.ProtoMajor == 2 && res.Body != nil && res.Body != http.NoBody {
+		res.Body = h2Watch{ReadCloser: res.Body, req: req}
+	}
+	return res, err
+}
+
+// Watch is a check a transport of its own makes before each request: it
+// says the global proxy in magpie's settings moved since the check's last
+// call, and the caller closes its transport's idle connections, which
+// would carry the request after a switch through the old proxy. The
+// setting is read at dial time (Func), but a transport pools by target
+// host, and its HTTP/2 connections by the authority alone, so a
+// connection dialled through the old proxy carries the requests after a
+// switch too, until it is dropped. Dropping the idle connections sends
+// the request after it through the proxy in force; one a request is
+// still reading is left to finish. Each check keeps its own last value,
+// so each transport sees, and answers, a move on the first request it
+// sends after it (#4523, #4824). The first call sees no move.
+func Watch() func() bool {
+	var mu sync.Mutex
+	var proxy string
+	var seen bool
+	return func() bool {
+		// Shared, not Load: this runs on every request
+		now := Resolve(settings.Shared().Proxy)
+		mu.Lock()
+		defer mu.Unlock()
+		moved := seen && proxy != now
+		proxy, seen = now, true
+		return moved
+	}
 }
 
 func (d *dispatch) transport(r route) *http.Transport {
@@ -216,6 +322,17 @@ func (d *dispatch) transport(r route) *http.Transport {
 	}
 	if r.unchecked != "" {
 		uncheckTLS(t)
+	}
+	if r.client != "" {
+		clientTLS(t, r.client)
+	}
+	if isCalm(d.base) {
+		// a clone shares base's HTTP/2 connections, dialled through
+		// base's proxy, until it is given its own
+		t.TLSNextProto = nil
+		if !r.h1 {
+			CalmHTTP2(t)
+		}
 	}
 	d.own[r] = t
 	return t
@@ -285,6 +402,12 @@ func EnvWith(choice string, env []string) []string {
 	if s == "" {
 		s = strings.TrimSpace(settings.Load().Proxy)
 	}
+	if settings.IsProxyRef(s) {
+		// a saved proxy that is gone: the CLI goes nowhere, not direct
+		if _, ok := settings.ResolveProxy(s); !ok {
+			return withProxy(env, DeadProxy, nil)
+		}
+	}
 	switch s {
 	case "direct":
 		return withProxy(env, "", nil)
@@ -343,9 +466,23 @@ func withProxy(env []string, p string, bypass []string) []string {
 		"ALL_PROXY="+p, "all_proxy="+p, "NO_PROXY="+nos, "no_proxy="+nos)
 }
 
-// Parse reads a proxy address; a bare host:port is an HTTP proxy.
+// DeadProxy is where a CLI is sent for a saved proxy that is gone: a port
+// nothing listens on, so its requests fail where a missing proxy would
+// have sent them straight out.
+const DeadProxy = "http://127.0.0.1:9"
+
+// Parse reads a proxy address; a bare host:port is an HTTP proxy. A saved
+// proxy ("@id") is read as the address it stands for, its login in it;
+// one that is gone is an error.
 func Parse(s string) (*url.URL, error) {
 	s = strings.TrimSpace(s)
+	if settings.IsProxyRef(s) {
+		a, ok := settings.ResolveProxy(s)
+		if !ok {
+			return nil, fmt.Errorf("the saved proxy %q isn't on this computer (deleted, or never synced here); pick another in Settings", settings.ProxyLabel(settings.ProxyID(s)))
+		}
+		s = a
+	}
 	if !strings.Contains(s, "://") {
 		s = "http://" + s
 	}
@@ -382,6 +519,11 @@ func Redact(raw string) string {
 	u, err := Parse(raw)
 	if err != nil {
 		return ""
+	}
+	if settings.IsProxyRef(raw) {
+		// a saved proxy shown as its address, with no login
+		u.User = nil
+		return u.String()
 	}
 	if u.User == nil {
 		return raw

@@ -17,12 +17,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -35,7 +35,7 @@ type shim struct {
 
 // asdfExec is the line asdf's shims run: `exec asdf exec "claude" "$@"`
 // (asdf 0.16 on), `exec /home/u/.asdf/bin/asdf exec "claude" "$@"` before.
-var asdfExec = regexp.MustCompile(`(?m)^exec (\S*asdf) exec "`)
+var asdfExec = lazyre.New(`(?m)^exec (\S*asdf) exec "`)
 
 // shimAt says whose shim bin is; nil when it is none, or the manager to ask
 // isn't here.
@@ -195,6 +195,9 @@ func runnable(p string) string {
 func installedAt(spec cliSpec, bin string) (string, *updater) {
 	real, s := throughShim(bin)
 	u := howInstalled(spec, real)
+	if u != nil && u.via == "self" && spec.line != nil {
+		u.pkg = spec.line(installedVersion(real))
+	}
 	if u != nil && s != nil && s.kind == "mise" {
 		u.reshim = []string{s.mgr, "reshim"}
 	}

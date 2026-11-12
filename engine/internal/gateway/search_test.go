@@ -192,7 +192,7 @@ func TestWebSearchForAModelThatCannot(t *testing.T) {
 	if rec.Code != 200 || len(res.Choices) != 1 || res.Choices[0].Message.Content != "Let me check.\n\nGo 1.27.1 is out." || len(res.Choices[0].Message.ToolCalls) != 0 || res.Choices[0].FinishReason != "stop" {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
-	if res.Usage.Prompt != 40 || res.Usage.Completion != 12 {
+	if res.Usage.Prompt != 10 || res.Usage.Completion != 12 { // the last round's prompt, both rounds' output
 		t.Fatalf("usage %+v", res.Usage)
 	}
 
@@ -295,8 +295,10 @@ func TestSearchZeroCacheSplitKeepsWrites(t *testing.T) {
 	}
 	client := newSniffer(provider.Anthropic, "text/event-stream")
 	client.write(w.Body.Bytes())
-	if client.u.CacheWrite != 50 {
-		t.Fatalf("zero delta after search round reduced client cache writes: got %d, want 50", client.u.CacheWrite)
+	// the client is told the last round's writes, the first round's
+	// billed with them
+	if client.u.CacheWrite != 20 {
+		t.Fatalf("zero delta after search round reduced client cache writes: got %d, want the last round's 20", client.u.CacheWrite)
 	}
 }
 
@@ -668,17 +670,17 @@ func TestSearchAskedLooksCheaply(t *testing.T) {
 	}
 	asks := []byte(`{"model":"gpt-5","input":"` + long + `","tools":[{"type":"web_search"}]}`)
 	codex := provider.Provider{ID: "codex", Responses: provider.CodexBase, Account: &provider.Account{Agent: "codex"}}
-	if searchedForIt(codex, provider.Responses, "gpt-5", asks) {
+	if searchedForIt(context.Background(), codex, provider.Responses, "gpt-5", asks) {
 		t.Error("Codex searches by itself, and magpie searched for it")
 	}
-	if n := testing.AllocsPerRun(20, func() { searchedForIt(codex, provider.Responses, "gpt-5", asks) }); n > 20 {
+	if n := testing.AllocsPerRun(20, func() { searchedForIt(context.Background(), codex, provider.Responses, "gpt-5", asks) }); n > 20 {
 		t.Errorf("a provider that searches by itself: %v allocations, the body parsed", n)
 	}
 	other := provider.Provider{ID: "x", Responses: "https://example.test/v1"}
-	if !searchedForIt(other, provider.Responses, "gpt-5", asks) {
+	if !searchedForIt(context.Background(), other, provider.Responses, "gpt-5", asks) {
 		t.Error("a provider that doesn't search: magpie didn't search for it")
 	}
-	if searchedForIt(other, provider.Responses, "gpt-5", plain) {
+	if searchedForIt(context.Background(), other, provider.Responses, "gpt-5", plain) {
 		t.Error("a body offering no search: magpie searched for it")
 	}
 }
@@ -692,13 +694,13 @@ func BenchmarkSearchedForIt(b *testing.B) {
 	b.Run("codex-asks", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			searchedForIt(codex, provider.Responses, "gpt-5", asks)
+			searchedForIt(context.Background(), codex, provider.Responses, "gpt-5", asks)
 		}
 	})
 	b.Run("other-plain", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			searchedForIt(other, provider.Responses, "gpt-5", plain)
+			searchedForIt(context.Background(), other, provider.Responses, "gpt-5", plain)
 		}
 	})
 }

@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -24,9 +23,11 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/ghtoken"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/libc"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/source"
+	"github.com/yetone/magpie/internal/stall"
 )
 
 // BunVersion is the Bun magpie downloads to run plugins with the first
@@ -122,7 +123,7 @@ func bunExe() string {
 // missingLibRe finds what a musl Linux's loader says when a program needs
 // a library the system lacks: "Error loading shared library
 // libstdc++.so.6: No such file or directory (needed by …)".
-var missingLibRe = regexp.MustCompile(`Error loading shared library ([^:\s]+)`)
+var missingLibRe = lazyre.New(`Error loading shared library ([^:\s]+)`)
 
 // missingLibs says which libraries a bun that started couldn't be linked
 // with lacks, from what it printed, "" when that isn't why it failed. Bun's
@@ -342,7 +343,28 @@ func getURLOfficial(ctx context.Context, url string, limit int64) ([]byte, error
 	return getURLFrom(ctx, url, limit, false)
 }
 
+// getURLFrom reads url, once more over HTTP/1.1 when the connection broke
+// off (netproxy.AgainOverHTTP1): Bun's zip is tens of MB, which a proxy
+// that cuts HTTP/2 streams part way breaks on each try over HTTP/2.
 func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]byte, error) {
+	ctx = netproxy.Downloads(ctx)
+	var b []byte
+	err := netproxy.AgainOverHTTP1(ctx, func(ctx context.Context) (err error) {
+		b, err = getURLOnce(ctx, url, limit, mirror)
+		return err
+	})
+	return b, err
+}
+
+// downloadStall is how long a download from Bun's release waits for its
+// next byte; there is no bound on the whole, so a slow link still moving
+// finishes (#5572). A var for tests.
+var downloadStall = 60 * time.Second
+
+func getURLOnce(ctx context.Context, url string, limit int64, mirror bool) (b []byte, err error) {
+	ctx, w := stall.Start(ctx, downloadStall)
+	defer w.Stop()
+	defer func() { err = w.Err(err) }()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -362,7 +384,7 @@ func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]by
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: %s", url, res.Status)
 	}
-	b, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	b, err = io.ReadAll(io.LimitReader(w.Reader(res.Body), limit+1))
 	if err != nil {
 		return nil, err
 	}
@@ -374,29 +396,22 @@ func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]by
 
 // bunCommand runs bun with args in dir, the environment's proxy settings
 // passed on (a SOCKS5 one bridged, as Bun can't use it: #1409), the roots
-// the system trusts added to Bun's (caEnv), and npm's registry in China
-// with the 「国内镜像」 switch on (its packages are npm's own, checked
-// against the integrity npm gave).
+// the system trusts added to Bun's (caEnv), and the npm registry in use
+// where bun wouldn't find it itself (registryEnv): one set in magpie, the
+// login shell's, or npm's registry in China with the 「国内镜像」 switch on
+// (its packages are npm's own, checked against the integrity npm gave).
 var bunCommand = func(ctx context.Context, bun, dir string, args ...string) *exec.Cmd {
 	cmd := command(ctx, bun, args...)
 	cmd.Dir = dir
-	cmd.Env = append(netproxy.EnvForBun(env()), "BUN_INSTALL_CACHE_DIR="+installCacheDir())
+	// bun run is the host, whose requests are the plugins' own to their
+	// vendors: magpie's proxy. Every other command downloads plugins, and
+	// takes plugin downloads' proxy (dlEnv).
+	e := dlEnv()
+	if len(args) > 0 && args[0] == "run" {
+		e = env()
+	}
+	cmd.Env = append(netproxy.EnvForBun(e), "BUN_INSTALL_CACHE_DIR="+installCacheDir())
 	cmd.Env = append(cmd.Env, caEnv(cmd.Env, dir)...)
 	cmd.Env = append(cmd.Env, registryEnv(cmd.Env)...)
 	return cmd
-}
-
-// registryEnv is what has bun install from npm's registry in China, with
-// the switch on, unless the environment names a registry already.
-func registryEnv(env []string) []string {
-	if !source.China() {
-		return nil
-	}
-	for _, kv := range env {
-		k, v, _ := strings.Cut(kv, "=")
-		if k = strings.ToUpper(k); (k == "BUN_CONFIG_REGISTRY" || k == "NPM_CONFIG_REGISTRY") && strings.TrimSpace(v) != "" {
-			return nil
-		}
-	}
-	return []string{"BUN_CONFIG_REGISTRY=" + source.NPMMirror + "/"}
 }

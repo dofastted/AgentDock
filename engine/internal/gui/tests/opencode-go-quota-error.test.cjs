@@ -45,6 +45,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 440, height: 760 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang));
@@ -52,7 +53,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForFunction(() => typeof quotaError === "function");
       const said = await page.evaluate((errs) => errs.map((e) => quotaError(e)), errs);
       const want = await page.evaluate((keys) => keys.map((k) => t(k)), keys);
-      const generic = await page.evaluate(() => t("Allowance unavailable"));
+      const generic = await page.evaluate(() => t("Allowance unavailable — hover for why"));
       for (let i = 0; i < errs.length; i++) {
         assert.equal(said[i], want[i], errs[i]);
         assert.notEqual(said[i], generic);

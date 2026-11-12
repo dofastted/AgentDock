@@ -33,19 +33,41 @@ const remoteKeyLimitHeader = "X-Magpie-Limit-Reset"
 // resets; one let in holds a reservation until it ends. A key with a limit
 // while plugins/budget is off is refused with a 503, and nothing is sent. Reads, the
 // bridge's tool callbacks and counting tokens cost nothing and pass.
+//
+// A limit of some models (access.Limit.Models) holds a request that names
+// one of them here, and its spent ones are put on the request's caller
+// (access.Identity.Spent), for every route to leave their models out of
+// its candidates: a routing group's request goes on to the others, and
+// counting tokens on a spent one is refused as serving it would be.
 func keyLimited(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		who := access.Caller(r.Context())
 		limits := who.Limits()
-		if len(limits) == 0 || r.Method != http.MethodPost || strings.HasPrefix(r.URL.Path, "/_magpie/") || strings.HasPrefix(r.URL.Path, "/mcp/") || strings.HasSuffix(r.URL.Path, "/count_tokens") {
+		if who.Issuer != nil {
+			limits = append(slices.Clone(limits), who.Issuer.Limits()...)
+		}
+		if !who.Limited() || r.Method != http.MethodPost || strings.HasPrefix(r.URL.Path, "/_magpie/") || strings.HasPrefix(r.URL.Path, "/mcp/") || r.URL.Path == KeysPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		scoped := slices.ContainsFunc(limits, (*access.Limit).Scoped)
+		if strings.HasSuffix(r.URL.Path, "/count_tokens") {
+			if scoped {
+				r = withSpent(r, who, limitClock())
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
 		size, model := r.ContentLength, ""
 		// a compressed body (#1223) is reserved at its decoded size and model
 		costCap := slices.ContainsFunc(limits, func(l *access.Limit) bool { return l.Cost > 0 })
-		if enc := r.Header.Get("Content-Encoding"); costCap || size < 0 || (enc != "" && !strings.EqualFold(enc, "identity")) {
-			b, status, err := readBoundedRequestBody(w, r, requestLimits{})
+		if enc := r.Header.Get("Content-Encoding"); costCap || scoped || size < 0 || (enc != "" && !strings.EqualFold(enc, "identity")) {
+			// a turn on Codex's own path reads to its own limit (codexBackend)
+			var most int64
+			if strings.HasPrefix(r.URL.Path, CodexPath+"/") {
+				most = codexBodyLimit()
+			}
+			b, status, err := readBoundedRequestBody(w, r, requestLimits{body: most})
 			if err != nil {
 				writeError(w, protoOfPath(r.URL.Path), status, err.Error())
 				return
@@ -54,6 +76,11 @@ func keyLimited(next http.Handler) http.Handler {
 			size, model = int64(len(b)), budget.ModelOf(b)
 		}
 		now := limitClock()
+		if scoped {
+			// before the request's own reservation, which would count it
+			// spent on the model it holds
+			r = withSpent(r, who, now)
+		}
 		release, err := reserveFor(who, size, model, now)
 		if err != nil {
 			status, errType := http.StatusServiceUnavailable, "gateway_key_limit_off"
@@ -61,7 +88,10 @@ func keyLimited(next http.Handler) http.Handler {
 			if errors.As(err, &refused) {
 				status, errType = http.StatusTooManyRequests, "gateway_key_limit"
 				w.Header().Set("Retry-After", strconv.Itoa(refused.RetryAfter(now)))
-				w.Header().Set(remoteKeyLimitHeader, refused.ResetAt().Format(time.RFC3339))
+				// a limit of some models rests a remote's model, not its key
+				if b, ok := refused.(*budget.Refusal); !ok || len(b.Models) == 0 {
+					w.Header().Set(remoteKeyLimitHeader, refused.ResetAt().Format(time.RFC3339))
+				}
 			}
 			// the Anthropic and OpenAI SDKs would otherwise retry a 429 or 503
 			w.Header().Set("X-Should-Retry", "false")
@@ -74,6 +104,24 @@ func keyLimited(next http.Handler) http.Handler {
 		defer release()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// withSpent is r with its caller's spent limits of some models on it
+// (access.Identity.Spent), as the limiter serving who tells them; r as it
+// is when none serves (a request it holds is refused by reserveFor).
+func withSpent(r *http.Request, who access.Identity, now time.Time) *http.Request {
+	l, err := gwbudget.Limiting(who)
+	if err != nil || l == nil {
+		return r
+	}
+	sp, ok := l.(gwbudget.Spender)
+	if !ok {
+		return r
+	}
+	if who.Spent = sp.Spent(who, now); len(who.Spent) == 0 {
+		return r
+	}
+	return r.WithContext(access.WithIdentity(r.Context(), who))
 }
 
 // reserveFor holds a request of who's to its key's limits through the
@@ -113,12 +161,71 @@ func protoOfPath(path string) provider.Protocol {
 // none or a request without one. "limits" is each of a key's limits
 // (#2227), and "limit" the one holding it most (budget.Binding), which is
 // what a magpie from before them reads.
+//
+// A key held to a budget, models or accounts is told so as well, so this
+// agrees with the quotas and the status line (steven_4422: a key held to
+// Claude's models read {"limited":false} here and 403 gateway_key_held
+// there): "heldTo" what holds it ("budget", "models", "accounts"),
+// "models" the models it may use, and "quotas" whether it is told any
+// quota, with "quotaProviders" the providers it is told those of
+// (scopeQuotas). An account is not named: a key its owner tells no quota
+// is told no account either. A key held to nothing has none of these.
+// "mcp" is the MCP servers and tools a key may use, when its owner chose
+// some.
 func (s *Server) keyLimit(w http.ResponseWriter, r *http.Request) {
 	who := access.Caller(r.Context())
+	out := map[string]any{"limited": false, "key": who.KeyName}
+	if heldKey(who) {
+		var heldTo []string
+		if who.Limited() {
+			heldTo = append(heldTo, "budget")
+		}
+		if len(who.Models) > 0 && !who.AccountModels {
+			heldTo = append(heldTo, "models")
+		}
+		if len(who.Accounts) > 0 {
+			heldTo = append(heldTo, "accounts")
+		}
+		out["heldTo"], out["quotas"] = heldTo, who.Quotas
+		if len(who.Models) > 0 {
+			out["models"] = who.Models
+		}
+		if who.Quotas {
+			ps := []string{}
+			for id, every := range newQuotaScope(who, provider.Catalog()).every {
+				if every {
+					ps = append(ps, id)
+				}
+			}
+			slices.Sort(ps)
+			out["quotaProviders"] = ps
+		}
+	}
+	// an issued key is held to the limits of the key it was issued under
+	// too, which count every key issued under it: "issuerLimits"
+	if who.KeyID != "" && who.Issuer != nil && len(who.Issuer.Limits()) > 0 {
+		out["issuerLimits"] = budget.All(access.Key{ID: who.Issuer.KeyID, Name: who.Issuer.KeyName, Limit: who.Issuer.Limit, More: who.Issuer.More}, limitClock())
+	}
+	// "mcp", the MCP servers and tools a key is held to (access.Key.MCP)
+	if who.KeyID != "" && len(who.MCP) > 0 {
+		out["mcp"] = who.MCP
+	}
+	if !who.Expires.IsZero() {
+		out["expires"] = who.Expires
+	}
+	// "maxConcurrency", how many of its requests may be in flight at once
+	// (key_slots.go), and its issuer's
+	if who.KeyID != "" && who.MaxConcurrency > 0 {
+		out["maxConcurrency"] = who.MaxConcurrency
+	}
+	if who.KeyID != "" && who.Issuer != nil && who.Issuer.MaxConcurrency > 0 {
+		out["issuerMaxConcurrency"] = who.Issuer.MaxConcurrency
+	}
 	if who.KeyID == "" || len(who.Limits()) == 0 {
-		writeJSON(w, 200, map[string]any{"limited": false, "key": who.KeyName})
+		writeJSON(w, 200, out)
 		return
 	}
 	all := budget.All(access.Key{ID: who.KeyID, Name: who.KeyName, Limit: who.Limit, More: who.More}, limitClock())
-	writeJSON(w, 200, map[string]any{"limited": true, "key": who.KeyName, "limit": budget.Binding(all), "limits": all})
+	out["limited"], out["limit"], out["limits"] = true, budget.Binding(all), all
+	writeJSON(w, 200, out)
 }

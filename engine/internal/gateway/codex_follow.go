@@ -8,27 +8,26 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/usage"
 )
 
 // Codex's side calls ask for one of Codex's own models by its bare name,
-// whatever the conversation is on: a subagent goes on the model its lead
-// names in spawn_agent (Codex lists its own first), its memories are
-// written on gpt-5.6-luna and gpt-5.6-terra, its auto-review runs on
+// whatever the conversation is on: its memories are written on
+// gpt-6-luna and gpt-6.1-terra (gpt-5.6-luna and gpt-5.6-terra before
+// Codex 0.167.0), its auto-review runs on
 // codex-auto-review. With the conversation on one of magpie's models
 // beside Codex's ChatGPT sign-in, each of those went to that ChatGPT
 // account rather than where the user had routed Codex (cybercaius on
-// Discord). With nothing set for them, a subagent and the memories follow
-// the session: they go on the model the conversation's own turns go on,
-// when that is one of magpie's (codexSessionOf), as the app's titles,
+// Discord). With nothing set for them, the memories follow the session:
+// they go on the model the conversation's own turns go on, when that is
+// one of magpie's (servedSession; started with a turn, after that turn:
+// codexMemorySession), as the app's titles,
 // descriptions, summaries and composer predictions do (codexSideTo). The auto-review follows it when set to
 // (settings.CodexAutoReviewSession, which codexcat writes into each of
 // magpie's entries); left to Codex it stays on codex-auto-review, which a
 // ChatGPT sign-in runs free (#1593).
 
 // CodexSideSet says whether Codex's own config names the model for a side
-// call ("subagent": [agents] default_subagent_model; "memories": [memories]
-// extract_model or consolidation_model), true when the config can't be
+// call ("memories": [memories] extract_model or consolidation_model), true when the config can't be
 // read; nil leaves every such call as Codex sent it (agent.CodexSideSet).
 var CodexSideSet func(which string) bool
 
@@ -84,17 +83,12 @@ func (l *codexLeads) saw(r *http.Request, kind, model string) {
 	l.thread[thread] = codexLead{model: model, at: time.Now()}
 }
 
-// of is the model the conversation a side call was made for is on: its
-// parent thread's (a subagent's lead, a review's conversation), the
-// thread it was forked from (a composer prediction), else its own
-// thread's, else the one this key's Codex last had a turn on.
-func (l *codexLeads) of(r *http.Request, body []byte) string {
-	model, _, _ := l.lookup(r, body)
-	return model
-}
-
-// lookup is of, with whether the call's conversation was one magpie has
-// seen a turn of, and when this key's last turn came when it wasn't.
+// lookup is the model the conversation a side call was made for is on:
+// its parent thread's (a review's conversation), the thread it was forked
+// from (a composer prediction), else its own thread's, else the one this
+// key's Codex last had a turn on; with whether the call's conversation was
+// one magpie has seen a turn of, and when this key's last turn came when
+// it wasn't.
 func (l *codexLeads) lookup(r *http.Request, body []byte) (model string, tied bool, at time.Time) {
 	meta := requestSessionMetadata(r.Header, body)
 	parent := meta.Parent
@@ -121,19 +115,35 @@ var (
 	codexSideWait  = 5 * time.Second
 )
 
-// sideOf is of for the Codex app's own side turns: a title, description,
-// summary or prediction. Codex writes a new conversation's title on a
-// temporary thread of its own, with no link to the conversation, started
-// as the user's first message is sent, so it often reaches magpie before
-// that conversation's first turn. Read then, the key's last turn is the
-// previous conversation's, on the model the user switched away from
-// (cybercaius on Discord: the first title after a switch came from the
-// old model). When this key's last turn is older than codexSideFresh,
-// such a call waits, up to codexSideWait or until it is cancelled, for
-// the next turn of any conversation, and takes that one's model.
-func (l *codexLeads) sideOf(r *http.Request, body []byte) string {
+// sideOf is of for a side call started beside a turn: the Codex app's
+// title, description, summary or prediction, and Codex's memories. Codex
+// writes a new conversation's title on a temporary thread of its own, with
+// no link to the conversation, started as the user's first message is
+// sent, so it often reaches magpie before that conversation's first turn.
+// Read then, the key's last turn is the previous conversation's, on the
+// model the user switched away from (cybercaius on Discord: the first
+// title after a switch came from the old model). When this key's last
+// turn is older than codexSideFresh, such a call waits, up to
+// codexSideWait or until it is cancelled, for the next turn of any
+// conversation, and takes that one's model. So does one that comes before
+// this key's Codex has had any turn through magpie, the first new
+// conversation after magpie starts (tenacious_eagle_96548 on Discord):
+// read at once, nothing was known, and the title went on the model in
+// Codex's config (CodexSideModel), another provider's, not the one picked
+// in the Codex app for the conversation.
+//
+// beside is a call Codex starts with every turn of its conversation, tied
+// to it: its memories, which Codex extracts and consolidates as each turn
+// with the user's input starts (codex-rs app-server turn_processor,
+// start_memories_startup_task), under that conversation's thread. Racing
+// the turn, the conversation's last model is the one before a switch, so
+// it waits too. A call tied to a conversation that isn't (a composer
+// prediction, a known thread's title) takes its last model at once. A
+// memory call before any turn at all is Codex consolidating as it starts,
+// with no turn on the way: it takes the config's model at once.
+func (l *codexLeads) sideOf(r *http.Request, body []byte, beside bool) string {
 	model, tied, at := l.lookup(r, body)
-	if tied || model == "" || time.Since(at) < codexSideFresh {
+	if tied && !beside || model == "" && beside || model != "" && time.Since(at) < codexSideFresh {
 		return model
 	}
 	l.mu.Lock()
@@ -163,54 +173,53 @@ func (s *Server) codexFollowTo(r *http.Request, agent, kind, asked string, body 
 	if agent != "codex" && !fromCodex(r.Header) || asked == "" || strings.Contains(asked, "/") {
 		return ""
 	}
-	which := ""
-	switch {
-	case usage.PurposeOf(kind) == "kind:collab_spawn":
-		// a task the ChatGPT backend sealed opens only on a ChatGPT
-		// account (codexSubagentPick)
-		if provider.CodexSubagentModel() != "" || sealedTaskIn(body) {
-			return ""
-		}
-		which = "subagent"
-	case isMemoryKind(kind):
-		which = "memories"
-	default:
+	// A subagent isn't one of them (mengxiao on Discord): Codex starts a
+	// spawn that names no model on its lead's (codex-rs core/src/agent/
+	// child_config.rs, build_agent_spawn_config), so one of Codex's bare
+	// models in a subagent's request under a lead on magpie's was named,
+	// in spawn_agent's model, in [agents] default_subagent_model or in a
+	// role's config. Moving it onto the lead's model overrode the user's
+	// own pick ("use GPT-6.1 Terra for the subagent"); only the model set
+	// for Codex's subagents in magpie moves one (codexSubagentPick).
+	if !isMemoryKind(kind) {
 		return ""
 	}
-	to := s.codexSessionOf(r, body)
+	// the user's own pick in Codex's config is kept; read before the
+	// session, which a memory call may wait on
+	if CodexSideSet == nil || CodexSideSet("memories") {
+		return ""
+	}
+	// started with a turn, maybe the first after a switch
+	to := s.codexMemorySession(r, body)
 	if to == "" || to == asked {
-		return ""
-	}
-	// the user's own pick in Codex's config is kept; read last, as it
-	// reads the config
-	if CodexSideSet == nil || CodexSideSet(which) {
 		return ""
 	}
 	return to
 }
 
-// codexSessionOf is the model of magpie's a Codex side call with nothing
-// set for it follows: the one its conversation's own turns go on
-// (codexLeads), else, before any turn of Codex's has come through magpie
-// (Codex consolidates its memories as it starts), the model Codex's config
-// is set to when it is one of magpie's (CodexSideModel). cybercaius on
-// Discord: with the model picked in the Codex app, not its config, the
-// memories went to ChatGPT, and so did the titles, descriptions and
-// composer predictions, which followed the config alone. "" when the
-// conversation is on one of Codex's own models, or magpie can't serve its
-// model now (turned off, gone, or one the caller's key is held from).
-func (s *Server) codexSessionOf(r *http.Request, body []byte) string {
-	return s.servedSession(r, s.codexLeads.of(r, body))
-}
-
-// codexSideSession is codexSessionOf for the Codex app's own side turns,
-// read after the turn they were started beside (codexLeads.sideOf).
+// codexSideSession is the model of magpie's the Codex app's own side
+// turns follow, read after the turn they were started beside
+// (codexLeads.sideOf, servedSession).
 func (s *Server) codexSideSession(r *http.Request, body []byte) string {
-	return s.servedSession(r, s.codexLeads.sideOf(r, body))
+	return s.servedSession(r, s.codexLeads.sideOf(r, body, false))
 }
 
-// servedSession is to, else the model in Codex's config, when magpie can
-// serve it to this caller now; "" otherwise.
+// codexMemorySession is codexSideSession for Codex's memory calls, read
+// after the turn they were started with (codexLeads.sideOf, beside).
+func (s *Server) codexMemorySession(r *http.Request, body []byte) string {
+	return s.servedSession(r, s.codexLeads.sideOf(r, body, true))
+}
+
+// servedSession is to, the model a Codex side call's conversation's own
+// turns go on (codexLeads), else, before any turn of Codex's has come
+// through magpie (Codex consolidates its memories as it starts), the model
+// Codex's config is set to (CodexSideModel), when magpie can serve it to
+// this caller now. cybercaius on Discord: with the model picked in the
+// Codex app, not its config, the memories went to ChatGPT, and so did the
+// titles, descriptions and composer predictions, which followed the config
+// alone. "" when the conversation is on one of Codex's own models, or
+// magpie can't serve its model now (turned off, gone, or one the caller's
+// key is held from).
 func (s *Server) servedSession(r *http.Request, to string) string {
 	if to == "" && CodexSideModel != nil {
 		to = CodexSideModel()

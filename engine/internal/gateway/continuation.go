@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -55,10 +56,23 @@ func emptyRetries(w http.ResponseWriter, ctx context.Context) int {
 	return streamRetries
 }
 
+// emptyAccounts is how many accounts of one model may answer a request
+// with a reply that said nothing before the rest of its accounts aren't
+// asked: the same conversation ends empty on whichever account it is sent
+// to, and each ask took minutes on a long one (vhjjkkhg on X: 8 to 9 tries
+// over 10+ minutes). The others of its group, and other providers, are.
+const emptyAccounts = 2
+
 // loopReasks is how many times a reply whose reasoning was stuck in a
 // loop (loopGuard) before it said anything is asked again in place, rather
 // than ended with the loop's error.
 const loopReasks = 1
+
+// cutReasks is how many times a try a plugin ended on its upstream's
+// stream dying mid-call (plugins#38) is asked again where it stood, before
+// the next member is (#2873): the parser reads the same, the cut doesn't
+// come again.
+const cutReasks = 1
 
 // errStreamCut ends a reply's read once its error event is in hand,
 // without waiting on a vendor that keeps the connection open after it.
@@ -70,6 +84,35 @@ var errStreamCut = errors.New("stream cut mid-reply")
 // two the passthrough tells apart. A Chat stream may end without [DONE]
 // and be whole, so Chat is not one.
 var errEndedShort = errors.New("the reply ended before it was complete")
+
+// endsAtProbeCap says whether a reply that stopped short of its end, its
+// connection closed cleanly, is taken as one that ended at its length:
+// the request capped it at a short probe's worth (cutVoidTokens) and the
+// reply spent some of it, thinking or saying something. A vendor that
+// ends a reply at max_tokens with no closing event looks the same as one
+// that cut it, and a reply asked for 16 tokens that thought them all is
+// what such an ending most likely is: Open Design's glm-5.3-flash always
+// thinks, spent a model test's 16 tokens on it and ended after
+// content_block_stop, with no message_delta or message_stop, so every
+// plain test of it through a remote magpie was a 502 waited out through
+// the patience (plugins#827). A larger reply that ends so is still a cut,
+// and so is a Gemini or Code Assist one of any size: Gemini ends every
+// reply with its finishReason, MAX_TOKENS included, so one without it was
+// cut (vertexCut, asked for 256, TestGeminiUpstreamEndedShort).
+func endsAtProbeCap(proto provider.Protocol, capped int, spent bool) bool {
+	return (proto == provider.Anthropic || proto == provider.Responses) &&
+		spent && capped > 0 && capped <= cutVoidTokens
+}
+
+// spends says whether an event spent some of a reply's tokens: text,
+// a call, reasoning, a search or an image.
+func spends(ev Event) bool {
+	switch ev.Kind {
+	case KThink, KSealed:
+		return true
+	}
+	return saysSomething(ev)
+}
 
 // geminiEnds says whether a Gemini chunk ends the reply, as replyEnds
 // does for events that name their type. Gemini's and Code Assist's chunks
@@ -119,6 +162,13 @@ func geminiKin(actual provider.Protocol) bool {
 	return actual == provider.Gemini || actual == provider.CodeAssist
 }
 
+// commandCodeHost is Command Code's API, whose every whole reply carries
+// a finish_reason: 665 requests in a reporter's day, 624 ended with one,
+// and the 20 that didn't were turns its slow starts lost to a killed
+// worker, each a 200 with no stop its client read as "Stream ended
+// without finish_reason" (esp32gallery on #2471).
+const commandCodeHost = "api.commandcode.ai"
+
 // saysItsEnd tells whether every whole reply of p in proto, serving model,
 // says it ended, so a stream that stops short of that is a reply cut
 // short: Anthropic's message_stop, Responses' response.completed, a
@@ -131,29 +181,37 @@ func geminiKin(actual provider.Protocol) bool {
 // Discord). When the last chunk counted the reply's usage, which that API
 // sends only once its generation is done, only the finish_reason was lost
 // and it is filled in (chatTail); without it the cut is said as one.
-// Other Chat APIs may end a whole reply with neither a finish_reason nor
-// [DONE], so only a failed read is a cut there.
+// Command Code's is the same kind, its killed workers leaving the turn
+// with no closing chunk at all (esp32gallery on #2471). Other Chat APIs
+// may end a whole reply with neither a finish_reason nor [DONE], so only
+// a failed read is a cut there.
 func saysItsEnd(p provider.Provider, proto provider.Protocol, model string) bool {
 	switch {
 	case proto == provider.Anthropic, proto == provider.Responses, geminiKin(proto):
 		return true
 	case proto == provider.Chat:
-		return geminiCompat(p.Host(), model)
+		return geminiCompat(p.VendorHost(), model) || p.VendorHost() == commandCodeHost
 	}
 	return false
 }
 
 // chatTail follows a Chat stream's chunks for a Gemini OpenAI-compatible
 // reply that ended without its finish_reason (saysItsEnd): whether its
-// last chunk counted the usage and whether it made calls.
-type chatTail struct{ usage, calls bool }
+// last chunk counted the usage and whether it made calls. A reply asked
+// whole is read through it too, for whether it said anything (said).
+type chatTail struct{ usage, calls, text bool }
 
 func (t *chatTail) see(data []byte) {
 	var v struct {
 		Choices []struct {
 			Delta struct {
+				Content   string            `json:"content"`
 				ToolCalls []json.RawMessage `json:"tool_calls"`
 			} `json:"delta"`
+			Message struct {
+				Content   string            `json:"content"`
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
 		} `json:"choices"`
 		Usage *cUsage `json:"usage"`
 	}
@@ -162,8 +220,16 @@ func (t *chatTail) see(data []byte) {
 	}
 	t.usage = v.Usage != nil && (v.Usage.PromptTokens > 0 || v.Usage.CompletionTokens > 0)
 	for _, c := range v.Choices {
-		t.calls = t.calls || len(c.Delta.ToolCalls) > 0
+		t.calls = t.calls || len(c.Delta.ToolCalls) > 0 || len(c.Message.ToolCalls) > 0
+		t.text = t.text || c.Delta.Content != "" || c.Message.Content != ""
 	}
+}
+
+// said tells whether the reply said anything an agent shows or acts on:
+// text or a call. Thinking is not said (#2972): a reply that spent its
+// whole budget on it said nothing.
+func (t chatTail) said() bool {
+	return t.text || t.calls
 }
 
 // finish is the finish_reason a reply that ended without one is given:
@@ -202,6 +268,19 @@ func inGroupTry(ctx context.Context) bool {
 	return v
 }
 
+// fallbackKey marks a try with another candidate after it: a model's next
+// account, provider or group member.
+type fallbackKey struct{}
+
+func withFallback(ctx context.Context) context.Context {
+	return context.WithValue(ctx, fallbackKey{}, true)
+}
+
+func hasFallback(ctx context.Context) bool {
+	v, _ := ctx.Value(fallbackKey{}).(bool)
+	return v
+}
+
 // prefillHow is how the upstream a reply is translated to goes on from
 // the part of it the client has, sent back as the conversation's last
 // assistant message: an Anthropic Messages upstream natively, a Chat one
@@ -214,7 +293,7 @@ func prefillHow(p provider.Provider, to provider.Protocol, model string) string 
 	case provider.Anthropic:
 		return "anthropic"
 	case provider.Chat:
-		return chatPrefill(p.Host(), model)
+		return chatPrefill(p.VendorHost(), model)
 	}
 	return ""
 }
@@ -376,19 +455,28 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 	}
 	var failed, failedCode string
 	var failedStatus int
+	// errNamed: the status the last try's error event named for itself,
+	// 0 when it named none or the try failed otherwise
+	var errNamed int
 	var cut, errSent bool
 	var empty bool // a reply in this protocol that says nothing fails (#667)
 	// counts: a reply in this protocol counts its tokens, and one that
 	// said nothing and counted none fails too (repliesCounted, #2086)
 	var counts bool
+	// voids: a reply in this protocol cut at its length that says nothing
+	// fails at once, asked again nowhere (cutVoid, #2972)
+	var voids bool
 	empties := 0 // the times such a reply was asked again here
 	said, stop := false, ""
 	var kept []Event       // the reply's end, while nothing is said in it
 	var before, this Usage // what the tries before this one billed, and this try
+	tried := false         // a try began: the next one's prompt is the reply's (restart)
 	// spoke: the reply has said something, a text or a call; relooped: this
 	// try's reasoning was found stuck in a loop before it had, and it is
 	// let go to ask again (loopReasks)
 	var spoke, relooped bool
+	// spent: this try spent some of the reply's tokens (endsAtProbeCap)
+	var spent bool
 	var summaryUpstream bool
 	reasks := 0
 	if h, ok := w.(*holdWriter); ok {
@@ -396,7 +484,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			// only reasoning nobody acts on: a text or a call the agent
 			// has would be said twice, and a continuation's prefill would
 			// be asked to go on with the loop
-			if !t.reasoning || spoke || cont.resume || reasks >= loopReasks || r.Context().Err() != nil {
+			if !t.reasoning || spoke || cont.resume || reasks >= loopReasks || r.Context().Err() != nil || p.PassesErrors() {
 				return false
 			}
 			reasks++
@@ -410,6 +498,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			return // the rest of a try let go for its loop
 		}
 		spoke = spoke || saysSomething(ev)
+		spent = spent || spends(ev)
 		switch ev.Kind {
 		case KThink, KSealed:
 			if ev.Kind == KThink && !summaryUpstream {
@@ -424,16 +513,24 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			if ev.Code == "" && cont.possible() && !inGroupTry(r.Context()) {
 				// held while the reply may yet go on; sent when it can't
 				failed, failedCode, failedStatus, cut = ev.Text, ev.Code, ev.Status, true
+				errNamed = ev.Status
 				return
 			}
 			failed, failedCode, failedStatus = ev.Text, ev.Code, ev.Status
+			if ev.Code == "" {
+				// a refusal's status is magpie's, told by its code
+				errNamed = ev.Status
+			}
 			errSent = true
 		case KStart:
-			// the tries are each billed, so their usages are summed into
-			// the reply's — the client's and the ledger's (a cut try's is
+			// the tries are each billed: the earlier ones' prompts as the
+			// reply's Deferred, their output with this one's (after); the
+			// client is told this try's prompt (a cut try's counts are
 			// only what it said before the cut)
 			this = ev.Usage
-			ev.Usage = ev.Usage.plus(before, false)
+			ev.Usage = ev.Usage.after(before, false)
+			ev.Usage.restart = tried
+			tried = true
 			u.add(ev.Usage)
 			u.add(Usage{Served: ev.Model}) // the model the vendor says answered
 		case KUsage:
@@ -443,7 +540,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		case KStop:
 			stop = ev.Stop
 		}
-		if (empty || counts) && !said {
+		if (empty || counts || voids) && !said {
 			switch {
 			case saysSomething(ev):
 				said = true
@@ -468,6 +565,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		// continuation's prefill away
 		cutBy, cutCode, cutErr := failed, failedCode, serr
 		failed, failedCode, failedStatus, cut, serr = "", "", 0, false, nil
+		errNamed, spent = 0, false
 		var held func() // what a textCallSee of this try holds back
 		req := request
 		if cont.resume {
@@ -484,11 +582,17 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			u.RequestID = requestID(res.Header)
 			summaryUpstream = actual == provider.Responses || actual == provider.Gemini || actual == provider.CodeAssist
 			empty, counts = emptyFails(actual), repliesCounted(actual)
+			voids = cutVoidAt(actual)
+		}
+		if err == nil && res.StatusCode >= 400 && !cont.resume && p.PassesErrors() {
+			// the user leaves its errors to the client (errors=pass)
+			defer res.Body.Close()
+			return passError(w, p, from, actual, res, u)
 		}
 		if err == nil && res.StatusCode >= 400 {
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 			res.Body.Close()
-			failed, failedStatus = p.Explain(p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b), res.StatusCode
+			failed, failedStatus = explained(p, model, res, b), res.StatusCode
 			if cont.resume && refusesPrefill(res.StatusCode, b) {
 				// a model that takes no prefill (forwardTranslated
 				// remembers it): the reply ends with what cut it, as a
@@ -507,7 +611,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				if turnedAway {
 					markAntigravityTurnsAway(w, request.System)
 				}
-				if p.Preset == "openrouter" && openRouterSharedPool(b) {
+				if p.VendorPreset() == "openrouter" && openRouterSharedPool(b) {
 					markOpenRouterSharedPool(w)
 				}
 				keepRetry(w.Header(), res.Header, b)
@@ -515,7 +619,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				if turnedAway {
 					u.ErrType = turnedAwayErrType
 				}
-				return writeVendorError(w, from, res.StatusCode, failed, b), failed
+				return writeVendorErrorFrom(w, from, actual, p, res, failed, b), failed
 			}
 		}
 		if err == nil && res.StatusCode < 400 {
@@ -530,7 +634,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					return writeError(w, from, 502, failed), failed
 				}
 			} else {
-				dec := decoderFor(p, actual)
+				dec := carryReasoning(decoderFor(p, actual, request.Tools), from, actual)
 				attemptSee := see
 				if names := textCallNames(request.Tools); names != nil {
 					t := &textCallSee{names: names, see: see}
@@ -538,10 +642,25 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				}
 				ended := false // the upstream said its reply ended
 				var tail chatTail
+				var found searchTally // the searches it ran by itself
+				// the client is kept alive while the upstream says
+				// nothing at all, its first event yet to come too: the
+				// upstream's 200 is in, and a holdWriter holds what is
+				// written for another candidate to answer still
+				var wmu sync.Mutex
+				heard, stopKeep := keepThroughSilence(keepaliveEvery, &wmu, func() {
+					if failed == "" && !cut && !relooped && sw.quiet() >= keepaliveEvery/2 {
+						enc.keepalive()
+					}
+				})
 				serr = readSSEAlive(rd, func(_, data string) error {
+					wmu.Lock()
+					defer wmu.Unlock()
+					heard()
 					tail.see([]byte(data))
+					found.see(actual, []byte(data))
 					st := upstreamStop([]byte(data))
-					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st, Tier: upstreamTier([]byte(data))})
+					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st, Tier: upstreamTier([]byte(data)), searches: found.count()})
 					ended = ended || replyEnds(actual, data, st)
 					if err := dec(data, attemptSee); err != nil {
 						return err
@@ -550,7 +669,13 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 						return errStreamCut
 					}
 					return nil
-				}, alive)
+				}, func() {
+					wmu.Lock()
+					defer wmu.Unlock()
+					heard()
+					alive()
+				})
+				stopKeep()
 				res.Body.Close()
 				if errors.Is(serr, errStreamCut) {
 					serr = nil
@@ -571,6 +696,14 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 						// finish_reason after its generation was done
 						u.add(Usage{Stop: fin})
 						serr = dec(string(finishChunk(fin)), attemptSee)
+					} else if endsAtProbeCap(actual, req.MaxTokens, spent) {
+						// a short probe's reply that stopped at its own
+						// small limit with no end said (plugins#827):
+						// ended at its length, as the vendor should have
+						// said
+						u.add(Usage{Stop: "length"})
+						serr = nil
+						attemptSee(Event{Kind: KStop, Stop: "length"})
 					}
 				}
 			}
@@ -597,7 +730,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				held()
 			}
 			if (empty || counts && uncounted(this)) && !said && answersNothing(stop) {
-				if empties < emptyRetries(w, r.Context()) && r.Context().Err() == nil {
+				if empties < emptyRetries(w, r.Context()) && r.Context().Err() == nil && !p.PassesErrors() {
 					// asked again here first, for the agent to have the
 					// answer rather than the error: Gemini on a long
 					// conversation now and then ends with only its
@@ -621,6 +754,14 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				failed = p.Name + ": " + emptyReply
 				break
 			}
+			if voids && replyCheck(r.Context()) == nil && cutVoid(stop, !said, this.Output, request.MaxTokens) {
+				// a void cut at its length fails at once, asked again
+				// nowhere: its budget is spent, and a second ask at the
+				// same max_tokens would mostly spend it twice over before
+				// the error (#2972, its review)
+				failed = cutVoidFailed(p.Name)
+				break
+			}
 			for _, ev := range kept {
 				enc.event(ev)
 			}
@@ -633,7 +774,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		// an error the client already has ends the reply: nothing of it
 		// goes on after it (a group member's mid-reply error fails the
 		// try at once, for the group's next member, #733)
-		if errSent || !cont.again(failedStatus, failedCode, again, r.Context()) {
+		if errSent || p.PassesErrors() || !cont.again(failedStatus, failedCode, again, r.Context()) {
 			if held != nil {
 				// what was held goes as the text it is, as it used to;
 				// a reply that goes on reads it again instead
@@ -662,6 +803,13 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			failed += " — " + hint
 		}
 		u.ErrType = turnedAwayErrType
+	} else if errNamed >= 400 && errNamed < 600 && serr == nil {
+		// the upstream's error event named its own status (Google's 400
+		// INVALID_ARGUMENT in a 200 stream): the failure is booked and
+		// rested as it, a request's fault as one, as a relayed stream's
+		// is (namedStatusHeader, #4855). Antigravity's turning a prompt
+		// away is its own, above
+		noteSaidStatus(w, errNamed)
 	}
 	if !errSent {
 		enc.event(Event{Kind: KError, Text: failed, Code: failedCode})

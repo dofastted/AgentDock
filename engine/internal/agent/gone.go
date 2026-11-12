@@ -32,7 +32,7 @@ var goneOS = runtime.GOOS
 // folder as the agent does, so the folder is no leftover; known is false
 // when magpie can't tell, which never counts as gone.
 func (a *Agent) cliHeld() (held, known bool) {
-	if a.Bin != "" && (binAt(a.Bin) != "" || proc.FindTool(a.Bin) != "") {
+	if a.Bin != "" && (a.binsOwn(binAt(a.Bin)) || a.binsOwn(proc.FindTool(a.Bin))) {
 		if a.ID != "goose" {
 			return true, true
 		}
@@ -64,6 +64,11 @@ func (a *Agent) cliHeld() (held, known bool) {
 		at = []string{filepath.Join(home, ".codex", "packages", "standalone")}
 	case "hermes":
 		at = []string{filepath.Join(a.Dir, "hermes-agent")}
+		// a profile magpie connects (hermesActive): the checkout is in
+		// the root its profiles are under
+		if filepath.Base(filepath.Dir(a.Dir)) == "profiles" {
+			at = append(at, filepath.Join(filepath.Dir(filepath.Dir(a.Dir)), "hermes-agent"))
+		}
 	}
 	for _, p := range at {
 		if _, err := os.Stat(p); err == nil {

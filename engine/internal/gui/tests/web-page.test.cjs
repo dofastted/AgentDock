@@ -101,6 +101,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const open = async (web) => {
         const page = await (await browser.newContext({ viewport: { width: 1180, height: 800 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], failed = [];
         page.on("pageerror", (e) => errors.push(e.message));
         page.on("response", (r) => r.status() >= 400 && failed.push(new URL(r.url()).pathname));
@@ -111,7 +112,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       };
 
       const { page, errors, failed, seen } = await open(true);
-      await page.locator("#gateway .dot").waitFor();
+      await page.locator("#gateway > .gw-mark").waitFor();
 
       // the request archive's switch, over the Usage page's requests
       await page.locator('[data-view="usage"]').first().click();
@@ -147,7 +148,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // the app's window still takes its runtime, for close and maximise
       const app = await open(false);
-      await app.page.locator("#gateway .dot").waitFor();
+      await app.page.locator("#gateway > .gw-mark").waitFor();
       for (let i = 0; i < 50 && !app.seen.paths.includes("/wails/runtime.js"); i++) await app.page.waitForTimeout(40);
       assert(app.seen.paths.includes("/wails/runtime.js"), "the app's window no longer loads its runtime");
       assert.deepEqual(app.errors, []);

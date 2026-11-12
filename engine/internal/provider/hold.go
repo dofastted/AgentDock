@@ -32,6 +32,10 @@ var held struct {
 	fgen uint64
 	// roots is the providers' and the settings' files as last looked at
 	roots [2]rootStamp
+	// stamp is StampNow's files as a request holding the catalog last
+	// looked at them, at stampAt (stampNowFiles)
+	stamp   [3]rootStamp
+	stampAt time.Time
 }
 
 // rootStamp is a file's time and size, or that it wasn't there.
@@ -119,6 +123,8 @@ func Hold() (release func()) {
 			held.built, held.env = nil, env
 		}
 		heldFreshLocked(true)
+		// a request's first StampNow looks at the files again
+		held.stampAt = time.Time{}
 	}
 	held.holds++
 	held.Unlock()
@@ -175,34 +181,146 @@ func StampNow() Stamp {
 	held.Lock()
 	gen := held.gen
 	held.Unlock()
-	return Stamp{gen: gen, fgen: filememo.Gen(), env: environSum(),
-		roots: [3]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath())}}
+	return Stamp{gen: gen, fgen: filememo.Gen(), env: environSum(), roots: stampNowFiles()}
 }
 
+// stampLooks counts StampNow's looks at its files, for a test.
+var stampLooks atomic.Int64
+
+// stampNowFiles is the files' part of StampNow: looked at once by a
+// request holding the catalog and its overlapping ones, for heldFor at
+// most, as what is held is. KeptListing takes a stamp for every
+// provider, and its three stats a provider were most of what a
+// Providers page poll spent (~600 of them a poll with 200 providers).
+// Another process's write is seen by the next request, as Hold's look
+// sees it.
+func stampNowFiles() [3]rootStamp {
+	held.Lock()
+	roots, fresh := held.stamp, held.holds > 0 && !held.stampAt.IsZero() && time.Since(held.stampAt) < heldFor
+	held.Unlock()
+	if fresh {
+		return roots
+	}
+	stampLooks.Add(1)
+	roots = [3]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath())}
+	held.Lock()
+	if held.holds > 0 {
+		held.stamp, held.stampAt = roots, time.Now()
+	}
+	held.Unlock()
+	return roots
+}
+
+// Held is what build gives, built once while a request holds it (Hold),
+// for what each row of a page looks up: shared by them, so read only.
+func Held[T any](key string, build func() T) T { return heldOf(key, build) }
+
+// heldCall is a build in flight, for the callers that miss it together.
+type heldCall struct {
+	done chan struct{}
+	// v is what it built, and fresh says nothing was written meanwhile
+	// (Changed, a plugin's change, filememo.Forget, another environment):
+	// what a caller waiting on it would have built itself. Both are set
+	// before done is closed.
+	v     any
+	fresh bool
+}
+
+// heldFlight is the builds in flight by key, held's lock guarding it. A
+// write drops what is held, and every request then in flight missed
+// together: each built again, one after another, each taking
+// logins.json's lock when the one before it let go, 20 requests queued
+// on it and the routing plan waiting past its 30s (#5104).
+var heldFlight = map[string]*heldCall{}
+
+// heldWait is how long a caller waits on another's build before it
+// builds on its own, as each did before (#5104). A build waits on
+// nothing of its waiters' today, but one that came to (a build asking,
+// deep down, for what waits on it, or for a lock its waiter holds) is
+// then a pause, not a request held for good.
+var heldWait = 5 * time.Second
+
+// heldRounds is how many builds in a row a caller waits on before it
+// builds on its own: each one a write made stale, so that writes coming
+// one after another can't keep a request waiting.
+const heldRounds = 3
+
 // heldOf is what build gives, built once while a request holds it.
+// Callers that miss together build once: the first builds, the rest wait
+// for it and take what it built, unless a write came while it was built;
+// then one of them builds again (#5104). Outside a request every caller
+// builds, as before.
 func heldOf[T any](key string, build func() T) T {
 	held.Lock()
 	if held.holds == 0 {
 		held.Unlock()
 		return build()
 	}
-	heldFreshLocked(false)
-	if h, ok := held.built[key]; ok && time.Since(h.at) < heldFor {
+	for round := 0; ; round++ {
+		heldFreshLocked(false)
+		if h, ok := held.built[key]; ok && time.Since(h.at) < heldFor {
+			held.Unlock()
+			return h.v.(T)
+		}
+		c := heldFlight[key]
+		if c == nil {
+			break
+		}
 		held.Unlock()
-		return h.v.(T)
+		if round == heldRounds || !c.wait(heldWait) {
+			return build()
+		}
+		if c.fresh {
+			return c.v.(T)
+		}
+		held.Lock()
+		if held.holds == 0 {
+			held.Unlock()
+			return build()
+		}
 	}
-	gen := held.gen
+	c := &heldCall{done: make(chan struct{})}
+	heldFlight[key] = c
+	gen, fgen, env := held.gen, filememo.Gen(), held.env
 	held.Unlock()
+	// the build ends for its waiters however it ends: one that panics
+	// leaves them to build on their own (fresh is false)
+	defer func() {
+		held.Lock()
+		if heldFlight[key] == c {
+			delete(heldFlight, key)
+		}
+		held.Unlock()
+		close(c.done)
+	}()
 	v := build()
 	held.Lock()
-	if held.holds > 0 && held.gen == gen {
+	// a filememo-only write (settings.Save) meanwhile is a write too: kept,
+	// what was read before it would be given for a second after it
+	c.v, c.fresh = v, held.gen == gen && filememo.Gen() == fgen && held.env == env
+	if held.holds > 0 && c.fresh {
 		if held.built == nil {
 			held.built = map[string]heldValue{}
 		}
 		held.built[key] = heldValue{v, time.Now()}
+		armStaleSweep()
 	}
+	delete(heldFlight, key)
 	held.Unlock()
 	return v
+}
+
+// wait waits for the build to end, for d at most, and says whether it
+// ended.
+func (c *heldCall) wait(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-c.done:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 func heldEntries(build func() []Entry) []Entry {
@@ -218,6 +336,10 @@ func heldEntries(build func() []Entry) []Entry {
 // entriesBuilt counts the catalogs built through heldEntries, for a test
 // that counts them.
 var entriesBuilt atomic.Int64
+
+// EntriesBuilt is how many times the catalog was built from every
+// provider's files, for another package's test that counts them.
+func EntriesBuilt() int64 { return entriesBuilt.Load() }
 
 // keptFor is how long what kept has is used while the Stamp stays the
 // same: an account another program signed in to or out of, or a model
@@ -270,9 +392,85 @@ func keptFit[T any](key string, fits func(any) bool, build func() T) T {
 			kept.of = map[string]any{}
 		}
 		kept.of[key] = v
+		armStaleSweep()
 	}
 	kept.Unlock()
 	return v
+}
+
+// staleFor is heldFor and keptFor as the last arm read them, in the
+// request that held or kept something (the sweep runs on a timer of its
+// own and reads these rather than what a test may be setting meanwhile),
+// and when the sweep armed soonest will run; zero: none is armed.
+var staleFor struct {
+	sync.Mutex
+	held, kept time.Duration
+	next       time.Time
+}
+
+// armStaleSweep arms the sweep, unless one is armed for as soon: what was
+// held or kept past its time was dropped only when the next request
+// looked, so the catalog the last request built (~7.5 MB with real
+// accounts) stayed for the life of a magpie nobody asked again.
+func armStaleSweep() {
+	staleFor.Lock()
+	defer staleFor.Unlock()
+	staleFor.held, staleFor.kept = heldFor, keptFor
+	staleArmLocked(min(heldFor, keptFor))
+}
+
+// staleArmLocked arms the sweep d from now, unless one is armed sooner.
+// staleFor is held.
+func staleArmLocked(d time.Duration) {
+	d = max(d, 10*time.Millisecond)
+	at := time.Now().Add(d)
+	if !staleFor.next.IsZero() && !at.Before(staleFor.next) {
+		return
+	}
+	staleFor.next = at
+	time.AfterFunc(d, sweepStale)
+}
+
+// sweepStale drops what is held past heldFor and kept past keptFor, and
+// looks again when the next of the rest will be, until nothing is left.
+func sweepStale() {
+	staleFor.Lock()
+	heldFor, keptFor := staleFor.held, staleFor.kept
+	// let go first: what is held or kept while this one looks arms its own
+	staleFor.next = time.Time{}
+	staleFor.Unlock()
+	next := time.Duration(-1)
+	soon := func(left time.Duration) {
+		if next < 0 || left < next {
+			next = left
+		}
+	}
+	held.Lock()
+	for k, h := range held.built {
+		if left := heldFor - time.Since(h.at); left <= 0 {
+			delete(held.built, k)
+		} else {
+			soon(left)
+		}
+	}
+	if len(held.built) == 0 {
+		held.built = nil
+	}
+	held.Unlock()
+	kept.Lock()
+	if kept.of != nil {
+		if left := keptFor - time.Since(kept.at); left <= 0 {
+			kept.of = nil
+		} else {
+			soon(left)
+		}
+	}
+	kept.Unlock()
+	if next >= 0 {
+		staleFor.Lock()
+		staleArmLocked(next)
+		staleFor.Unlock()
+	}
 }
 
 // holdingNow is whether a request holds the catalog now.
@@ -285,8 +483,15 @@ func holdingNow() bool {
 // heldPlugins is plugin.Cached, which reads the plugins' list and
 // sign-ins each time, and PluginOf asks for every model.
 func heldPlugins() []plugin.Provider {
-	return heldOf("plugins", func() []plugin.Provider { return slices.Clip(plugin.Cached()) })
+	return heldOf("plugins", func() []plugin.Provider {
+		pluginsBuilt.Add(1)
+		return slices.Clip(plugin.Cached())
+	})
 }
+
+// pluginsBuilt counts the plugins' list built, for the test that a look at
+// the accounts builds it once.
+var pluginsBuilt atomic.Int64
 
 // fromEntries is what was built from a catalog, and which catalog: its
 // first entry and its length.
@@ -332,6 +537,7 @@ func heldFrom[T any](key string, entries []Entry, build func([]Entry) T) T {
 			held.built = map[string]heldValue{}
 		}
 		held.built[key] = heldValue{f, time.Now()}
+		armStaleSweep()
 	}
 	held.Unlock()
 	return v

@@ -4,6 +4,7 @@ package gui
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -58,7 +59,7 @@ func TestCloseStepLeavesFullscreen(t *testing.T) {
 // had no close, minimise or full-screen buttons, and only Esc took it out of
 // full screen. A full-screen window keeps magpie in the Dock, whatever the setting.
 func TestFullscreenKeepsDock(t *testing.T) {
-	hidden, window, shown := settings.Settings{}, settings.Settings{DockWindow: true}, settings.Settings{Dock: true}
+	hidden, window, shown := settings.Settings{DockNever: true}, settings.Settings{DockWindow: true}, settings.Settings{Dock: true}
 	cases := []struct {
 		s                 settings.Settings
 		shown, fullscreen bool
@@ -79,6 +80,32 @@ func TestFullscreenKeepsDock(t *testing.T) {
 	}
 }
 
+// ShouguangCao on X: with Show in Dock left as it came, the open window was
+// out of Command-Tab, so going back to it to paste a key copied in another
+// app took the menu bar. Out of the box magpie is in the Dock while its
+// window is open and leaves it when the window closes; Hide keeps it out,
+// and Show keeps it in.
+func TestDockFollowsWindowByDefault(t *testing.T) {
+	cases := []struct {
+		name  string
+		s     settings.Settings
+		shown bool
+		want  bool
+	}{
+		{"default, window open", settings.Settings{}, true, true},
+		{"default, window closed", settings.Settings{}, false, false},
+		{"an older file's With window, open", settings.Settings{DockWindow: true}, true, true},
+		{"Hide, window open", settings.Settings{DockNever: true}, true, false},
+		{"Show, window closed", settings.Settings{Dock: true}, false, true},
+		{"Show wins over Hide", settings.Settings{Dock: true, DockNever: true}, false, true},
+	}
+	for _, c := range cases {
+		if got := inDock(c.s, c.shown, false); got != c.want {
+			t.Errorf("%s: inDock = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // yogurt36 on Discord: an account shown by its eye while Hide accounts is on
 // is shown for the window's session only. Closing the window only hides it,
 // so hideMain tells the page; the call it makes is one app.js answers, and
@@ -93,7 +120,7 @@ func TestClosingHidesShownAccounts(t *testing.T) {
 	}
 	_, hide, _ := strings.Cut(string(src), "func (h *host) hideMain() {")
 	hide, _, _ = strings.Cut(hide, "\n}\n")
-	if i, j := strings.Index(hide, "h.main.ExecJS(mainClosedJS)"), strings.Index(hide, "h.main.Hide()"); i < 0 || j < i {
+	if i, j := strings.Index(hide, "h.main.ExecJS(mainClosedJS)"), strings.Index(hide, "hideWebview(h.main)"); i < 0 || j < i {
 		t.Fatalf("hideMain doesn't tell the page before it hides the window:%s", hide)
 	}
 	js, err := os.ReadFile("assets/app.js")
@@ -111,5 +138,36 @@ func TestClosingHidesShownAccounts(t *testing.T) {
 	fn, _, _ = strings.Cut(fn, "\n")
 	if !strings.Contains(fn, "shown.clear()") {
 		t.Fatalf("closed forgets no shown account: %q", fn)
+	}
+}
+
+// shangyuan0818 on Discord: on Windows the top of the page, under the
+// title bar, resized the window's height as its frame does. Wails' page
+// script arms that edge whenever it is told the window is resizable, which
+// Wails says once its script is ready, before or after magpie's hook runs;
+// either way, and with the hook run twice, the edge stays off. Its stand-in
+// here keeps what each setResizable call said, as drag.ts does.
+func TestFrameOnlyResizeStaysOff(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("node is needed to run the page's script: ", err)
+	}
+	stub := `const said=[];window._wails={setResizable:v=>said.push(v)};`
+	ready := `window._wails.setResizable(true);` // what Wails runs once its script is ready
+	last := `if(said.at(-1)!==false){console.log(JSON.stringify(said));process.exit(1)}`
+	for name, js := range map[string]string{
+		"hook after Wails":  stub + ready + frameOnlyResizeJS + last,
+		"hook before Wails": stub + frameOnlyResizeJS + ready + last,
+		"hook twice":        stub + frameOnlyResizeJS + frameOnlyResizeJS + ready + ready + last,
+		"no runtime":        `const window={};` + frameOnlyResizeJS,
+	} {
+		script := "const window=globalThis;" + js
+		if name == "no runtime" {
+			script = "(()=>{" + js + "})()"
+		}
+		out, err := exec.Command(node, "-e", script).CombinedOutput()
+		if err != nil {
+			t.Errorf("%s: the page's edge is armed: %v %s", name, err, out)
+		}
 	}
 }

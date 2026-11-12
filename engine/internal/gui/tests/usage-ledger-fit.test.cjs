@@ -87,6 +87,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const open = async (width) => {
         const p = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
         p.setDefaultTimeout(5000);
+        p.setDefaultNavigationTimeout(60000);
         p.on("pageerror", (e) => errors.push(e.message));
         await p.route("**/*", server(lang));
         await p.goto("http://magpie.test/");
@@ -108,8 +109,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const ref = p.locator(".led tbody tr.led-row").nth(2).locator("td.cost");
       assert.equal(await ref.locator(".price-reference").isVisible(), false, "the price reference line is left out");
       assert((await ref.getAttribute("title")).includes("gpt-5.6-luna"), "and is in the cost's tooltip");
-      await reader.click(p, p.locator(".led tbody tr.led-row").nth(2).locator("td").nth(2));
-      assert((await p.locator(".led tbody tr.led-detail").textContent()).includes("gpt-5.6-luna"), "and in the row's details");
+      const det = await reader.openRequest(p, p.locator(".led tbody tr.led-row").nth(2));
+      assert((await det.textContent()).includes("gpt-5.6-luna"), "and in the request's page");
 
       // wide enough: the line is there (the window wider by the sidebar
       // beside the page)

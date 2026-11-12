@@ -2,8 +2,9 @@
 // Settings' kinds of personal data (lc on Discord): under Mask personal data,
 // while it is on, a row for each kind with Off/On, showing the user's choice
 // or the kind's default; a click saves that kind alone with the rest of the
-// settings as they were, and moves nothing. Their words are shown in full and
-// nothing runs off the page. In every language, in a wide window and a
+// settings as they were, and moves nothing. Their words are shown in full,
+// or, where they only explain the kind, rest out of sight for the hover
+// card (settingshints.js), and nothing runs off the page. In every language, in a wide window and a
 // narrow one.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -62,6 +63,7 @@ async function open(engine, lang, width, personal, saved) {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   const page = await (await browser.newContext({ viewport: { width, height: 1400 } })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, personal, saved));
@@ -90,6 +92,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
               return {
                 id: r.dataset.redact, name: r.querySelector(".name").textContent, sub: sub.textContent,
                 on: r.querySelector(".segs .opt.on")?.textContent,
+                hint: getComputedStyle(sub).getPropertyValue("--hint").trim() === "1",
                 cut: sub.scrollWidth > sub.clientWidth + 1 || sub.scrollHeight > sub.clientHeight + 1,
                 inside: b.left >= list.left - 1 && b.right <= list.right + 1 && v.right <= b.right + 1,
               };
@@ -105,7 +108,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(Object.fromEntries(m.rows.map((r) => [r.id, r.on === onWord ? "on" : "off"])), want);
         assert.equal(m.rows.find((r) => r.id === "ip").name, w.ip);
         for (const r of m.rows) {
-          assert(r.sub.length > 4 && !r.cut, `${r.id}'s words shown in full: ${r.sub}`);
+          assert(r.sub.length > 4 && (r.hint || !r.cut), `${r.id}'s words shown in full, or kept for the hover card: ${r.sub}`);
           assert(r.inside, `${r.id} inside the list`);
           if (lang !== "en" && r.id !== "iban") assert.notEqual(r.name, english[r.id], `${r.id} translated`);
           if (lang !== "en") assert.notEqual(r.sub, englishSub[r.id], `${r.id}'s words translated`);

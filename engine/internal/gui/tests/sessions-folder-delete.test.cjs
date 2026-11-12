@@ -73,7 +73,8 @@ function serve(lang, calls) {
       return json(out);
     }
     if (url.pathname.startsWith("/api/")) {
-      if (req.method() === "POST") calls.push({ path: url.pathname });
+      // the window's in-use ping (update/using) is no part of a delete
+      if (req.method() === "POST" && url.pathname !== "/api/update/using") calls.push({ path: url.pathname });
       return json({});
     }
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
@@ -111,6 +112,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       page.on("dialog", (d) => { errors.push("a browser dialog: " + d.message()); d.dismiss(); });

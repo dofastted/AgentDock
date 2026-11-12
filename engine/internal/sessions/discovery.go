@@ -1,11 +1,15 @@
 package sessions
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/appdir"
 )
 
 // Directory membership changes with the directory's mtime; file contents don't.
@@ -30,29 +34,57 @@ type directoryEntry struct {
 // hidden. Such a listing is read again until it's older than this.
 const racyDirectory = 2 * time.Second
 
+// readDirectory is path's entries. A folder that isn't there lists as none.
+// One that couldn't be read (a stat or listing refused: too many files open
+// under a long history's parse, a sharing violation while an antivirus or
+// a sync client holds it, a network home that stalled) is unknown, not
+// empty: its last good listing stands. Taken for none, every session in it
+// left the Sessions page, and its parses were let go with them, until a
+// later poll read the folder again and parsed them anew.
 func readDirectory(path string) []os.DirEntry {
-	st, err := os.Stat(path)
-	if err != nil || !st.IsDir() {
+	mod, size, dir, err := appdir.DirStat(path)
+	if err != nil {
+		return unreadDirectory(path, err)
+	}
+	if !dir {
 		return nil
 	}
 	directoryCache.Lock()
 	old, ok := directoryCache.entries[path]
 	directoryCache.Unlock()
-	if ok && old.mod.Equal(st.ModTime()) && old.size == st.Size() && old.at.Sub(old.mod) > racyDirectory {
+	if ok && old.mod.Equal(mod) && old.size == size && old.at.Sub(old.mod) > racyDirectory {
 		return old.entries
 	}
 	at := time.Now()
 	entries, err := os.ReadDir(path)
 	if err != nil {
+		if kept := unreadDirectory(path, err); kept != nil {
+			return kept
+		}
 		return nil
 	}
 	directoryCache.Lock()
 	if len(directoryCache.entries) >= 16384 {
 		directoryCache.entries = map[string]directoryEntry{}
 	}
-	directoryCache.entries[path] = directoryEntry{st.ModTime(), st.Size(), at, entries}
+	directoryCache.entries[path] = directoryEntry{mod, size, at, entries}
 	directoryCache.Unlock()
 	return entries
+}
+
+// unreadDirectory is what a folder lists as when reading it failed with
+// err: nothing when it is gone, else the last good listing, if there is
+// one.
+func unreadDirectory(path string, err error) []os.DirEntry {
+	if errors.Is(err, fs.ErrNotExist) {
+		directoryCache.Lock()
+		delete(directoryCache.entries, path)
+		directoryCache.Unlock()
+		return nil
+	}
+	directoryCache.Lock()
+	defer directoryCache.Unlock()
+	return directoryCache.entries[path].entries
 }
 
 // SessionGlob is filepath.Glob for session discovery, with directory listings

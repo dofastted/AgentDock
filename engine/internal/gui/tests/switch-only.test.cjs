@@ -59,7 +59,7 @@ const label = {
 };
 const strings = [
   "Only switch {agent}'s sign-in",
-  "magpie signs {agent} in to the next account with room when the one it is on is used up, and back once that has room again, by writing {agent}'s own sign-in; {agent}'s requests go straight to OpenAI, never through magpie. A {agent} app or session already open stays on its account until it is opened again. Connected to magpie, {agent}'s requests go through it as before.",
+  "When an account is used up, magpie signs {agent} in to the next one, and requests go straight to OpenAI. Open {agent} sessions keep their account until reopened.",
   "magpie only switches {agent}'s sign-in; its requests go straight to OpenAI",
   "{agent}'s requests go through magpie to fail over to your other accounts again",
 ];
@@ -72,6 +72,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, codex(opts), posts));

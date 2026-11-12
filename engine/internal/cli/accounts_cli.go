@@ -17,20 +17,21 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // accountsCmd: `magpie accounts [agent] [--json]`, `magpie accounts add <agent>`,
-// `magpie accounts switch|forget <agent> <email>`,
+// `magpie accounts switch|forget <agent> <email>`, `magpie accounts switch <claude|codex> next`,
 // `magpie accounts project <gemini|antigravity> <email> <project>`,
 // `magpie accounts alias <agent> <email> [<name>|--clear]`
-// `magpie accounts switch-only codex [on|off]`
+// `magpie accounts switch-only <codex|claude> [on|off]`
 // — the subscriptions magpie remembers, how much of each one's allowance is
 // used, and switching the agent between them.
 func accountsCmd(args []string) error {
 	if len(args) > 1 && args[1] == "discovery" {
 		return accountsDiscoveryCmd(args[2:])
 	}
-	const usage = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity|zed|factory|mimo|<plugin>] [--json] | magpie accounts add <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> | magpie accounts add copilot [--host <name>.ghe.com] | magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes] | magpie accounts refresh [--json] | magpie accounts checkin [--json] | magpie accounts switch|forget <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> <email> | magpie accounts switch|forget copilot <login>[@<name>.ghe.com] [--host <name>.ghe.com] | magpie accounts project <gemini|antigravity> <email> <gcp-project-id> | magpie accounts alias <agent|<plugin>> <email> [<name>|--clear] | magpie accounts switch-only codex [on|off]"
+	const usage = "usage: magpie accounts [claude|codex|grok|copilot|gemini|antigravity|zed|factory|mimo|<plugin>] [--json] | magpie accounts add <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> | magpie accounts add copilot [--host <name>.ghe.com] | magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes] | magpie accounts import codex <file>... --access-only [--yes] | magpie accounts access-only codex <email> [on|off] | magpie accounts refresh [--json] | magpie accounts checkin [--json] | magpie accounts switch|forget <claude|codex|gemini|antigravity|zed|factory|mimo|<plugin>> <email> | magpie accounts switch <claude|codex> next | magpie accounts switch|forget copilot <login>[@<name>.ghe.com] [--host <name>.ghe.com] | magpie accounts project <gemini|antigravity> <email> <gcp-project-id> | magpie accounts alias <agent|<plugin>> <email> [<name>|--clear] | magpie accounts switch-only <codex|claude> [on|off]"
 	agentID := func(s string) (string, error) {
 		switch strings.ToLower(s) {
 		case "claude", "cc":
@@ -119,6 +120,12 @@ func accountsCmd(args []string) error {
 	if len(args) > 1 && args[1] == "import" {
 		return importAccounts(args[2:])
 	}
+	if len(args) > 1 && args[1] == "export" {
+		return exportAccounts(args[2:])
+	}
+	if len(args) > 1 && args[1] == "access-only" {
+		return accessOnlyCmd(args[2:])
+	}
 	if len(args) > 1 && args[1] == "refresh" {
 		return refreshAccounts(len(args) > 2 && args[2] == "--json")
 	}
@@ -189,8 +196,18 @@ func accountsCmd(args []string) error {
 			login, _, _ := strings.Cut(args[3], "@")
 			args[3] = provider.CopilotAccountName(login, h)
 		}
-		if args[3], err = accountNamed(id, args[3]); err != nil {
+		over := false
+		if args[1] == "switch" && strings.EqualFold(args[3], "next") {
+			// the next account in order with room, or the one with the most
+			// room left when every one is past its line
+			if args[3], over, err = provider.NextInOrder(context.Background(), id); err != nil {
+				return err
+			}
+		} else if args[3], err = accountNamed(id, args[3]); err != nil {
 			return err
+		}
+		if over {
+			fmt.Println(muted.Render("every other account is past its line; " + args[3] + " has the most room left"))
 		}
 		if args[1] == "forget" {
 			moved, err := agent.Reseat(func() error { return provider.ForgetLogin(id, args[3]) })
@@ -206,6 +223,12 @@ func accountsCmd(args []string) error {
 		}
 		if _, plug := provider.PluginOf(id); plug || id == "gemini" || id == "antigravity" || id == "copilot" {
 			fmt.Println(green.Render("✓"), "magpie now uses", args[3], "for", id)
+			return nil
+		}
+		if id == "codex" && provider.CodexNoAccount != nil && provider.CodexNoAccount() {
+			// Codex's provider takes no ChatGPT account: nothing running
+			// goes by it, and nothing needs a restart
+			fmt.Println(green.Render("✓"), id, "is now signed in as", args[3], muted.Render("· Codex's provider takes no ChatGPT account, so nothing needs restarting"))
 			return nil
 		}
 		fmt.Println(green.Render("✓"), id, "is now signed in as", args[3], muted.Render("· sessions already running keep their account until restarted"))
@@ -337,7 +360,7 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 		wg.Add(1)
 		go func(agent string) {
 			defer wg.Done()
-			u := provider.LoginUsage(ctx, agent)
+			u := provider.LoginUsageShown(ctx, agent)
 			mu.Lock()
 			usage[agent] = u
 			mu.Unlock()
@@ -348,7 +371,7 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 	for _, l := range ls {
 		r := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}, Lapsed: l.Lapsed}
 		r.Seat = provider.SeatNameOf(l.Agent, l.User)
-		r.Alias = cmp.Or(provider.AccountNameOf(l.Agent, l.User), r.Seat)
+		r.Alias = cmp.Or(provider.AccountLabelOf(l.Agent, l.User), r.Seat)
 		for user, q := range usage[l.Agent] {
 			if !strings.EqualFold(user, l.User) {
 				continue
@@ -360,7 +383,7 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 			// a pool's own windows stand in for the models' drawing on it,
 			// as the usage page shows them
 			for _, w := range provider.PooledWindows(q.Windows) {
-				s := quotaSpan{Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Pool: w.Pool}
+				s := quotaSpan{Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Pool: w.Pool, Unit: w.Unit, Balance: w.Balance}
 				if s.ResetsAt == nil && w.ResetSecs > 0 {
 					t := now.Add(time.Duration(w.ResetSecs) * time.Second)
 					s.ResetsAt = &t
@@ -382,7 +405,10 @@ func quotaCell(w quotaSpan, now time.Time) string {
 		return name + " unlimited"
 	}
 	cell := fmt.Sprintf("%s %.0f%%", name, w.Used)
-	if w.Text {
+	if w.Balance != nil {
+		// a wallet tells what is left, never a share (#3950)
+		cell = name + " " + provider.BalanceText(*w.Balance, w.Unit)
+	} else if w.Text {
 		// a row of text alone has no share to tell
 		cell = name + " " + w.Display
 	} else if w.Display != "" {
@@ -432,7 +458,8 @@ func untilShort(d time.Duration) string {
 // addAccount signs in to one more subscription in the browser, the way the
 // window's "Add account" does.
 func addAccount(agentID string) error {
-	if risk := map[string]string{"antigravity": provider.AntigravityRisk, "claude": provider.ClaudeRisk}[agentID]; risk != "" {
+	if risk := map[string]string{"antigravity": provider.AntigravityRisk, "claude": provider.ClaudeRisk,
+		"workbuddy": provider.WorkBuddyRisk, "workbuddy-ai": provider.WorkBuddyRisk}[agentID]; risk != "" {
 		fmt.Println(bold.Render("!"), risk)
 		fmt.Print("Sign in anyway? [y/N] ")
 		var yes string
@@ -467,12 +494,20 @@ func addAccount(agentID string) error {
 			return fmt.Errorf("sign-in didn't finish: %s", st.Error)
 		}
 	}
-	fmt.Println("Finish signing in in your browser. If it didn't open, go to:")
+	linkOnly := settings.Load().SignInLinkOnly
+	if linkOnly {
+		// the user keeps sign-in pages to a browser of their own
+		fmt.Println("Open this link in the browser you sign in with:")
+	} else {
+		fmt.Println("Finish signing in in your browser. If it didn't open, go to:")
+	}
 	fmt.Println(faint.Render(st.URL))
 	if st.Code != "" {
 		fmt.Println("and confirm the code", st.Code)
 	}
-	openInBrowser(st.URL)
+	if !linkOnly {
+		openInBrowser(st.URL)
+	}
 	ctx, stop := interruptContext()
 	defer stop()
 	if st.PasteCallback || st.PasteCode {
@@ -526,25 +561,27 @@ func addAccount(agentID string) error {
 }
 
 // importUsage is how `magpie accounts import` is run.
-const importUsage = "usage: magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes]"
+const importUsage = "usage: magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes] | magpie accounts import codex <file>... --access-only [--yes]"
 
 // importAccounts: `magpie accounts import <agent> <file>... [--yes]` brings
 // in accounts from other tools' files, as the window's "Import accounts from
 // a file…" does (#1453): Codex's auth.json, codexbar's config.json, and
 // Cockpit Tools', CLIProxyAPI's and Sub2API's exports for ChatGPT; Claude
-// Code's .credentials.json and
+// Code's .credentials.json, claude-swap's export (cswap --export) and
 // CLIProxyAPI's for Claude; Antigravity Cockpit's, Antigravity Manager's
 // and CLIProxyAPI's for Antigravity (Factory's API keys go to its plugin,
 // with accounts add factory). The files are only
 // read. What importing does to the tool the file came from is said first,
 // and nothing is imported until that is agreed to (--yes agrees).
 func importAccounts(args []string) error {
-	yes := false
+	yes, accessOnly := false, false
 	var rest []string
 	for _, a := range args {
 		switch a {
 		case "--yes", "-y":
 			yes = true
+		case "--access-only":
+			accessOnly = true
 		default:
 			rest = append(rest, a)
 		}
@@ -565,6 +602,9 @@ func importAccounts(args []string) error {
 	default:
 		return fmt.Errorf("%q: accounts can be imported for codex, claude, antigravity and factory\n%s", rest[0], importUsage)
 	}
+	if accessOnly && id != "codex" {
+		return fmt.Errorf("only ChatGPT accounts can be kept access token only\n%s", importUsage)
+	}
 	paths := rest[1:]
 	files := make([]string, len(paths))
 	for i, p := range paths {
@@ -584,16 +624,20 @@ func importAccounts(args []string) error {
 		files[i] = string(b)
 	}
 	var say []string
-	switch id {
-	case "codex":
+	switch {
+	case accessOnly:
+		say = []string{"Each account is kept with the access token the file has, and magpie never renews its sign-in: the tool it came from (Codex CLI on another computer, codexbar, CLIProxyAPI) stays signed in.",
+			"When its access token runs out (about ten days after that sign-in was last renewed), magpie stops using the account until it is imported again.",
+			"The files are only read, never changed."}
+	case id == "codex":
 		say = []string{"Each account's sign-in is refreshed with ChatGPT before it is added, as signing in does.",
 			"That spends the file's sign-in: the tool it came from (Codex CLI on another computer, codexbar, Cockpit Tools, CLIProxyAPI) is signed out of that account and has to sign in again. From then on the account is magpie's.",
 			"The files are only read, never changed. An account magpie holds already is left as it is."}
-	case "claude":
+	case id == "claude":
 		say = []string{provider.ClaudeRisk,
 			"Each account is kept as the file has it. Claude Code renews its sign-in the first time it uses it, and the file's copy then stops working: the tool it came from has to sign in again.",
 			"The files are only read, never changed."}
-	case "antigravity":
+	case id == "antigravity":
 		say = []string{provider.AntigravityRisk, "Each account's sign-in is refreshed with Google before it is added."}
 	}
 	for _, s := range say {
@@ -615,6 +659,10 @@ func importAccounts(args []string) error {
 	var err error
 	switch id {
 	case "codex", "claude":
+		if accessOnly {
+			res, err = provider.ImportCodexAccessOnly(ctx, files)
+			break
+		}
 		res, err = provider.ImportLogins(ctx, id, files)
 	case "antigravity":
 		res, err = provider.ImportGoogleAccounts(ctx, id, files)
@@ -644,7 +692,11 @@ func importAccounts(args []string) error {
 			fmt.Println(green.Render("✓"), who, muted.Render("· in magpie already, now with this sign-in"))
 		case "exists":
 			took++
-			fmt.Println(muted.Render("="), who, muted.Render("· in magpie already with this sign-in, left as it is"))
+			why := "in magpie already with this sign-in, left as it is"
+			if r.Error != "" {
+				why = r.Error
+			}
+			fmt.Println(muted.Render("="), who, muted.Render("· "+why))
 		default:
 			fmt.Println(bold.Render("✗"), who+":", r.Error)
 		}
@@ -656,9 +708,102 @@ func importAccounts(args []string) error {
 	return nil
 }
 
+// exportUsage is how `magpie accounts export` is run.
+const exportUsage = "usage: magpie accounts export <codex|claude> [<email>...] [--format sub2api|cliproxyapi] [--to <folder>] [--yes]"
+
+// exportAccounts: `magpie accounts export`, the accounts as a file magpie,
+// Sub2API or CLIProxyAPI imports. The file is written 0600 into a folder
+// (the current one unless --to), never over a file there; its tokens are
+// never printed.
+func exportAccounts(args []string) error {
+	yes, format, to := false, provider.ExportSub2API, "."
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--yes" || a == "-y":
+			yes = true
+		case a == "--format" || a == "--to":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s needs a value\n%s", a, exportUsage)
+			}
+			i++
+			if a == "--to" {
+				to = args[i]
+			} else {
+				format = strings.ToLower(args[i])
+			}
+		case strings.HasPrefix(a, "--format="):
+			format = strings.ToLower(strings.TrimPrefix(a, "--format="))
+		case strings.HasPrefix(a, "--to="):
+			to = strings.TrimPrefix(a, "--to=")
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("%s: no such flag\n%s", a, exportUsage)
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if format == "cpa" || format == "cliproxy" {
+		format = provider.ExportCLIProxy
+	}
+	if len(rest) < 1 {
+		return fmt.Errorf("%s", exportUsage)
+	}
+	var id string
+	switch strings.ToLower(rest[0]) {
+	case "codex", "chatgpt":
+		id = "codex"
+	case "claude", "cc":
+		id = "claude"
+	default:
+		return fmt.Errorf("%q: accounts can be exported for codex and claude\n%s", rest[0], exportUsage)
+	}
+	if format != provider.ExportSub2API && format != provider.ExportCLIProxy {
+		return fmt.Errorf("%q: the format is sub2api or cliproxyapi\n%s", format, exportUsage)
+	}
+	// the names are the accounts', as the other account commands take them
+	var users []string
+	for _, u := range rest[1:] {
+		user, err := accountNamed(id, u)
+		if err != nil {
+			return err
+		}
+		users = append(users, user)
+	}
+	fmt.Println(bold.Render("!"), provider.ExportRisk)
+	if !yes {
+		fmt.Print("Export? [y/N] ")
+		var answer string
+		fmt.Scanln(&answer)
+		if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+			return fmt.Errorf("export canceled")
+		}
+	}
+	res, err := provider.ExportLogins(id, format, users)
+	for _, s := range res.Skipped {
+		fmt.Println(bold.Render("✗"), s.User+":", s.Error)
+	}
+	if err != nil {
+		return err
+	}
+	paths, err := provider.WriteExport(res, to)
+	for _, p := range paths {
+		fmt.Println(green.Render("✓"), "wrote", p, muted.Render("(readable by you only)"))
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println(faint.Render(fmt.Sprintf("  %d account(s): %s", len(res.Accounts), strings.Join(res.Accounts, ", "))))
+	return nil
+}
+
 // openInBrowser opens url in the user's browser. It is a variable so the
 // tests can have it go nowhere without starting a program (noBrowser).
 var openInBrowser = openURLInBrowser
+
+// appLink hands an app's import link over once something here opens it
+// (agent.OpenAppLink); tests stand in for the system's answer.
+var appLink = agent.OpenAppLink
 
 func openURLInBrowser(url string) {
 	// the link is printed beside it, to open by hand when this fails (#2043)
@@ -668,9 +813,11 @@ func openURLInBrowser(url string) {
 }
 
 // refreshAccounts: `magpie accounts refresh` renews the sign-in of every
-// saved Claude and ChatGPT account the agent isn't signed in to now — what
-// the gateway does once a day, for a magpie that isn't left running (cron,
-// launchd). A sign-in the vendor refuses is marked as needing a new one.
+// saved ChatGPT account, and every saved Claude account, on or off (Claude
+// Code's /usage run in its own directory), the agent isn't signed in to
+// now — what the gateway does every eight days, for a magpie that isn't
+// left running (cron, launchd). A sign-in the vendor refuses is marked as
+// needing a new one.
 func refreshAccounts(asJSON bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -825,8 +972,9 @@ func checkinWhy(msg string) string {
 }
 
 // accountNamed is the saved account of agent that user names: its name as
-// magpie lists it ("a@b.com · Team"), or the email alone when only one of
-// the agent's accounts has it.
+// magpie lists it ("a@b.com · Team"), the email alone when only one of the
+// agent's accounts has it, or the name the user gave it (alias), when that
+// is one account's and no other's email (provider.AccountByName).
 func accountNamed(agent, user string) (string, error) {
 	user = strings.TrimSpace(user)
 	if agent == "copilot" {
@@ -838,6 +986,13 @@ func accountNamed(agent, user string) (string, error) {
 		}
 	}
 	ls := provider.Logins(agent)
+	users := make([]string, 0, len(ls))
+	for _, l := range ls {
+		users = append(users, l.User)
+	}
+	if u, err := provider.AccountByName(agent, users, user); err != nil || u != "" {
+		return u, err
+	}
 	var names, same []string
 	for _, l := range ls {
 		if strings.EqualFold(l.User, user) {
@@ -865,20 +1020,77 @@ func accountNamed(agent, user string) (string, error) {
 	return "", fmt.Errorf("no saved %s account %q · its accounts: %q", agent, user, names)
 }
 
-// switchOnlyCmd is `magpie accounts switch-only codex [on|off]`: magpie
-// only switches Codex's own sign-in to the next account with room, its
-// requests never sent through the gateway for account failover (#1907).
-// With no on or off it says which it is.
+// accessOnlyCmd is `magpie accounts access-only codex <email> [on|off]`:
+// a saved ChatGPT account kept access token only (EastonXvii on X), so
+// magpie never renews its sign-in and another computer signed in to it
+// stays signed in. With no on or off it says which it is.
+func accessOnlyCmd(args []string) error {
+	const usage = "usage: magpie accounts access-only codex <email> [on|off]"
+	if len(args) < 2 || len(args) > 3 || !strings.EqualFold(args[0], "codex") {
+		return fmt.Errorf("%s", usage)
+	}
+	user, err := accountNamed("codex", args[1])
+	if err != nil {
+		return err
+	}
+	if len(args) == 2 {
+		for _, l := range provider.Logins("codex") {
+			if l.User == user {
+				if l.AccessOnly {
+					fmt.Println("on · magpie uses its access token and never renews its sign-in")
+				} else {
+					fmt.Println("off · magpie renews its sign-in as it runs out")
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("no saved codex account %q", user)
+	}
+	var on bool
+	switch strings.ToLower(args[2]) {
+	case "on":
+		on = true
+	case "off":
+	default:
+		return fmt.Errorf("%s", usage)
+	}
+	if err := provider.SetLoginAccessOnly("codex", user, on); err != nil {
+		return err
+	}
+	if on {
+		fmt.Println(green.Render("✓"), user, "is kept access token only: magpie never renews its sign-in, and stops using it once its access token runs out")
+	} else {
+		fmt.Println(green.Render("✓"), "magpie renews", user+"'s sign-in again; the place it came from is signed out of it at the next renewal")
+	}
+	return nil
+}
+
+// switchOnlyCmd is `magpie accounts switch-only <codex|claude> [on|off]`:
+// magpie only switches the agent's own sign-in to the next account with
+// room. Codex's requests are then never sent through the gateway for
+// account failover (#1907); Claude's accounts serve no request through the
+// gateway (provider.KeptToAgent, myduso on Discord). With no on or off it
+// says which it is.
 func switchOnlyCmd(args []string) error {
-	const usage = "usage: magpie accounts switch-only codex [on|off]"
-	if len(args) < 1 || len(args) > 2 || !strings.EqualFold(args[0], "codex") {
+	const usage = "usage: magpie accounts switch-only <codex|claude> [on|off]"
+	if len(args) < 1 || len(args) > 2 {
+		return fmt.Errorf("%s", usage)
+	}
+	id := strings.ToLower(args[0])
+	if id != "codex" && id != "claude" {
 		return fmt.Errorf("%s", usage)
 	}
 	if len(args) == 1 {
-		if provider.SwitchOnly("codex") {
+		on := provider.SwitchOnly(id)
+		switch {
+		case id == "codex" && on:
 			fmt.Println("on · magpie only switches Codex's sign-in; its requests go straight to OpenAI")
-		} else {
+		case id == "codex":
 			fmt.Println("off · with more of its accounts on, Codex's requests go through magpie to fail over between them")
+		case on:
+			fmt.Println("on · magpie only switches Claude Code's sign-in; it serves no requests on the Claude accounts")
+		default:
+			fmt.Println("off · magpie serves requests on the Claude accounts that are on")
 		}
 		return nil
 	}
@@ -890,15 +1102,20 @@ func switchOnlyCmd(args []string) error {
 	default:
 		return fmt.Errorf("%s", usage)
 	}
-	if err := provider.SetSwitchOnly("codex", on); err != nil {
+	if err := provider.SetSwitchOnly(id, on); err != nil {
 		return err
 	}
-	// Codex's config.toml follows now, not at the next start
+	// the agents' configs and model lists follow now, not at the next start
 	agent.SyncCatalog()
-	if on {
+	switch {
+	case id == "codex" && on:
 		fmt.Println(green.Render("✓"), "magpie only switches Codex's sign-in to an account with room; its requests go straight to OpenAI. A Codex app or session already open stays on its account until it is opened again.")
-	} else {
+	case id == "codex":
 		fmt.Println(green.Render("✓"), "with more of its accounts on, Codex's requests go through magpie to fail over between them again")
+	case on:
+		fmt.Println(green.Render("✓"), "magpie only switches Claude Code's sign-in to an account with room; it serves no requests on the Claude accounts. A Claude Code session already open stays on its account until it is started again.")
+	default:
+		fmt.Println(green.Render("✓"), "magpie serves requests on the Claude accounts that are on again")
 	}
 	return nil
 }

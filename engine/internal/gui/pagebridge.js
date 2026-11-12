@@ -10,13 +10,34 @@
 //   await magpie.options.set(o)   sets them, and answers with them
 //   await magpie.read(name, p)    a read its package.json's
 //                                 magpie.permissions declares
+//   await magpie.image.copy(png)  puts a PNG (a Blob, as a canvas's
+//                                 toBlob makes it) on the clipboard
+//   await magpie.image.save(png, name)
+//                                 saves it in Downloads as name.png, and
+//                                 answers { path } ("" in magpie web,
+//                                 where the browser downloads it)
 //   magpie.context                where a panel is (P5): { provider: {
 //                                 id, name } } in a provider's editor,
 //                                 else {}; set once magpie.ready is
+//   magpie.service               the address of the page's local service
+//                                 (package.json's magpie.page.service)
+//                                 through magpie, set once magpie.ready
+//                                 is, on a page a browser opened through
+//                                 magpie web; "" where 127.0.0.1 is the
+//                                 service's own computer (the app's
+//                                 window) or magpie is older
 //   magpie.onAction(fn)           fn({ id, provider | agent: { id, name } })
 //                                 when one of its magpie.actions is picked
 //                                 in a row's menu (P6); one picked before
 //                                 fn was given waits for it
+//   magpie.visible               false while the reader is on another of
+//                                 the window's pages
+//   magpie.onVisibility(fn)      fn(visible) as the reader leaves the
+//                                 page and comes back, to pause what only
+//                                 matters while it is seen; a page left
+//                                 10 minutes is let go, and loads again
+//                                 when next opened, unless package.json
+//                                 says magpie.page.keepAlive
 //
 // A panel (magpie.panels) is as tall as what it draws: the window is told
 // its height as it changes.
@@ -34,6 +55,7 @@
   const waiting = new Map();
   let next = 0;
   const themed = [];
+  const watched = [];
   let acting = null;
   const acted = [];
   function call(method, params) {
@@ -42,6 +64,36 @@
       waiting.set(id, { resolve, reject });
       parent.postMessage({ magpie: 1, id, method, params }, "*");
     });
+  }
+  // A page that came as one document (pageinline.go) can't ask for its
+  // other files itself: a proxy that signs readers in by cookie turns away
+  // a sandboxed frame's requests. A script it adds is fetched by the
+  // window, which has the cookie, and loaded from a data: address.
+  if (globalThis.__magpieInlined) {
+    const put = (node, ref) => {
+      let abs;
+      try { abs = new URL(ref, location.href).href; } catch { return false; }
+      call("asset", { url: abs }).then(({ type, data }) => {
+        // a data: address, not a blob's: WebKit finds no blob made in a
+        // sandboxed frame
+        let bin = "";
+        const bytes = new Uint8Array(data);
+        for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        node.setAttribute("src", "data:text/javascript;base64," + btoa(bin));
+        node.__magpiePut(node);
+      }, () => node.__magpiePut(node));
+      return true;
+    };
+    const add = (orig) => function (node, ...rest) {
+      if (node instanceof HTMLScriptElement && node.hasAttribute("src") && !node.__magpieDone && !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(node.getAttribute("src"))) {
+        const ref = node.getAttribute("src");
+        node.__magpiePut = (n) => { n.__magpieDone = true; orig.call(this, n, ...rest); };
+        if (put(node, ref)) return node;
+      }
+      return orig.call(this, node, ...rest);
+    };
+    Node.prototype.appendChild = add(Node.prototype.appendChild);
+    Node.prototype.insertBefore = add(Node.prototype.insertBefore);
   }
   function paint(theme) {
     const root = document.documentElement;
@@ -61,6 +113,11 @@
       for (const fn of themed) { try { fn(m.data); } catch (err) { report(err); } }
       return;
     }
+    if (m.event === "visibility") {
+      api.visible = !!m.data?.visible;
+      for (const fn of watched) { try { fn(api.visible); } catch (err) { report(err); } }
+      return;
+    }
     if (m.event === "action") {
       if (acting) act(m.data); else acted.push(m.data);
       return;
@@ -70,6 +127,27 @@
     waiting.delete(m.id);
     if (m.error) w.reject(new Error(m.error)); else w.resolve(m.result);
   });
+  // What the page's own code did wrong is what breaks it. Two things that
+  // reach its error handlers are not that: a script the browser put in
+  // the frame (a wallet's or a translator's extension, whose stack names
+  // chrome-extension://…), and a read of the window or another frame the
+  // sandbox shuts out (its storage, "The document is sandboxed and lacks the
+  // 'allow-same-origin' flag"; "Blocked a frame with origin "null" from accessing
+  // a cross-origin frame" in Chromium, "Sandbox access violation" in
+  // WebKit; a SecurityError). The page goes on without
+  // either, and the window's "stopped working" over it was a page that
+  // was fine (a day-card page, magpie 0.1.3702).
+  function foreign(err, file) {
+    const where = String(file || "") + "\n" + String(err?.stack || "");
+    if (/(?:chrome|moz|safari-web)-extension:\/\//i.test(where)) return true;
+    // storage the sandbox has none of: "Failed to read the 'localStorage'
+    // property from 'Window': The document is sandboxed and lacks the
+    // 'allow-same-origin' flag" (Chromium; WebKit says "The operation is
+    // insecure"), read by a script that isn't the page's (nivekxft on X)
+    const why = String(err?.message);
+    if (err?.name === "SecurityError" && (/The operation is insecure/.test(why) || (/(?:local|session)Storage|\bstorage\b|cookie/i.test(why) && /sandboxed|allow-same-origin/i.test(why)))) return true;
+    return err?.name === "SecurityError" && /Blocked a frame (?:with origin|at )/.test(why);
+  }
   function report(err) {
     parent.postMessage({ magpie: 1, method: "error", params: { message: String(err?.message || err) } }, "*");
   }
@@ -85,16 +163,23 @@
   let measuring = false;
   addEventListener("error", (e) => {
     if (/ResizeObserver loop/.test(e.message) || (measuring && !e.error && !e.filename)) { e.preventDefault(); return; }
+    if (foreign(e.error, e.filename)) { e.preventDefault(); return; }
     report(e.error || (e.message === "Script error." ? "" : e.message));
   });
-  addEventListener("unhandledrejection", (e) => report(e.reason));
+  addEventListener("unhandledrejection", (e) => {
+    if (foreign(e.reason)) { e.preventDefault(); return; }
+    report(e.reason);
+  });
   function act(data) {
     try { Promise.resolve(acting(data)).catch(report); } catch (err) { report(err); }
   }
   const api = {
     theme: null,
     context: {},
+    service: "",
+    visible: true,
     onTheme(fn) { themed.push(fn); },
+    onVisibility(fn) { watched.push(fn); },
     onAction(fn) {
       acting = fn;
       for (const d of acted.splice(0)) act(d);
@@ -104,10 +189,17 @@
       set: (options) => call("options.set", { options }),
     },
     read: (name, params) => call("read", { name, params }),
+    image: {
+      copy: (png) => call("image.copy", { png }),
+      save: (png, name) => call("image.save", { png, name }),
+    },
   };
-  api.ready = call("hello").then(({ context, ...theme }) => {
+  api.ready = call("hello").then(({ context, service, visible, ...theme }) => {
     api.theme = theme;
+    if (visible === false) api.visible = false;
     api.context = context || {};
+    api.service = "";
+    try { if (service) api.service = new URL(service, location.href).href; } catch { /* none */ }
     paint(theme);
     return theme;
   });

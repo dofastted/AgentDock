@@ -66,10 +66,11 @@ async function open(engine, lang, width, t) {
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width, height: 1400 } })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [], posts = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, posts));
-  await page.goto("http://magpie.test/?view=routing");
+  await page.goto("http://magpie.test/?view=groups");
   const group = page.locator(".rt-group").first();
   await group.waitFor();
   return { page, group, errors, posts };
@@ -77,10 +78,13 @@ async function open(engine, lang, width, t) {
 // a click as the reader's: wheeled into the middle of the view first (a
 // click never moves the page), then the mouse on it once it holds still
 async function press(page, x) {
-  const d = await x.evaluate((e) => { const v = document.querySelector("#view-routing");
+  // a group opening into its editor moves its height and parts for ~700ms
+  // (91b0be836): where x will be is read once that has stopped
+  await page.waitForFunction(() => !document.getAnimations().some((a) => a.playState === "running" && Number.isFinite(a.effect?.getComputedTiming().endTime)));
+  const d = await x.evaluate((e) => { const v = document.querySelector("#view-groups");
     return Math.round(e.getBoundingClientRect().top - v.getBoundingClientRect().top - v.clientHeight / 2); });
   if (Math.abs(d) > 100) {
-    const v = await page.locator("#view-routing").boundingBox();
+    const v = await page.locator("#view-groups").boundingBox();
     await page.mouse.move(v.x + 10, 300);
     await page.mouse.wheel(0, d);
     await page.waitForTimeout(400);

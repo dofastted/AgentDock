@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>接入你的应用 · magpie 文档</title>
+<title>接入你的应用：magpie 本地 OpenAI、Anthropic、Gemini 兼容网关 · magpie 文档</title>
 <meta name="description" content="AI 应用、Agent 或客户端如何与 magpie 配合：本地网关、端点与模型、以应用自己的名字统计用量、在 Agents 页面占一行，以及插件。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -29,12 +29,63 @@
 <link rel="apple-touch-icon" href="/img/icon-256.png">
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/integrate">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/integrate">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/integrate">
+<link rel="canonical" href="https://usemagpie.ai/docs/zh/integrate">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="接入你的应用">
 <meta property="og:description" content="在你的应用里使用 magpie 的网关，或在 Agents 页面拥有自己的一行。">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/integrate">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "接入你的应用",
+   "description": "AI 应用、Agent 或客户端如何与 magpie 配合：本地网关、端点与模型、以应用自己的名字统计用量、在 Agents 页面占一行，以及插件。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/integrate",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "接入你的应用",
+     "item": "https://usemagpie.ai/docs/zh/integrate"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -49,6 +100,15 @@
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a class="toc-only" href="/docs/zh/masking">本地脱敏</a>
+    <a class="toc-only" href="/docs/zh/mcp-router">MCP 路由</a>
+    <a class="toc-only" href="/docs/zh/library">资源库</a>
+    <a class="toc-only" href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a class="toc-only" href="/docs/zh/local-models">本地模型</a>
+    <a class="toc-only" href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a class="toc-only" href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -116,7 +176,9 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <p>在本机，网关接受任意 key。发送 <code>magpie-&lt;你的应用 id&gt;</code>（<code>Authorization: Bearer magpie-acme</code>，或 <code>x-api-key</code>），每次调用都会在用量、请求记录以及按 Agent 匹配的路由规则里记为 <code>acme</code>。不带它时，magpie 按 <code>User-Agent</code> 的第一个词统计（<code>Acme/1.4 (darwin)</code> 记为 <code>Acme</code>）；SDK 自带的 User-Agent（<code>OpenAI/JS …</code>、<code>ai-sdk/…</code>）会被记成那个 SDK。从另一台电脑访问时（<span class="ui">设置</span> → <span class="ui">局域网共享</span>），key 必须是用户的网关密钥之一，应用名就靠 User-Agent。</p>
 
     <h3>模型</h3>
-    <p><code>GET /v1/models</code> 列出用户打开的模型：<code>id</code>（<code>provider/model</code>，或路由组的名字，原样发送即可）、<code>display_name</code>、<code>owned_by</code>（供应商）、<code>reasoning</code> 与 <code>supported_reasoning_levels</code>（<code>[{"effort":"low"},…]</code>；同样的档位以纯名字列在 <code>reasoning_levels</code>），已知时还有 <code>context_window</code>、<code>max_output_tokens</code>，以及 magpie 知道是否支持图片时的 <code>modalities</code>。请从这里读取，而不是内置一份列表：用户会在 magpie 里增删供应商。推理强度用你所用 API 自己的字段传（<code>reasoning_effort</code>、<code>reasoning.effort</code>、Anthropic 的 <code>thinking</code> 或 <code>output_config.effort</code>）。<code>?format=text</code> 每行一个 id。</p>
+    <p><code>GET /v1/models</code> 列出用户打开的模型：<code>id</code>（<code>provider/model</code>，或路由组的名字，原样发送即可）、<code>display_name</code>、<code>owned_by</code>（供应商）、<code>reasoning</code> 与 <code>supported_reasoning_levels</code>（<code>[{"effort":"low"},…]</code>；同样的档位以纯名字列在 <code>reasoning_levels</code>），已知时还有 <code>context_window</code>、<code>max_output_tokens</code>，以及 magpie 知道是否支持图片时的 <code>modalities</code>。请从这里读取，而不是内置一份列表：用户会在 magpie 里增删供应商。推理强度用你所用 API 自己的字段传（<code>reasoning_effort</code>、<code>reasoning.effort</code>、Anthropic 的 <code>thinking</code> 或 <code>output_config.effort</code>）。<code>?format=text</code> 每行一个 id。列表只有对话模型：要图像和视频模型，请加 <code>?kind=image,video</code>（或 <code>?kind=all</code>），它们带 <code>"kind": "image"</code> 或 <code>"video"</code>，在 <code>/v1/images/generations</code> 或 <code>/v1/videos</code> 上生成，不走对话接口。</p>
+
+    <p>厂商自己的字段：<code>/v1/images/generations</code> 和 <code>/v1/videos</code> 读 OpenAI 的字段，其余字段原样转给支持它们的厂商，比如火山方舟的 <code>content</code>（参考视频、参考音频、<code>draft_task</code>）、<code>ratio</code>、<code>resolution</code>、<code>duration: -1</code>、<code>tools</code>、<code>watermark</code>、<code>sequential_image_generation</code>；视频的回答也带上方舟自己的字段（<code>content.last_frame_url</code>、<code>usage</code>）。厂商 API 的其他部分请用 <code>/v1/magpie/native/&lt;provider&gt;/&lt;path&gt;</code>：支持 <code>GET</code>、<code>POST</code>、<code>PUT</code>、<code>PATCH</code>、<code>DELETE</code>，<code>&lt;path&gt;</code> 接在服务商的域名后面（不是 base URL 后面），按厂商自己的格式收发，用的是用户为这个服务商填的密钥，流式回答边到边转；比如方舟的任务列表是 <code>GET /v1/magpie/native/ark/api/v3/contents/generations/tasks</code>。只服务用 API 密钥添加的服务商，不服务订阅或登录的账号；方舟原来的短路径（<code>images/generations</code>、<code>contents/generations/tasks</code>）照旧接在密钥的 base 后面。它和其他接口一样需要网关密钥；限了模型、账号或额度的密钥不能用它。</p>
 
     <h3>可选</h3>
     <p>在同一会话的请求里带上 <code>X-Magpie-Session: &lt;id&gt;</code>，<code>GET /v1/magpie/route?session=&lt;id&gt;</code> 就能在第一个 token 之前告诉你路由组为这一轮选了哪个模型、尝试过哪些后备（用 <code>after=&lt;seq&gt;&amp;wait=&lt;s&gt;</code> 长轮询）。<code>GET /v1/magpie/quotas</code> 列出用户各订阅的额度，<code>GET /v1/magpie/usage</code> 和 <code>/v1/magpie/usage/requests</code> 给出用量页的统计和逐条请求（带 <code>session</code>；Claude Code 子代理的调用还有 <code>subagent</code>/<code>parent_agent</code>）。它们只回答本机，或带网关密钥的其他机器；限了额度、模型或账号的密钥只看得到自己的调用和路由，额度不告诉它，除非它的主人允许它看自己可用部分的额度（<code>magpie gateway-key quotas &lt;id&gt; on</code>；它自己的限额见 <code>GET /v1/magpie/limit</code>）。你的应用直接发给厂商、不经过 magpie 的调用，可以用 <code>POST /v1/magpie/usage/requests</code> 上报（每次一条，或最多 5000 条，格式同 <code>usage.jsonl</code> 的一行，每条带 <code>rid</code>；过去的时间照原样保留，所以可以补录历史）。它们在用量页上标为上报，且从不计入密钥的限额。细节见<a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#connecting-anything-else">参考文档</a>。</p>
@@ -129,7 +191,7 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <ul>
       <li><b>magpie 编辑你的配置文件</b>（大多数适配器，如 <a href="https://github.com/yetone/magpie/blob/main/internal/agent/fx.go"><code>fx.go</code></a>、<a href="https://github.com/yetone/magpie/blob/main/internal/agent/empryo.go"><code>empryo.go</code></a>）。<code>Dir</code>、<code>Path</code>、<code>Bin</code> 用来检测应用；每个 <code>Field</code>（<code>model</code>、<code>effort</code>……）有 <code>Get</code>、<code>Set</code>、<code>Options</code>。连接时加入一个指向网关、key 为 <code>magpie-&lt;id&gt;</code> 的 <code>magpie</code> 供应商，并把模型设为 magpie 的模型；选回默认或 <code>Unwire</code> 会移除 magpie 的条目并还原原值。只动 magpie 设置的那些键。<code>Notice</code> 提示何时需要重启应用；<code>Sync</code> 更新你的应用保存在文件里的模型列表。</li>
       <li><b>你的应用只通过自己的导入链接接收供应商，由用户在你的应用里确认</b>（<a href="https://github.com/yetone/magpie/blob/main/internal/agent/cindy.go"><code>cindy.go</code></a>）。<code>Import</code> 返回这个链接（<code>yourapp://provider/import?…</code>，带网关地址、key <code>magpie-&lt;id&gt;</code> 和各端点），这一行的按钮会打开它，用户在你的应用里确认一次即可。<code>Added</code> 只读地检查你的应用是否已经有 magpie。magpie 不写你的任何文件。适合把供应商存在数据库里或加密保存的应用——这也最接近“检测到 magpie → 用户确认一次 → 完成接入”。</li>
-      <li><b>你的应用运行时有本地 API</b>（如 Alma）：magpie 通过它把自己加为供应商并设置默认模型。</li>
+      <li><b>你的应用运行时有本地 API</b>（如 Alma、Shelley）：magpie 通过它把自己加为供应商并设置默认模型。</li>
     </ul>
     <p>一个 PR 需要：适配器及其在 <code>agents.go</code> 里的注册；<code>UA</code>（你的 User-Agent 开头，小写），让用量认得你的调用；<code>internal/gui/assets/icons</code> 里的图标；在临时 <code>HOME</code> 下运行的测试（连接、切换、断开后原文件还原）；参考文档 Agents 表里的一行。最有帮助的是一个稳定、有文档的配置格式或导入链接，以及它在各系统上的位置。</p>
 
@@ -156,10 +218,20 @@ curl -s http://127.0.0.1:3425/v1/models -H "Authorization: Bearer magpie-acme"</
     <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/masking">本地脱敏</a>
+    <a href="/docs/zh/mcp-router">MCP 路由</a>
+    <a href="/docs/zh/library">资源库</a>
+    <a href="/docs/zh/claude-code-models">Claude Code 接入其他模型</a>
+    <a href="/docs/zh/codex-models">Codex 接入其他模型</a>
+    <a href="/docs/zh/gemini-cli-models">Gemini CLI 接入其他模型</a>
+    <a href="/docs/zh/subscriptions">订阅用于任意 Agent</a>
+    <a href="/docs/zh/local-models">本地模型</a>
+    <a href="/docs/zh/opencode-models">OpenCode 接入其他模型</a>
+    <a href="/docs/zh/alternatives">与 CC Switch、CCR 对比</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/zh/contributors">贡献墙</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
 </div></footer>

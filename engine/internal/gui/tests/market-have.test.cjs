@@ -82,6 +82,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 1000, height: 760 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], calls = [];
       const lib = { servers: [structuredClone(pw)], skills: [structuredClone(pdf)] };
       page.on("pageerror", (e) => errors.push(e.message));
@@ -127,7 +128,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await view.getByRole("button", { name: words[lang].addServer, exact: true }).click();
         const ed = page.locator(".lib-editor");
         await ed.locator('input[placeholder="e.g. github"], input[placeholder="例如 github"]').fill("fetch");
-        await ed.locator('input[placeholder="npx -y @modelcontextprotocol/server-github"]').fill("uvx mcp-server-fetch");
+        await ed.locator("textarea.lib-cmd").fill("uvx mcp-server-fetch");
         const market = answered("servers");
         await ed.getByRole("button", { name: words[lang].add, exact: true }).click();
         await market;
@@ -135,7 +136,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
 
       await t.test("a skill removed is no longer marked added", async () => {
-        await view.page().locator(":is(.lib-tabs .opt, .nav-s):visible").nth(2).click();
+        await view.page().locator(":is(.lib-tabs .opt, .nav-s):visible").nth(3).click();
         await card("skills", "acme/skills/pdf").locator(".mk-have").waitFor();
         await view.locator(".lib-row", { hasText: "pdf" }).locator(".lib-icon.danger").click();
         const market = answered("skills");

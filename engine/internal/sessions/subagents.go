@@ -62,16 +62,16 @@ func subagentsOf(s Session, fs []file) []Subagent {
 				sa.Title = ccTask(f.path)
 			}
 		case "opencode":
-			sa.ID = f.sid
-			if f.parent != s.ID {
-				sa.Parent = f.parent
+			sa.ID = f.m().sid
+			if f.m().parent != s.ID {
+				sa.Parent = f.m().parent
 			}
-			sa.Title, sa.Kind = ocSubagentTitle(st.Named)
-			sa.Title = cmp.Or(sa.Title, st.Title, st.First)
+			sa.Title, sa.Kind = ocSubagentTitle(st.more().Named)
+			sa.Title = cmp.Or(sa.Title, st.Title, st.more().First)
 			// OpenCode 2 names the agent in the session's row, and its
 			// titles no longer do (#2290)
-			if v2, ok := f.oc.(ocV2DB); ok {
-				sa.Kind = cmp.Or(v2.agent(f.path, f.sid), sa.Kind)
+			if v2, ok := f.m().oc.(ocV2DB); ok {
+				sa.Kind = cmp.Or(v2.agent(f.path, f.m().sid), sa.Kind)
 			}
 		case "kimi":
 			sa.ID = filepath.Base(filepath.Dir(f.path))
@@ -303,6 +303,9 @@ var ErrNoSubagent = errors.New("no such subagent in this session")
 
 // SubagentTranscript is the conversation of the session's subagent sub.
 func SubagentTranscript(s Session, sub string) (Transcript, error) {
+	if !Reads(s.Agent) {
+		return Transcript{Parts: []Part{}}, ErrNotRead
+	}
 	for _, sa := range s.Subagents {
 		if sa.ID != sub {
 			continue

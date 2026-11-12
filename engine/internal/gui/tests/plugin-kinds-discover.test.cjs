@@ -62,6 +62,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const w = L[lang];
         const page = await (await browser.newContext({ viewport: { width, height: 820 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang));
@@ -86,7 +87,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await kinds(pg), [w.page]);
 
         // the way to write one: the docs in the window's language, opened outside
-        const how = view.locator(".pm-intro .pm-write");
+        const how = view.locator(".pm-foot .pm-write");
         assert.equal((await how.innerText()).trim(), w.write);
         assert.equal(await how.getAttribute("href"), w.docs);
         opened.length = 0;

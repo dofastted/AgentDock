@@ -95,10 +95,10 @@ var checkedAt atomic.Int64
 const checkEvery = 12 * time.Hour
 
 // checkDue is whether the page should check the library's skills from
-// GitHub for updates: none checked since magpie started, or not for
-// checkEvery.
+// GitHub or git for updates, and the folders the user added skills from
+// for new ones: none checked since magpie started, or not for checkEvery.
 func checkDue(l *Library) bool {
-	if !slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.Source.remote() }) {
+	if !slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.Source.remote() }) && !l.addedFromFolders() {
 		return false
 	}
 	at := checkedAt.Load()
@@ -129,7 +129,7 @@ func lastCommit(src Source) (*commit, error) {
 		q.Set("sha", src.Ref)
 	}
 	u := githubAPI + "/repos/" + src.Repo + "/commits?" + q.Encode()
-	body, code, token, err := apiGet(u)
+	body, code, token, err := apiGet(u, 8<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -154,12 +154,22 @@ func lastCommit(src Source) (*commit, error) {
 	return &list[0], nil
 }
 
+// cacheBody is the most of an answer kept by URL for a 304 to reuse;
+// bigger ones are read but not kept, so a huge file list isn't held for
+// the process's life.
+const cacheBody = 8 << 20
+
+// errOverCap is an answer over the most its caller reads (apiGet's max).
+var errOverCap = errors.New("over the most magpie reads")
+
 // apiGet asks GitHub's API for u, with the ETag of the answer it had
 // before, if any: GitHub's 304 for an unchanged one doesn't count against
 // the rate limit, and is answered as the 200 it had. It says whether the
 // request carried a GitHub token, and a rate limit used up is an
-// errLimited.
-func apiGet(u string) ([]byte, int, bool, error) {
+// errLimited. A rate limit is told from the status and headers even when
+// the answer can't be read whole. A 200 over max bytes is an error, never
+// a cut-off body handed to a caller, and no answer over cacheBody is kept.
+func apiGet(u string, max int64) ([]byte, int, bool, error) {
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("User-Agent", "magpie")
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -169,20 +179,35 @@ func apiGet(u string) ([]byte, int, bool, error) {
 	if cached {
 		req.Header.Set("If-None-Match", had.etag)
 	}
-	c := &http.Client{Timeout: 20 * time.Second}
+	// a file list of tens of MB takes longer than 20s on a slow line
+	timeout := 20 * time.Second
+	if max > cacheBody {
+		timeout = 2 * time.Minute
+	}
+	c := &http.Client{Timeout: timeout}
 	resp, token, err := doGitHub(req, func(r *http.Request) (*http.Response, error) { return source.Do(c, r) })
 	if err != nil {
 		return nil, 0, token, fmt.Errorf("couldn't reach GitHub: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if e, ok := limitedBy(resp, body, token); ok {
 		return nil, resp.StatusCode, token, e
+	}
+	if err != nil {
+		return nil, resp.StatusCode, token, fmt.Errorf("couldn't read GitHub's answer: %w", err)
 	}
 	if resp.StatusCode == 304 && cached {
 		return had.body, 200, token, nil
 	}
-	if et := resp.Header.Get("ETag"); resp.StatusCode == 200 && et != "" {
+	if resp.StatusCode == 200 && int64(len(body)) > max {
+		return nil, resp.StatusCode, token, fmt.Errorf("GitHub's answer was over %s: %w", mb(max), errOverCap)
+	}
+	// an empty 200 kept for a 304 would answer nothing forever (#3045)
+	if resp.StatusCode == 200 && len(body) == 0 {
+		return nil, resp.StatusCode, token, fmt.Errorf("GitHub answered nothing")
+	}
+	if et := resp.Header.Get("ETag"); resp.StatusCode == 200 && et != "" && int64(len(body)) <= cacheBody {
 		etags.Lock()
 		etags.m[u] = etagged{etag: et, body: body}
 		etags.Unlock()
@@ -198,13 +223,27 @@ func hashDir(dir string) string { return hashFiles(dir, false) }
 // a folder it shows when noFinder is set. A folder unchanged since it was
 // last hashed isn't read again (treememo.go).
 func hashFiles(dir string, noFinder bool) string {
-	return rememberedHash(dir, noFinder)
+	if noFinder {
+		return rememberedHash(dir, leaveFinder)
+	}
+	return rememberedHash(dir, leaveNothing)
 }
+
+// leave is what a hash of a skill's folder leaves aside, beyond its .git
+// and magpie's mark.
+type leave uint8
+
+const (
+	leaveNothing   leave = iota
+	leaveFinder          // .DS_Store
+	leaveBuilt           // that, and what installing dependencies builds (fromInstall)
+	leaveInstalled       // that, and the lock files an install writes again
+)
 
 // hashWalk walks dir as hashFiles reads it, stamping each file and link
 // it would hash (treememo.go); with read, it also hashes their bytes. ok
 // is false when it can't be walked, or a file can't be read.
-func hashWalk(dir string, noFinder, read bool) (hash, stamp string, settled, ok bool) {
+func hashWalk(dir string, lv leave, read bool) (hash, stamp string, settled, ok bool) {
 	h := sha256.New()
 	st := newStamper()
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -213,6 +252,12 @@ func hashWalk(dir string, noFinder, read bool) (hash, stamp string, settled, ok 
 		}
 		rel, _ := filepath.Rel(dir, p)
 		rel = filepath.ToSlash(rel)
+		if p != dir && lv >= leaveBuilt && fromInstall(d.Name(), d.IsDir() || d.Type()&fs.ModeSymlink != 0, lv == leaveInstalled) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		switch {
 		case d.IsDir():
 			if d.Name() == ".git" && p != dir {
@@ -228,7 +273,7 @@ func hashWalk(dir string, noFinder, read bool) (hash, stamp string, settled, ok 
 				t, _ := os.Readlink(p)
 				fmt.Fprintf(h, "link %s %s\n", rel, filepath.ToSlash(t))
 			}
-		case d.Type().IsRegular() && rel != marker && !(noFinder && d.Name() == ".DS_Store"):
+		case d.Type().IsRegular() && rel != marker && !(lv >= leaveFinder && d.Name() == ".DS_Store"):
 			fi, err := d.Info()
 			if err != nil {
 				return err
@@ -269,6 +314,22 @@ func firstLine(s string) string {
 	return s
 }
 
+// gitLooked is, by repoKey, the commit a git repository was last read at
+// for new skills: one at the same commit has none since, and isn't
+// fetched again for them.
+var gitLooked sync.Map
+
+func gitLookedAt(repo, ref, head string) bool {
+	h, ok := gitLooked.Load(repoKey(repo, ref))
+	if !ok {
+		return false
+	}
+	newFound.Lock()
+	_, kept := newFound.m[repoKey(repo, ref)]
+	newFound.Unlock()
+	return kept && strings.EqualFold(h.(string), head)
+}
+
 // CheckSkills asks GitHub, for every skill installed from there, for the
 // last commit to touch its folder, and tells whether it's newer than what
 // the library has: by the commit a skill is known to be at, or, while
@@ -276,7 +337,9 @@ func firstLine(s string) string {
 // folder's files with the skill's. A skill GitHub couldn't be asked about
 // is unknown, and the others are checked all the same; once GitHub limits
 // requests, the rest aren't asked about. A skill from another git
-// repository is checked with the user's git (checkGitSkill).
+// repository is checked with the user's git (checkGitSkill). Each
+// repository, and each folder the user added skills from, is also looked
+// in for skills added beside them since (skillnew.go).
 func CheckSkills() ([]SkillCheck, error) {
 	mu.Lock()
 	l, err := load()
@@ -328,19 +391,30 @@ func CheckSkills() ([]SkillCheck, error) {
 				}
 			}
 			// and what the repository has added beside them since: GitHub's
-			// list of its files says, which another host has no API for
+			// list of its files says; another host's repository is read
+			// from its fetch, once for each commit its ref is at
 			for _, ref := range refs {
-				if skills[0].Source.Kind != "github" {
-					break
+				repo := skills[0].Source.Repo
+				var found []NewSkill
+				var ok bool
+				switch head := heads[ref]; {
+				case skills[0].Source.Kind == "github":
+					found, ok = findNew(l, repo, ref, f, &limited)
+				case head != "" && !gitLookedAt(repo, ref, head):
+					if found, ok = findNewGit(l, repo, ref, f); ok {
+						gitLooked.Store(repoKey(repo, ref), head)
+					}
 				}
-				if found, ok := findNew(l, skills[0].Source.Repo, ref, f, &limited); ok {
+				if ok {
 					newFound.Lock()
-					newFound.m[repoKey(skills[0].Source.Repo, ref)] = found
+					newFound.m[repoKey(repo, ref)] = found
 					newFound.Unlock()
 				}
 			}
 		}()
 	}
+	// the folders the user added skills from, for ones put there since
+	lookInFolders(l)
 	wg.Wait()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	if len(known) > 0 {
@@ -450,7 +524,7 @@ func checkSkill(s *Skill, f *fetcher, asked map[string]*commit, limited *atomic.
 	if have == "" {
 		have = hashDir(skillDir(s.Name)) // installed before magpie kept it
 	}
-	if theirs := hashDir(from); theirs == "" || theirs != have {
+	if theirs := s.fetchedHash(from); theirs == "" || theirs != have {
 		c.Status, c.URL = "update", history
 		return c, "", ""
 	}

@@ -31,7 +31,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -39,6 +38,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 const (
@@ -59,7 +59,9 @@ type CodexReader struct {
 
 // codexReaders are the Codexes that read the config at at: the CLI on
 // PATH, the desktop app's own (its bundled codex-cli on a Mac; the Store
-// app's on Windows, whose version magpie can't read), the editor
+// app's on Windows, whose version magpie can't read; on Linux the
+// package's resources/codex, which says its version as the CLI does:
+// codex-cli 0.166.0-alpha.5.1 in chatgpt 26.1027), the editor
 // extension's, or a WSL distro's CLI. A var so tests can name them.
 var codexReaders = func(at place) []CodexReader {
 	if at.spell != nil {
@@ -82,6 +84,10 @@ var codexReaders = func(at place) []CodexReader {
 		if storeAppVersion(windowsStorePackages(), app.store, app.publisher) != "" {
 			out = append(out, CodexReader{Kind: "app"})
 		}
+	case "linux":
+		if dir := app.linuxDir(); dir != "" {
+			out = append(out, CodexReader{Kind: "app", Version: installedVersion(filepath.Join(dir, "resources", "codex"))})
+		}
 	}
 	if extensionHere(at.home, "openai.chatgpt") {
 		out = append(out, CodexReader{Kind: "ide"})
@@ -89,7 +95,7 @@ var codexReaders = func(at place) []CodexReader {
 	return out
 }
 
-var codexPackageVersionRe = regexp.MustCompile(`"version"\s*:\s*"([^"]+)"`)
+var codexPackageVersionRe = lazyre.New(`"version"\s*:\s*"([^"]+)"`)
 
 // bundledCodexVersion is the version of the codex a Codex app bundle
 // ships (Contents/Resources/codex-cli/codex-package.json, "version":
@@ -164,16 +170,12 @@ type codexAsyncStash struct {
 // codexAsyncNow is how the config has them: the async_compaction value
 // (nil, a bool, or a table) and magpie's provider table, nil when absent.
 func codexAsyncNow(path string) (feature any, provider map[string]any, err error) {
-	raw, err := edit.Read(path)
-	if err != nil || raw == nil {
+	doc, err := codexTopOf(path)
+	if err != nil {
 		return nil, nil, err
 	}
-	var doc map[string]any
-	if err := toml.Unmarshal(raw, &doc); err != nil {
-		return nil, nil, err
-	}
-	features, _ := doc["features"].(map[string]any)
-	providers, _ := doc["model_providers"].(map[string]any)
+	features, _ := doc.Features.(map[string]any)
+	providers, _ := doc.ModelProviders.(map[string]any)
 	p, _ := providers[magpieID].(map[string]any)
 	return features["async_compaction"], p, nil
 }
@@ -196,7 +198,7 @@ func codexAsyncSync(path, key string, routed, on bool, percent int, tableOK bool
 		return err
 	}
 	var st codexAsyncStash
-	if raw := stashLoad()[key]; raw != "" {
+	if raw := stashShared()[key]; raw != "" {
 		json.Unmarshal([]byte(raw), &st)
 	}
 	was := st
@@ -349,4 +351,55 @@ func codexProviderCaps(path string) edit.Inline {
 		}
 	}
 	return out
+}
+
+// CodexAsyncHeldHere is the Codexes on this machine that would keep the
+// background compaction's threshold out of its config (one before
+// codexAsyncTableFrom, or of no known version), asked now rather than at
+// the last sync, which asks only while the setting is on.
+func CodexAsyncHeldHere(home string) []CodexReader {
+	return codexAsyncBlocked(codexReaders(here(tuneHome(home))))
+}
+
+// codexAsyncOwn names what the user has in Codex's config.toml that
+// comes before magpie's background compaction threshold, as codexAsyncSync
+// leaves it: the feature as a bare key of theirs (true at Codex's own 65%,
+// or false), their table spelled inline or as dotted keys, enabled = false
+// in it, or a threshold of their own. "" when magpie's threshold is what
+// Codex would read.
+func codexAsyncOwn(home string) string {
+	at := here(tuneHome(home))
+	path := filepath.Join(at.codexHome(), "config.toml")
+	feature, _, err := codexAsyncNow(path)
+	if err != nil || feature == nil {
+		return ""
+	}
+	var st codexAsyncStash
+	if raw := stashShared()[at.key("codex.async")]; raw != "" {
+		json.Unmarshal([]byte(raw), &st)
+	}
+	bare := "features.async_compaction"
+	switch f := feature.(type) {
+	case bool:
+		if f && st.Bool {
+			return ""
+		}
+		return bare
+	case map[string]any:
+		if t, err := edit.GetTOMLTable(path, codexAsyncTable); err != nil || t == nil {
+			return bare
+		}
+		if e, has := f["enabled"]; has {
+			if on, _ := e.(bool); !on {
+				return codexAsyncTable + ".enabled"
+			}
+		}
+		if p, has := f[codexAsyncPercent]; has {
+			if n, _ := p.(int64); st.Percent == 0 || int64(st.Percent) != n {
+				return codexAsyncTable + "." + codexAsyncPercent
+			}
+		}
+		return ""
+	}
+	return bare
 }

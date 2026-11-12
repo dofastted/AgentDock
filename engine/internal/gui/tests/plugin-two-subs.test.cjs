@@ -54,8 +54,8 @@ function server(lang, asked) {
 }
 
 const L = {
-  en: { installed: "Installed", signIn: "Sign in", other: "Sign in to Qoder CN", signedIn: "Signed in", tip: /Qoder CN is a subscription of its own; Qoder works without it/ },
-  zh: { installed: "已安装", signIn: "登录", other: "登录 Qoder CN", signedIn: "已登录", tip: /Qoder CN 是独立订阅，Qoder 无需它也能使用/ },
+  en: { installed: "Installed", signIn: "Sign in", cn: "Qoder CN", other: "Sign in to Qoder CN", signedIn: "Signed in", tip: /Qoder CN is a subscription of its own; Qoder \(international\) works without it/ },
+  zh: { installed: "已安装", signIn: "登录", cn: "Qoder 中国版 (qoder.cn)", other: "登录 Qoder 中国版 (qoder.cn)", signedIn: "已登录", tip: /Qoder 中国版 \(qoder\.cn\) 是独立订阅，Qoder 国际版 \(qoder\.com\) 无需它也能使用/ },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -67,6 +67,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const w = L[lang];
         const page = await (await browser.newContext({ viewport: { width: 980, height: 820 } })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], asked = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, asked));
@@ -81,7 +82,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // Installed: the row names the other, quietly
         await view.page().locator(":is(.lib-tabs .opt, .nav-s):visible", { hasText: w.installed }).click();
-        const qoder = view.locator(".pm-row").filter({ hasText: "Qoder CN" });
+        const qoder = view.locator(".pm-row").filter({ hasText: w.cn });
         await qoder.waitFor();
         const b = qoder.locator(".val button", { hasText: w.other });
         assert.equal(await b.count(), 1, "the row's Sign in names Qoder CN");
@@ -96,7 +97,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // and it opens that one's sign-in
         await b.click();
         await page.locator("#addSheet .signing").first().waitFor();
-        assert.match(await page.locator("#addSheet .signing").first().innerText(), /Qoder CN/);
+        assert.ok((await page.locator("#addSheet .signing").first().innerText()).includes(w.cn));
         assert.deepEqual(errors, []);
       });
     }

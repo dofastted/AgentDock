@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/dirent"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -89,12 +89,12 @@ func ompYAMLList(v string) bool { return strings.HasPrefix(v, "[") || strings.Ha
 
 // ompProfileName is a profile name omp takes (pi-utils dirs.ts,
 // normalizeProfileName); it refuses any other.
-var ompProfileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var ompProfileName = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // ompReserved is a Windows device name omp refuses on every platform
 // (pi-utils dirs.ts, normalizeProfileName): CON, PRN, AUX, NUL, COM0–COM9,
 // LPT0–LPT9, and the same with a dot and anything after (con.work).
-var ompReserved = regexp.MustCompile(`(?i)^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$`)
+var ompReserved = lazyre.New(`(?i)^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$`)
 
 // ompProfileOK says whether name is one omp takes as a profile (pi-utils
 // dirs.ts): "default" is none, a trailing dot is refused, and so is a
@@ -126,9 +126,9 @@ func ompRoot(home string) string {
 // it names.
 func ompDir(home string) (dir string, shared bool) {
 	root := ompRoot(home)
-	p, set := os.LookupEnv("OMP_PROFILE")
+	p, set := appdir.LookupEnv("OMP_PROFILE")
 	if !set {
-		p = os.Getenv("PI_PROFILE")
+		p = appdir.Getenv("PI_PROFILE")
 	}
 	if p = strings.TrimSpace(p); ompProfileOK(p) {
 		return filepath.Join(root, "profiles", p, "agent"), false
@@ -193,7 +193,7 @@ func ompProfiles(home string) []*Agent {
 // known), and without one its models offer xhigh rather than a max an older
 // omp would refuse.
 func ompIn(at place) *Agent {
-	return ompAt(at, filepath.Join(at.home, ".omp", "agent"), func() ompProviderEntry { return ompProviderAt(at.gw(), at.version) })
+	return ompAt(at, at.join(".omp", "agent"), func() ompProviderEntry { return ompProviderAt(at.gw(), at.version) })
 }
 
 // ompAt is omp with its agent folder at dir, magpie's entry in its
@@ -342,7 +342,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				return dropMagpie()
 			},
 			Options: func(cur map[string]string) []Option {
-				opts := append(ompOwnOptions(pick("models"), cur[key]), viaMagpie("omp", magpieID+"/")...)
+				opts := append(ompOwnOptions(pick("models"), cur[key]), viaMagpieShared("omp", magpieID+"/")...)
 				// a catalog model with a thinking level is offered as it
 				// reads, beside the model: that keeps the level, the model
 				// alone clears it
@@ -384,9 +384,10 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		// (commit/model-selection.ts), tiny names sessions and classifies
 		// and takes smol's model, memory takes tiny's, else smol's
 		// (ROLE_CONFIGURED_FALLBACK). omp's other roles (KIND_ROLE_IDS)
-		// are for kinds of model other than the chat models magpie writes
-		// for omp: image making, web search, speech, dictation, and the
-		// judge its find tool turns on for a TypeSafe jev model
+		// are for kinds of model other than chat: image making, web
+		// search, speech, dictation, and the judge its find tool turns on
+		// for a TypeSafe jev model. Of those magpie writes image models
+		// for omp (ompImageModels), picked in omp's own Roles view
 		role("commit", "commit", "commit", true),
 		role("tiny", "tiny", "tiny", true),
 		role("memory", "memory", "memory", true),
@@ -455,6 +456,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		// a role's thinking level is omp's, after whichever model it is on;
 		// a list of models is the user's own
 		SplitSuffix: ompSplit,
+		ListOnly:    true,
 		Sync: func() error {
 			models := pick("models")
 			if err := syncYAML(models, "providers."+magpieID, func() any { return ompProvider(models) }); err != nil {
@@ -491,7 +493,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			}
 			scopeGoneRename(gone, from, to)
 			for _, w := range was {
-				s := stashLoad()[w]
+				s := stashShared()[w]
 				ns := move(s)
 				if ompYAMLList(s) {
 					t, err := edit.EditYAMLTextStrings(edit.YAMLText(s), move)
@@ -561,6 +563,25 @@ type ompModel struct {
 	Context   int          `yaml:"contextWindow,omitempty"`
 	MaxTokens int          `yaml:"maxTokens,omitempty"`
 	Input     []string     `yaml:"input,omitempty"`
+	// Kind is what the model is for when it isn't chat: "image" for one
+	// that draws, which omp's image role takes and no chat role does
+	// (ompImageModels)
+	Kind string `yaml:"kind,omitempty"`
+	// Cost is the model's price in USD per million tokens, the unit omp's
+	// calculateUsageCost divides by (omp 18.9.1, pi-catalog
+	// src/models.ts). omp's custom provider prices a call by it alone;
+	// without it omp takes a bundled model's its fuzzy id match finds, and
+	// a group/* id matches none, so its calls cost 0 (taotao7 on Discord).
+	Cost *ompCost `yaml:"cost,omitempty"`
+}
+
+// ompCost is a model's cost in omp's models.yml (omp 18.9.1,
+// models-config-schema-bundle.ts: input, output, cacheRead, cacheWrite).
+type ompCost struct {
+	Input      float64 `yaml:"input"`
+	Output     float64 `yaml:"output"`
+	CacheRead  float64 `yaml:"cacheRead"`
+	CacheWrite float64 `yaml:"cacheWrite"`
 }
 
 type ompThinking struct {
@@ -622,7 +643,9 @@ func ompTakesMax(v string) bool {
 // baseUrl/responses; one on Anthropic's Messages API to the gateway's
 // /v1/messages (omp adds the /v1). That one thinks adaptively when it takes
 // nothing else, else on a budget: omp's anthropic-budget-effort would also
-// send output_config.effort, which Sonnet 4.5 and Haiku 4.5 refuse.
+// send output_config.effort, which Sonnet 4.5 and Haiku 4.5 refuse. One on
+// Gemini's API goes to the gateway's /v1beta on google-generative-ai
+// (#4277, ompGeminiMode).
 func ompProvider() ompProviderEntry { return ompProviderAt(gateway.URL(), ompVersion()) }
 
 // ompProviderAt is ompProvider for an omp of version (as ompVersion) that
@@ -630,8 +653,11 @@ func ompProvider() ompProviderEntry { return ompProviderAt(gateway.URL(), ompVer
 func ompProviderAt(gw, version string) ompProviderEntry {
 	takesMax := ompTakesMax(version)
 	ms := []ompModel{}
-	for _, m := range magpieModels("omp") {
+	for _, m := range sharedModels("omp") {
 		e := ompModel{ID: m.ID, Name: m.Name, Context: m.Context, MaxTokens: maxTokens(m)}
+		if p := m.Price; p != nil {
+			e.Cost = &ompCost{Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite}
+		}
 		mode := "effort"
 		switch {
 		case slices.Contains(m.APIs, string(provider.Responses)):
@@ -642,6 +668,14 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 			if gateway.AdaptiveThinking(m.ID) {
 				mode = "anthropic-adaptive"
 			}
+		case slices.Contains(m.APIs, string(provider.Gemini)):
+			// #4277: a Gemini model on Gemini's own API at the gateway's
+			// /v1beta, as OmO's; omp posts to baseUrl/models/<id>:
+			// streamGenerateContent?alt=sse with x-goog-api-key, the key
+			// being "N/A" (kNoAuth) under auth: none, which loopback takes
+			// (pi-ai providers/google.ts, 16.0.0 to 18.14.0)
+			e.API, e.BaseURL = "google-generative-ai", gw+"/v1beta"
+			mode = ompGeminiMode(m.ID)
 		}
 		// Without input omp takes it from a bundled model its fuzzy id match
 		// finds, else text only; a model the source never answered for is
@@ -671,6 +705,8 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 		}
 		ms = append(ms, e)
 	}
+	images := ompImageModels(version, ms)
+	ms = append(ms, images...)
 	e := ompProviderEntry{BaseURL: gw + "/v1", API: "openai-completions", Auth: "none",
 		Headers: map[string]string{"User-Agent": "omp"}, Models: ms}
 	if version != "" && !Newer(ompSessionSince, version) {
@@ -678,10 +714,65 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 	}
 	// whqtian on Discord: a WSL omp under NAT asks Windows' address, where
 	// the gateway turns a request without a named key away
-	if key := keyAt(gw); key != gateway.Token {
+	// on loopback too once an image model is listed: omp's generate_image
+	// skips a model of a keyless provider as "credentials unavailable"
+	// (image-gen.ts, isAuthenticated turns auth: none's kNoAuth away; omp
+	// 18.15.0 run against a stand-in gateway), where chat goes without one
+	if key := keyAt(gw); key != gateway.Token || len(images) > 0 {
 		e.Auth, e.APIKey = "", key
 	}
 	return e
+}
+
+// ompKindSince is the first omp whose models.yml takes a model's kind and
+// a runner API such as openai-images (pi-coding-agent 18.7.0,
+// models-config-schema-bundle.ts); 18.6.3's schema knows neither and turns
+// the whole file away over an api it doesn't list.
+const ompKindSince = "18.7.0"
+
+// ompImageModels are magpie's image models (Settings › Models › Images, as
+// generate_image offers them) as omp's image role takes them (treeman_26897
+// on Discord): kind image on openai-images, which omp's generate_image
+// posts to the provider's baseUrl + /images/generations, or /images/edits
+// with images to change (pi-ai images/openai-images.ts, omp 18.7.0 to
+// 18.15.0), the gateway's /v1/images. The role accepts a model of kind
+// image alone (model-roles.ts), and a chat model is of kind chat, so before
+// these the role listed none of magpie's. With one listed, the provider
+// takes the gateway's key in place of auth: none (ompProviderAt). None for
+// an omp before ompKindSince, or one whose version isn't known, as
+// ompTakesMax; nor one whose id a chat model in chat has already, which one
+// id can't be both.
+func ompImageModels(version string, chat []ompModel) []ompModel {
+	if version == "" || Newer(ompKindSince, version) {
+		return nil
+	}
+	var out []ompModel
+	for _, m := range gateway.ImageModels() {
+		if slices.ContainsFunc(chat, func(c ompModel) bool { return c.ID == m.ID }) {
+			continue
+		}
+		in := []string{"text"}
+		if m.Images {
+			in = append(in, "image")
+		}
+		out = append(out, ompModel{ID: m.ID, Name: m.Name, API: "openai-images", Kind: "image", Input: in})
+	}
+	return out
+}
+
+// ompGeminiMode is how omp asks a Gemini model on google-generative-ai
+// to think. Gemini 3 and later take thinkingConfig.thinkingLevel
+// (google-level: omp sends minimal to high as MINIMAL to HIGH, xhigh and max
+// as HIGH); Gemini 2.x and earlier take a thinkingBudget and refuse a level,
+// so they go on budget, which omp sends as -1, the model's own (pi-ai
+// stream.ts and pi-catalog's gemini.kdl, omp 18.14.0). "effort" there is a
+// budget too, the same -1.
+func ompGeminiMode(id string) string {
+	name := strings.ToLower(id[strings.LastIndex(id, "/")+1:])
+	if strings.HasPrefix(name, "gemini-1") || strings.HasPrefix(name, "gemini-2") {
+		return "budget"
+	}
+	return "google-level"
 }
 
 // ompKept is magpie's entry e laid over the one in the models.yml at path.
@@ -731,7 +822,7 @@ func ompOwnOptions(modelsFile, cur string) []Option {
 		}
 		for _, m := range f.Providers[p].Models {
 			if m.ID != "" {
-				opts = append(opts, Option{Value: p + "/" + m.ID, Note: m.Name, Icon: modelIcon(p, m.ID), Group: name, GroupIcon: providerIcon(p)})
+				opts = append(opts, Option{Value: p + "/" + m.ID, Note: m.Name, Icon: modelIcon(p, m.ID), Group: name, GroupIcon: providerIcon(p), Direct: name})
 			}
 		}
 	}

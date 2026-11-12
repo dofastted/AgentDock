@@ -1,11 +1,12 @@
 package provider
 
 import (
-	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/yetone/magpie/internal/proc"
 )
 
 // A reply that says the account Codex is signed in to is out has its
@@ -65,55 +66,93 @@ func TestCodexMayBeUsedUpReadsAtOnce(t *testing.T) {
 	read("usage_limit_reached")
 }
 
-// The Codex app open when its account ran out is kept till it is opened
-// again (its app-server's pid changes) or the account has room, and may
-// be reopened once for each time the account runs out.
-func TestCodexAppOutEpisode(t *testing.T) {
-	signIn(t)
+// The reading a reply's word asks for signs Codex in to the next account
+// with room as soon as the one it is on is out, not at the loop's next
+// look up to five minutes on: the Codex app greys Send once it is out, so
+// no request comes to tell magpie again (danzi002 on Discord restarted the
+// app every time instead).
+func TestCodexReadNowSwitchesAtOnce(t *testing.T) {
+	home := signIn(t) // me@example.com, acct-1
 	rememberLogins(true)
-	app := new(int)
-	old := listProcesses
-	t.Cleanup(func() {
-		listProcesses = old
-		noteCodexAppOut(false)
-	})
-	listProcesses = func(context.Context) ([]proc.Process, error) {
-		ps := []proc.Process{{PID: 7, Args: "codex"}}
-		if *app > 0 {
-			ps = append(ps, proc.Process{PID: *app, Args: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server"})
+	codexSignIn(t, home, "new@example.com", "r-new") // signed in to now
+	rememberLogins(true)
+	used := map[string]float64{"acct-new@example.com": 100, "acct-1": 20}
+	reset := time.Now().Add(3 * time.Hour).Unix()
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"plan_type": "plus", "rate_limit": map[string]any{
+			"allowed":        used[r.Header.Get("chatgpt-account-id")] < 100,
+			"primary_window": map[string]any{"used_percent": used[r.Header.Get("chatgpt-account-id")], "limit_window_seconds": 18000, "reset_at": reset}}})
+	}))
+	defer fake.Close()
+	old := CodexBase
+	CodexBase = fake.URL + "/backend-api/codex"
+	t.Cleanup(func() { CodexBase = old })
+	if err := SetLoginOn("codex", "me@example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { codexWasUsedUp.Store(false) })
+	codexReadNow("new@example.com")
+	for _, l := range Logins("codex") {
+		if l.Active && !strings.EqualFold(l.User, "me@example.com") {
+			t.Fatalf("out, with me@example.com at 20%%: Codex left on %s", l.User)
 		}
-		return ps, nil
 	}
-	recheck := func() { codexAppOut.Lock(); codexAppOut.checked = time.Time{}; codexAppOut.Unlock() }
+}
 
-	noteCodexAppOut(true)
-	if got := CodexAppOut(); got != "" || CodexAppReopenOnce() {
-		t.Fatalf("no app open: %q", got)
+// Whether magpie has anything to serve Codex's own model on while the
+// account Codex is signed in to is out (xiaoq6285 on Discord, one Plus
+// account): with that account alone and no fallback, nothing; another
+// ChatGPT account not known out, or a fallback on the Codex
+// subscription, is something. Another account known out is not.
+func TestCodexServesWhileOut(t *testing.T) {
+	home := signIn(t) // me@example.com
+	rememberLogins(true)
+	if CodexServesWhileOut("gpt-5.5") {
+		t.Fatal("one account, no fallback: serves")
 	}
-	*app = 60
-	noteCodexAppOut(true)
-	if got := CodexAppOut(); got != "me@example.com" {
-		t.Fatalf("app open as it ran out: %q", got)
+	if CodexServesWhileOut("") {
+		t.Fatal("no model: serves")
 	}
-	if !CodexAppReopenOnce() || CodexAppReopenOnce() {
-		t.Fatal("reopened other than once")
+	codexSignIn(t, home, "spare@example.com", "r-spare")
+	rememberLogins(true)
+	var active, other string
+	for _, l := range Logins("codex") {
+		if l.Active {
+			active = l.User
+		} else {
+			other = l.User
+		}
 	}
-	recheck()
-	if got := CodexAppOut(); got != "me@example.com" {
-		t.Fatalf("still the same app: %q", got)
+	if other == "" {
+		t.Fatalf("no second account: %+v", Logins("codex"))
 	}
-	*app = 61
-	recheck()
-	if got := CodexAppOut(); got != "" {
-		t.Fatalf("opened again: %q", got)
+	loginUsageCache.Lock()
+	oldCache := loginUsageCache.m
+	loginUsageCache.m = map[string]loginUsageEntry{
+		"codex/" + active: {at: time.Now(), q: SubscriptionQuota{Provider: "codex", User: active, Held: true}},
 	}
-
-	noteCodexAppOut(true) // out again: a new time, reopened once more
-	if CodexAppOut() == "" || !CodexAppReopenOnce() {
-		t.Fatal("out again: not kept")
+	loginUsageCache.Unlock()
+	t.Cleanup(func() {
+		loginUsageCache.Lock()
+		loginUsageCache.m = oldCache
+		loginUsageCache.Unlock()
+	})
+	if !CodexServesWhileOut("gpt-5.5") {
+		t.Fatalf("another account (%s), not known out: doesn't serve", other)
 	}
-	noteCodexAppOut(false)
-	if got := CodexAppOut(); got != "" {
-		t.Fatalf("room again: %q", got)
+	loginUsageCache.Lock()
+	loginUsageCache.m["codex/"+other] = loginUsageEntry{at: time.Now(), q: SubscriptionQuota{Provider: "codex", User: other, Held: true}}
+	loginUsageCache.Unlock()
+	if CodexServesWhileOut("gpt-5.5") {
+		t.Fatal("every account out, no fallback: serves")
+	}
+	if err := Save(Provider{ID: "fb", Name: "FB", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(Provider{ID: "codex", Fallback: []string{"fb/m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !CodexServesWhileOut("gpt-5.5") {
+		t.Fatal("a fallback on the Codex subscription: doesn't serve")
 	}
 }

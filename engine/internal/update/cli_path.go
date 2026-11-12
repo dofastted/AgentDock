@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -50,7 +50,7 @@ type CLI struct {
 	Stuck   string     `json:"stuck,omitempty"`   // translocated, read-only: why it can't be linked from where it is
 	Shells  []CLIShell `json:"shells"`
 	Windows bool       `json:"windows,omitempty"`
-	Shim    string     `json:"shim,omitempty"` // Windows: the magpie.cmd Add writes beside an app not named magpie.exe, which runs it
+	Shim    string     `json:"shim,omitempty"` // Windows: the magpie.cmd Add writes beside an app not named magpie.exe, which runs it, in a build with no magpie.com (com.go)
 }
 
 // cliShell is a shell installed here.
@@ -77,7 +77,7 @@ func ReadCLI() *CLI {
 		return v
 	}
 	v.Exe, v.Stuck = exe, cliStuck()
-	if v.Windows && needsShim(exe) {
+	if v.Windows && comLauncher == nil && needsShim(exe) {
 		v.Shim = filepath.Join(filepath.Dir(exe), shimName)
 	}
 	shells := cliShells()
@@ -94,7 +94,7 @@ func ReadCLI() *CLI {
 	var def []string
 	for i, sh := range shells {
 		s := CLIShell{Name: sh.Name, Default: sh.Default, Known: paths[i] != nil, Command: findCLI(paths[i])}
-		s.Ours = s.Command != "" && (sameFile(s.Command, exe) || shimRuns(s.Command, exe))
+		s.Ours = s.Command != "" && (sameFile(s.Command, exe) || shimRuns(s.Command, exe) || comRuns(s.Command, exe))
 		if p := cliProfile(sh.Name); p != "" {
 			s.Profile = tildeHome(p)
 		}
@@ -118,7 +118,19 @@ func ReadCLI() *CLI {
 // AddCLI puts this app's magpie on the PATH: of every shell whose PATH has
 // the folder ReadCLI names (shell ""), or of the one shell named, by
 // linking it in ~/.local/bin and adding that folder to the shell's profile.
+// The launchers magpie keeps (Launchers: claude-magpie) go beside it, so
+// they are there with nothing more asked.
 func AddCLI(shell string) (*CLI, error) {
+	v, err := addCLI(shell)
+	if err == nil && v != nil && v.Ours && v.Command != "" {
+		for name, args := range Launchers {
+			_ = addLauncherBeside(v, name, args...) // one of the user's own by that name stays
+		}
+	}
+	return v, err
+}
+
+func addCLI(shell string) (*CLI, error) {
 	cliMu.Lock()
 	defer cliMu.Unlock()
 	exe, err := cliExe()
@@ -209,7 +221,9 @@ var cliStuck = func() string {
 
 func cliNames() []string {
 	if runtime.GOOS == "windows" {
-		return []string{"magpie.exe", "magpie.cmd", "magpie.bat"}
+		// PATHEXT's order: magpie.com, the console program magpie writes
+		// beside the app (com.go), runs before magpie.exe
+		return []string{"magpie.com", "magpie.exe", "magpie.cmd", "magpie.bat"}
 	}
 	return []string{"magpie"}
 }
@@ -240,8 +254,8 @@ func sameFile(a, b string) bool {
 }
 
 var (
-	plistVersion = regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
-	cellarVer    = regexp.MustCompile(`/Cellar/magpie/([^/]+)/`)
+	plistVersion = lazyre.New(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
+	cellarVer    = lazyre.New(`/Cellar/magpie/([^/]+)/`)
 )
 
 // otherVersion is the version of the magpie at cmd, read from its .app's

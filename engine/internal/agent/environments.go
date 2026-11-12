@@ -146,7 +146,7 @@ func wslAgentDetails(d distro) []WSLAgentInfo {
 			ID:          k.id + "@wsl:" + d.Name,
 			Kind:        k.id,
 			Provenance:  p,
-			Path:        d.Bins[k.bin],
+			Path:        d.Paths[k.bin],
 			InteropPath: d.WinBins[k.bin],
 		}
 		if d.Running && d.Root != "" && k.found(d) {
@@ -160,7 +160,7 @@ func wslAgentDetails(d distro) []WSLAgentInfo {
 			ID:         "omp#" + name + "@wsl:" + d.Name,
 			Kind:       "omp",
 			Provenance: ProvenanceNative,
-			Path:       d.Bins["omp"],
+			Path:       d.Paths["omp"],
 		}
 		if info.Path == "" {
 			info.Provenance = ProvenanceConfig

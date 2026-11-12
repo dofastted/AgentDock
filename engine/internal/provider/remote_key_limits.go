@@ -41,7 +41,7 @@ type GatewayKeyLimit struct {
 	// Limited is false for a key the remote holds to no limit.
 	Limited bool `json:"limited"`
 	// Period is "day", "week", "month", "days" (a cycle of Days days) or
-	// "hours" (of Hours hours).
+	// "hours" (of Hours hours) or "total" (until reset by hand).
 	Period string    `json:"period,omitempty"`
 	Days   int       `json:"days,omitempty"`
 	Hours  int       `json:"hours,omitempty"`
@@ -82,6 +82,8 @@ type remoteKeyLimit struct {
 	TokensLeft int64     `json:"tokensLeft"`
 	CostLeft   float64   `json:"costLeft"`
 	Spent      bool      `json:"spent"`
+	// Models are the models a limit counts, none for the whole key
+	Models []string `json:"models"`
 }
 
 type remoteKeyRead struct {
@@ -192,13 +194,23 @@ func keyLimitCard(a *remoteKeyAnswer) (*GatewayKeyLimit, []QuotaWindow) {
 	var ws []QuotaWindow
 	share := func(used, limit float64) float64 { return math.Min(100, math.Round(used/limit*1000)/10) }
 	for _, x := range all {
-		reset := x.Reset
+		if len(x.Models) > 0 {
+			// a limit of some models: a request for one of them is
+			// refused with a 429 that rests that model here, and the
+			// key's others are served; as a window it would read as the
+			// key's
+			continue
+		}
+		resets := &x.Reset
+		if x.Period == "total" {
+			resets = nil // it never ends by itself
+		}
 		if x.TokenLimit > 0 {
-			ws = append(ws, QuotaWindow{Name: keyWindowName("Tokens", x.Period), Used: share(float64(x.Tokens), float64(x.TokenLimit)), ResetsAt: &reset,
+			ws = append(ws, QuotaWindow{Name: keyWindowName("Tokens", x.Period), Used: share(float64(x.Tokens), float64(x.TokenLimit)), ResetsAt: resets,
 				Amount: float64(x.Tokens), Limit: float64(x.TokenLimit), Unit: "tokens"})
 		}
 		if x.CostLimit > 0 {
-			ws = append(ws, QuotaWindow{Name: keyWindowName("Spend", x.Period), Used: share(x.Cost, x.CostLimit), ResetsAt: &reset,
+			ws = append(ws, QuotaWindow{Name: keyWindowName("Spend", x.Period), Used: share(x.Cost, x.CostLimit), ResetsAt: resets,
 				Amount: math.Round(x.Cost*100) / 100, Limit: x.CostLimit, Unit: "USD"})
 		}
 	}
@@ -226,6 +238,8 @@ func keyWindowName(what, period string) string {
 		return what + " this week"
 	case "month":
 		return what + " this month"
+	case "total":
+		return what + " in total"
 	}
 	return what + " this cycle"
 }
@@ -238,8 +252,8 @@ func askRemoteKeyLimit(ctx context.Context, p Provider, key string) (*remoteKeyA
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
+	p.signRemote(req, key)
 	res, err := p.Do(http.DefaultClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", errRemoteUnreachable, remoteName(p), err)

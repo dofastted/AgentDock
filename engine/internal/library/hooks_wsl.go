@@ -2,6 +2,7 @@ package library
 
 import (
 	"fmt"
+	"github.com/yetone/magpie/internal/agent"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -97,4 +98,15 @@ func firstWord(cmd string) string {
 	}
 	w, _, _ := strings.Cut(cmd, " ")
 	return w
+}
+
+// wslAsleepNoHooks is why a, an agent in a stopped WSL distro, has no hooks
+// written now: its kind takes none in WSL, or the distro, which isn't
+// opened or started for it, has to run first.
+func wslAsleepNoHooks(a *agent.Agent) string {
+	kind, _, _ := strings.Cut(a.ID, "@")
+	if _, ok := wslHookFiles[kind]; !ok {
+		return fmt.Sprintf("magpie gives hooks to %s only on this computer, not in WSL", a.Name)
+	}
+	return fmt.Sprintf("WSL %s isn't running: %s is given its hooks once it runs", a.WSL, a.Name)
 }

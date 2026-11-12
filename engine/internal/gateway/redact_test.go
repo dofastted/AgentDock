@@ -53,6 +53,7 @@ func TestConcurrentRedactedCountTokens(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	const workers = 8
 	const key = "sk-proj-abcdEFGH1234ijklMNOP5678qrst"
+	const wif = "5HueCGU8rMjxEXxiPuD5BD" + "ku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
 	const reply = `{"input_tokens":17}`
 	bodies := make(chan string, workers)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +125,7 @@ func TestConcurrentRedactedCountTokens(t *testing.T) {
 // stream that splits a placeholder and a protocol it was translated from
 func TestRedactedRequest(t *testing.T) {
 	const key = "sk-proj-abcdEFGH1234ijklMNOP5678qrst"
+	const wif = "5HueCGU8rMjxEXxiPuD5BD" + "ku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
 	var got []byte
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ = io.ReadAll(r.Body)
@@ -173,6 +175,7 @@ func TestRedactedRequest(t *testing.T) {
 
 func TestCountTokensRedacted(t *testing.T) {
 	const key = "sk-proj-abcdEFGH1234ijklMNOP5678qrst"
+	const wif = "5HueCGU8rMjxEXxiPuD5BD" + "ku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
 	cases := []struct {
 		name     string
 		settings settings.Settings
@@ -181,10 +184,19 @@ func TestCountTokensRedacted(t *testing.T) {
 	}{
 		{"secrets", settings.Settings{Redact: true}, key, "{{API_KEY_"},
 		{"personal", settings.Settings{RedactPersonal: true}, "13812345678", "{{PHONE_"},
+		// the Bitcoin wiki's WIF example, a wallet key
+		{"crypto", settings.Settings{Redact: true}, wif, "{{WIF_KEY_"},
+		// the secrets off, the same key goes as written
+		{"crypto_off", settings.Settings{RedactPersonal: true}, wif, ""},
 		{"words", settings.Settings{RedactWords: []string{"Nightjar"}}, "Nightjar", "{{TERM_"},
 		// a word in other capitals only when the user asked for any case
 		{"words_as_written", settings.Settings{RedactWords: []string{"Nightjar"}}, "NIGHTJAR", ""},
 		{"words_any_case", settings.Settings{RedactWords: []string{"Nightjar"}, RedactWordsAnyCase: true}, "NIGHTJAR", "{{TERM_"},
+		// a word inside a longer one goes as written only with whole words
+		// on (acmilan_ on Discord), and a whole one is masked still
+		{"words_inside", settings.Settings{RedactWords: []string{"ABC"}}, "XABCD", "{{TERM_"},
+		{"words_whole", settings.Settings{RedactWords: []string{"ABC"}, RedactWordsWhole: true}, "XABCD", ""},
+		{"words_whole_alone", settings.Settings{RedactWords: []string{"ABC"}, RedactWordsWhole: true}, "name='ABC'", "{{TERM_"},
 		{"rules", settings.Settings{Redact: true, RedactRules: []redact.Rule{{Kind: "GW_KEY", Prefix: "acme-"}}}, "acme-Zx9ab12cdEF", "{{GW_KEY_"},
 		{"rules_off", settings.Settings{RedactRules: []redact.Rule{{Kind: "GW_KEY", Prefix: "acme-"}}}, "acme-Zx9ab12cdEF", ""},
 		{"off", settings.Settings{}, key, ""},

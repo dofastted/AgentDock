@@ -114,8 +114,13 @@ func TestOmoDir(t *testing.T) {
 
 // The WSL probe records a native OmO and does not treat a Windows launcher as one.
 func TestWSLProbeFindsOmo(t *testing.T) {
+	for _, want := range []string{`[ -d "$HOME/.omo" ] && echo dir:.omo`, `p=$(wslcmd omo) && echo "bin:omo $p"`} {
+		if !strings.Contains(wslProbeScript(), want) {
+			t.Errorf("probe lacks %q", want)
+		}
+	}
 	d := parseProbe("U", "home:/home/me\nbin:omo /home/me/.bun/bin/omo\n")
-	if d == nil || !wslFound(*d) || d.Bins["omo"] != "/home/me/.bun/bin/omo" {
+	if d == nil || !wslFound(*d) || d.Paths["omo"] != "/home/me/.bun/bin/omo" {
 		t.Fatalf("%+v", d)
 	}
 	win := parseProbe("U", "home:/home/me\nwinbin:omo /mnt/c/omo\nwin:/mnt/c\n")

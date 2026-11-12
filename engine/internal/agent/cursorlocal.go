@@ -26,7 +26,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -35,6 +34,7 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -85,7 +85,7 @@ func cursorLocalRoots() []string {
 		return out
 	}
 	return append(proc.SystemDirs("/opt", "/usr/share", "/usr/lib"), filepath.Join(home, ".local", "share"), filepath.Join(home, "Applications"),
-		filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"), filepath.Join(home, "Downloads"), home)
+		filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"), appdir.Downloads(), filepath.Join(home, "Downloads"), home)
 }
 
 // findCursorLocal is the program of the Cursor Private Inference among the
@@ -193,7 +193,7 @@ func cursorLocalProduct(res string) (cursorProduct, bool) {
 	return p, strings.EqualFold(strings.TrimSpace(p.NameShort), cursorLocalName)
 }
 
-var plistExeRe = regexp.MustCompile(`<key>CFBundleExecutable</key>\s*<string>([^<]+)</string>`)
+var plistExeRe = lazyre.New(`<key>CFBundleExecutable</key>\s*<string>([^<]+)</string>`)
 
 // plistExecutable is CFBundleExecutable of an XML Info.plist, "" when it
 // can't be read.
@@ -316,7 +316,7 @@ func cursorLocal() *Agent {
 				if !cursorLocalWired() {
 					return nil
 				}
-				return cursorLocalEfforts()
+				return pickedEfforts(CursorLocalID)
 			},
 		}},
 		Notice: func() string {
@@ -325,12 +325,13 @@ func cursorLocal() *Agent {
 	}
 }
 
-// cursorLocalEfforts are the levels Cursor Private Inference's effort is
-// picked among: the default, its requests going as it asks, then every
-// level a model its list shows has (low, medium and high for models that
-// reason with levels unknown). None when no model it lists reasons.
-func cursorLocalEfforts() []Option {
-	shown, _ := provider.CatalogFor(CursorLocalID)
+// pickedEfforts are the levels an agent's effort picked in magpie
+// (provider.AgentEffort: Cursor Private Inference, Antigravity, agy) is picked
+// among: the default, its requests going as it asks, then every level a
+// model its list shows has (low, medium and high for models that reason
+// with levels unknown). None when no model it lists reasons.
+func pickedEfforts(agent string) []Option {
+	shown, _ := provider.CatalogFor(agent)
 	has, reasons := map[string]bool{}, false
 	for _, e := range shown {
 		reasons = reasons || e.Reasoning

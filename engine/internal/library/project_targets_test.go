@@ -23,10 +23,10 @@ func TestProjectSkillsMoreAgents(t *testing.T) {
 			t.Errorf("%s: %v", e, err)
 		}
 	}
-	g := read(t, filepath.Join(proj, ".gitignore"))
+	g := excluded(t, proj)
 	for _, e := range []string{"/.qoder/skills/pdf", "/.codebuddy/skills/pdf", "/.commandcode/skills/pdf", "/.agents/skills/pdf"} {
 		if !strings.Contains(g, e+"\n") {
-			t.Errorf(".gitignore lacks %s:\n%s", e, g)
+			t.Errorf("info/exclude lacks %s:\n%s", e, g)
 		}
 	}
 	// Qoder CN shares Qoder's project folder: one of the two taken away
@@ -38,8 +38,8 @@ func TestProjectSkillsMoreAgents(t *testing.T) {
 	gone(t, filepath.Join(proj, ".codebuddy"))
 	ok(t)(RemoveProject(proj, false))
 	gone(t, filepath.Join(proj, ".qoder"))
-	if g := read(t, filepath.Join(proj, ".gitignore")); g != "node_modules/\n" {
-		t.Errorf(".gitignore after: %q", g)
+	if g := excluded(t, proj); g != "" {
+		t.Errorf("info/exclude after: %q", g)
 	}
 }
 
@@ -86,9 +86,9 @@ func TestProjectServersQoderCodeBuddyDroid(t *testing.T) {
 	if d := servers(t, f, "mcpServers"); d["fs"].(map[string]any)["type"] != "stdio" || d["docs"].(map[string]any)["type"] != "http" || d["events"] == nil {
 		t.Errorf("droid: %v", d)
 	}
-	g := read(t, filepath.Join(proj, ".gitignore"))
+	g := excluded(t, proj)
 	if !strings.Contains(g, "/.factory/mcp.json\n") || strings.Contains(g, ".qoder") || strings.Contains(g, "/.mcp.json") {
-		t.Errorf(".gitignore:\n%s", g)
+		t.Errorf("info/exclude:\n%s", g)
 	}
 	if _, err := os.Stat(filepath.Join(h, ".qoder", "settings.json")); err == nil {
 		t.Error("Qoder's user-wide settings were written")
@@ -127,5 +127,39 @@ func TestProjectServersCodeBuddyMcpJSON(t *testing.T) {
 	ok(t)(ProjectServer(proj, "fs", nil))
 	if s := servers(t, filepath.Join(proj, "mcp.json"), "mcpServers"); len(s) != 1 || s["team"] == nil {
 		t.Errorf("after: %v", s)
+	}
+}
+
+// xingchen_c on Discord: DeepSeek Harness couldn't be given a project's
+// skills. It reads <projectRoot>/.agents/skills (and .dsh/skills), the
+// project root being the nearest folder with a .git, so the project's
+// shared folder is where it gets them, listed for it on the page too.
+func TestProjectSkillsDsh(t *testing.T) {
+	h, proj := projectLib(t)
+	write(t, filepath.Join(h, ".dsh/profiles/web/cordis.patch.yml"), "[]\n")
+	os.MkdirAll(filepath.Join(proj, ".git"), 0o755)
+	ok(t)(ProjectSkill(proj, "pdf", []string{"dsh"}))
+	p := filepath.Join(proj, ".agents/skills/pdf")
+	if !isLink(t, p) || !ours(p, "pdf") {
+		t.Errorf("%s isn't a link to the library's", p)
+	}
+	if g := excluded(t, proj); !strings.Contains(g, "/.agents/skills/pdf\n") {
+		t.Errorf("info/exclude lacks /.agents/skills/pdf:\n%s", g)
+	}
+	v, err := Read(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(v.Agents, func(a AgentView) bool { return a.ID == "dsh" })
+	if i < 0 {
+		t.Fatal("no dsh on the page")
+	}
+	if v.Agents[i].ProjectSkills != ".agents/skills" {
+		t.Errorf("dsh's project skills: %q", v.Agents[i].ProjectSkills)
+	}
+	// it reads no project MCP file: its servers are rows in its profiles'
+	// patch lists, which have no project layer
+	if v.Agents[i].ProjectMCP != "" {
+		t.Errorf("dsh's project MCP: %q", v.Agents[i].ProjectMCP)
 	}
 }

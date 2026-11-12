@@ -52,6 +52,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await context.addInitScript(() => { try { if (!sessionStorage.getItem("seeded")) { localStorage.setItem("magpie.maskEmails", "1"); sessionStorage.setItem("seeded", "1"); } } catch {} });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang));
@@ -81,8 +82,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(!(await page.locator("#floating").textContent()).includes(MAIL[1]));
         assert.ok(!(await page.locator("#floating").getAttribute("title")).includes("dev.two"));
 
-        // turned off in Settings › Privacy's switch: back as they were
-        await page.evaluate(() => window.hideAccounts.set(false));
+        // turned off with the Providers page's own switch (under the
+        // editor here): back as they were
+        await page.evaluate(() => document.querySelector("#pvMask").click());
         await page.waitForFunction(() => !document.querySelector(".pii"));
         assert.equal(await page.locator("#floating").textContent(), "Switch to " + MAIL[1]);
         assert.equal(await page.locator("#floating").getAttribute("title"), MAIL[1]);

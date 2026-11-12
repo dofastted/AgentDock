@@ -261,18 +261,17 @@ func spawnChoices(r *http.Request, lead string, codexPath bool) []spawnChoice {
 		// Codex's own, as its backend lists them to it, less the ones
 		// taken out of its list on the Agents page
 		hidden := provider.CodexNativeHidden()
-		// and the ones kept for routing groups (#1602)
-		all, unlisted := provider.CodexNativeUnlisted()
-		if codexOwnOnly() {
-			all, unlisted = false, nil
-		}
+		// and those the codex provider's picks leave out, every one under
+		// Usage only (#2530), as codexModels leaves them out of its list
+		keep, narrowed := provider.CodexNativePicked()
 		type own struct {
 			spawnChoice
 			at int
 		}
 		var owns []own
-		for slug, e := range codexcat.CacheEntries() {
-			if v, _ := e["visibility"].(string); v != "list" || hidden[slug] || all || unlisted[slug] {
+		cached := codexcat.CacheEntries()
+		for slug, e := range cached {
+			if v, _ := e["visibility"].(string); v != "list" || hidden[slug] || narrowed && !keep[slug] {
 				continue
 			}
 			name, _ := e["display_name"].(string)
@@ -286,13 +285,19 @@ func spawnChoices(r *http.Request, lead string, codexPath bool) []spawnChoice {
 		if sealed || codexOwnOnly() {
 			return out
 		}
-		for _, m := range provider.CodexListed() {
+		// and a ChatGPT account's own the sign-in's list lacks, by
+		// magpie's id, as codexMerged lists them
+		backend := make(map[string]bool, len(cached))
+		for slug := range cached {
+			backend[slug] = true
+		}
+		for _, m := range provider.CodexListedBeside(backend) {
 			out = append(out, spawnChoice{m.ID, m.Name})
 		}
 		return out
 	}
 	shown, _ := provider.CatalogFor("codex")
-	for _, m := range provider.CodexCatalog(keyAllowed(r, shown)) {
+	for _, m := range provider.CodexCatalog(keyListed(r, shown, provider.ModelOff("codex"))) {
 		if sealed && !provider.CodexAccountModel(m.ID) {
 			continue
 		}

@@ -55,13 +55,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width, height: 760 } });
       page.setDefaultTimeout(8000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], seen = { stats: 0, overview: {} }, held = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, seen, held));
       await page.clock.install();
       await page.addInitScript(() => { localStorage.setItem("magpie.usageTab", "sessions"); localStorage.setItem("magpie.sessRange", "today"); });
       await page.goto("http://magpie.test/?view=usage");
-      await page.locator('#sessAgent [data-agent="codex"]').click();
+      await page.locator("#sessAgent").click();
+      await page.locator('.sess-menu .pm-item[title="codex"]').click();
       for (let i = 0; i < 100 && !held.length; i++) await new Promise((r) => setTimeout(r, 20));
       assert.equal(held.length, 1, "the filter asked for its overview");
       const stats = seen.stats;

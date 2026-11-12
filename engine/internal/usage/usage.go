@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -43,6 +44,9 @@ type Record struct {
 	ProviderAccount string `json:"providerAccount,omitempty"`
 	CallerKeyID     string `json:"callerKeyId,omitempty"`
 	CallerKeyName   string `json:"callerKeyName,omitempty"`
+	// CallerIssuerID is the key CallerKeyID was issued under (an issued,
+	// short-lived key: access.IssueKey), whose limits count this call too.
+	CallerIssuerID string `json:"callerIssuerId,omitempty"`
 	// SessionProvider is the provider ID recorded by the agent. SessionAccount
 	// identifies the session's creator, not the account used for an API request.
 	// Neither field establishes an upstream route from today's configuration.
@@ -110,8 +114,13 @@ type Record struct {
 	// native Codex call established whether a gateway row compacted.
 	Compaction *bool `json:"compaction,omitempty"`
 	// FirstReasoning is the start of paced visible reasoning, absent for hidden reasoning.
-	FirstReasoning  int64 `json:"first_reasoning_ms,omitempty"`
-	ReasoningHidden bool  `json:"reasoning_hidden,omitempty"`
+	FirstReasoning int64 `json:"first_reasoning_ms,omitempty"`
+	// ReasoningHidden: the reply reasoned and its stream doesn't tell how
+	// much — sealed or summarised, or streamed with no reasoning count in
+	// its usage (#4545: Anthropic's usage never has one), when Reasoning is
+	// 0 for unknown, not for none. A reply of no text then tells no speed
+	// (Decode).
+	ReasoningHidden bool `json:"reasoning_hidden,omitempty"`
 	// Sent: ms from the request to its answering try going out to the
 	// vendor, its body written, as TTFT is counted: magpie's own time and
 	// the tries that failed first are before it, and TTFT-Sent is how
@@ -126,7 +135,12 @@ type Record struct {
 	// sending it the body. #1532: a vendor that held a try ~100 s and
 	// said 503 read as 104 s "In magpie". 0 in a record written before
 	// they were, where Sent is all that is known.
-	Own     int64 `json:"own_ms,omitempty"`
+	Own int64 `json:"own_ms,omitempty"`
+	// Masking: the ms of Own that went on masking the request (Settings
+	// → Privacy: the rules, and the local model with its wait for a
+	// turn), all of it where Own is unknown; 0 where nothing was masked,
+	// or in a record from before it was kept.
+	Masking int64 `json:"masking_ms,omitempty"`
 	Retried int64 `json:"retried_ms,omitempty"`
 	Queued  int64 `json:"queued_ms,omitempty"`
 	// Flow: the ms the reply's content took to come, from where its speed
@@ -180,6 +194,40 @@ type Record struct {
 	// index tells HandedOn from such a record's route (handedOn).
 	Tries    int  `json:"tries,omitempty"`
 	HandedOn bool `json:"handed_on,omitempty"`
+	// UpBytes is how many bytes of this call's request actually went up to
+	// the vendor on the wire, its tries summed: the plain body where it
+	// goes as read, less where it went compressed (zstd to a ChatGPT
+	// backend, provider.CodexCompressed). A try gone over a connection
+	// that then failed still counts, as a connection's own counter would,
+	// and so does a single ask's second request (RetryOneAuth …). A
+	// record from before it was kept has none (#4456).
+	UpBytes int `json:"up_bytes,omitempty"`
+	// PlainBytes is the request's last try as it went into that ask,
+	// before compression, what UpBytes would have been without one: beside
+	// it, a compressed turn's discount and a retried request's re-sends
+	// both read off the row. None when no try went out.
+	PlainBytes int `json:"plain_bytes,omitempty"`
+	// DownBytes is how many bytes of the vendor's replies to this call's
+	// tries magpie read, tries summed as UpBytes is: a reply's body as it
+	// came, after the HTTP client undid a gzip the vendor sent it in, so
+	// more than the wire's for a gzipped reply. A record from before it was
+	// kept has none.
+	DownBytes int `json:"down_bytes,omitempty"`
+	// ImageFilesSaved is how many fewer bytes went up because DeepSeek's
+	// image files named the request's inline images by file id (#5407):
+	// the inline base64 its tries left out, less the images this request
+	// uploaded for it. Below 0 when an upload cost more than it saved this
+	// time. None where no image went by file.
+	ImageFilesSaved int `json:"image_files_saved,omitempty"`
+	// ImageFiles is how many of the request's inline images went by file
+	// instead, the most of any one try (a retry sends the same ones again):
+	// what ImageFilesSaved was saved on (matrix0487 on Discord). None in a
+	// row from before it was kept.
+	ImageFiles int `json:"image_files,omitempty"`
+	// Socket says the request went over the Responses WebSocket, its
+	// last try (provider.Socket, matrix0487 on Discord): UpBytes is then
+	// what the socket was sent, a delta on a kept socket.
+	Socket bool `json:"ws,omitempty"`
 	// Kind is what the agent made the call for when it isn't a turn of
 	// the conversation: a Codex subagent's (review, compact, guardian…)
 	Kind string `json:"kind,omitempty"`
@@ -212,6 +260,13 @@ type Record struct {
 	// has the request's attempts already, so it can pass the row over.
 	// Never persisted.
 	Watched bool `json:"-"`
+	// ClientIP is the address the request came to the gateway from, as the
+	// connection gave it (the gateway trusts no forwarding header, so behind
+	// a proxy it is the proxy's): a loopback address for this computer. It
+	// stays on this computer: sync (SharedCalls) and the gateway's
+	// /v1/magpie/usage/requests leave it out. "" for a row kept before it
+	// was recorded, a call a client reported, or magpie's own.
+	ClientIP string `json:"client_ip,omitempty"`
 	// Local is true only for verified loopback gateway requests. It is used
 	// for local-session deduplication, never persisted or exported.
 	Local bool `json:"-"`
@@ -220,6 +275,30 @@ type Record struct {
 	// export with bodies on, #538) and never written to usage.jsonl.
 	BodyIn  string `json:"-"`
 	BodyOut string `json:"-"`
+	// pricedAs is the provider the call is priced as when it is shown
+	// under another: a deleted provider's merged into one on the Usage
+	// page, which costs what it did (provider.Renames.Both). Never kept.
+	pricedAs string
+}
+
+// renameBy has r's provider the one its calls are shown under now
+// (Renames.Of), and keeps the one it is priced as beside it when they
+// differ.
+func (r *Record) renameBy(rn provider.Renames) {
+	shown, own := rn.Both(r.Provider, r.Time)
+	r.Provider, r.pricedAs = shown, ""
+	if own != shown {
+		r.pricedAs = own
+	}
+}
+
+// priceID is the provider r is priced as: its own, not one it is shown
+// under after a merge (renameBy).
+func (r Record) priceID() string {
+	if r.pricedAs != "" {
+		return r.pricedAs
+	}
+	return r.Provider
 }
 
 // Path is the log file: ~/.config/magpie/usage.jsonl (XDG-aware).
@@ -240,6 +319,8 @@ func Append(r Record) {
 	if !r.IsProbe() { // magpie's own test is no call to export
 		observeLedger(r)
 	}
+	defer codexUsedNew(r)
+	defer spentNew(r)
 	b, err := json.Marshal(r)
 	if err != nil {
 		return
@@ -387,6 +468,34 @@ func IsAgent(id string) bool {
 	return slices.ContainsFunc(knownAgents(), func(k Known) bool { return k.ID == id || slices.Contains(k.Names, id) })
 }
 
+// libraries are the product names of HTTP libraries, runtimes and API
+// SDKs as AgentOf names a client by its User-Agent, lower-cased. A
+// request that says only one of these is from a script, or from a tool
+// built on the library, and says nothing of which: it is no agent of its
+// own (theforeveriris on X: Bun, curl and python-httpx each had an
+// agent's scorecard on the Context tab).
+var libraries = map[string]bool{
+	// command lines and API tools
+	"curl": true, "wget": true, "httpie": true, "postmanruntime": true, "insomnia": true,
+	// JavaScript
+	"bun": true, "node": true, "deno": true, "node-fetch": true, "undici": true, "axios": true, "got": true, "ky": true,
+	// Python
+	"python": true, "python-httpx": true, "httpx": true, "python-requests": true, "requests": true,
+	"python-urllib": true, "urllib3": true, "aiohttp": true,
+	// Go, JVM, Ruby, PHP, Dart, Rust
+	"go-http-client": true, "go-resty": true, "resty": true, "okhttp": true, "java": true, "java-http-client": true,
+	"apache-httpclient": true, "reactor-netty": true, "ruby": true, "faraday": true, "rest-client": true,
+	"guzzlehttp": true, "dart": true, "reqwest": true, "libcurl": true,
+	// the vendors' SDKs, which an app or a script calls a model with
+	"openai": true, "asyncopenai": true, "anthropic": true, "asyncanthropic": true, "ai-sdk": true, "google-genai-sdk": true,
+}
+
+// IsLibrary says whether a client, by the name AgentOf gives it (a
+// record's Agent, old records' too), is an HTTP library, a runtime or an
+// API SDK rather than an agent: curl, Bun, python-httpx, Go-http-client,
+// OpenAI/Python.
+func IsLibrary(id string) bool { return libraries[strings.ToLower(strings.TrimSpace(id))] }
+
 // AgentOf names the agent behind a client User-Agent. Known agents map to
 // their magpie id; anything else keeps its product name.
 func AgentOf(ua string) string {
@@ -428,23 +537,27 @@ const (
 var Periods = []Period{Today, Week, Month, All}
 
 // CostAt is what the call costs at a price: at the tier its input reaches,
-// its 1-hour cache writes at theirs. A reported call that said what it
-// cost costs that, at any price.
+// its 1-hour cache writes at theirs, and at the hour it was made (an
+// off-peak price doubles at peak, Price.In). A reported call that said
+// what it cost costs that, at any price.
 func (r Record) CostAt(p catalog.Price) float64 {
 	if r.OwnCost != nil {
 		return *r.OwnCost // a reported call's own cost (#1874)
 	}
-	return p.CostSplit(r.Input, r.Output, r.CacheRead, r.CacheWrite, r.CacheWrite1h)
+	return p.In(r.Time).CostSplit(r.Input, r.Output, r.CacheRead, r.CacheWrite, r.CacheWrite1h)
 }
 
 // Totals is a sum of calls.
 type Totals struct {
 	// Calls are the requests, Errors those the agent got an error for, and
 	// Retried those answered after a try that failed first (Record.Tries):
-	// a try handed on is in neither count, but its tokens are in the sums
-	Calls   int `json:"calls"`
-	Errors  int `json:"errors"`
-	Retried int `json:"retried,omitempty"`
+	// a try handed on is in neither count, but its tokens are in the sums.
+	// Canceled are those the agent canceled before they were answered
+	// (Record.Canceled): neither an error nor answered
+	Calls    int `json:"calls"`
+	Errors   int `json:"errors"`
+	Retried  int `json:"retried,omitempty"`
+	Canceled int `json:"canceled,omitempty"`
 	// Loops are those of Errors magpie ended for looping (LoopErrType):
 	// a model's count of them says how often it got stuck (#1858)
 	Loops      int `json:"loops,omitempty"`
@@ -488,6 +601,19 @@ type Totals struct {
 	FloorOut int   `json:"floor_out,omitempty"`
 	FloorMs  int64 `json:"floor_ms,omitempty"`
 	FloorN   int   `json:"floor_n,omitempty"`
+	// UpBytes, DownBytes and ImageFilesSaved are the rows' own summed
+	// (Record.UpBytes …): what went up to the vendors and came back, of
+	// the rows that kept it; none when no row did
+	UpBytes         int64 `json:"up_bytes,omitempty"`
+	DownBytes       int64 `json:"down_bytes,omitempty"`
+	ImageFilesSaved int64 `json:"image_files_saved,omitempty"`
+}
+
+// addBytes adds r's bytes on the wire (Totals.UpBytes …).
+func (t *Totals) addBytes(r *Record) {
+	t.UpBytes += int64(r.UpBytes)
+	t.DownBytes += int64(r.DownBytes)
+	t.ImageFilesSaved += int64(r.ImageFilesSaved)
 }
 
 // Tokens is what went in and out, excluding cache traffic.
@@ -583,6 +709,16 @@ func DecodeWindow(out int, ms, ttft int64) int64 {
 //     reasoning hidden from the stream (OpenAI's, Claude's omitted) comes
 //     before the first content and leaves this time short; one that
 //     streams comes at the pace its answer does.
+//   - a window under HeldWindowMs after a wait HeldShare times longer: the
+//     reply came whole in a moment after a long silence, and what it was
+//     written over is not seen (pluviophile714 on Discord: gpt-6.1-sol,
+//     392 tokens 0.25 s after an 8.2 s first token, read 1,539 tok/s where
+//     the vendor writes ~70). Its content can come spread over that moment
+//     (a relay replaying a held reply, OpenAI's answer let go after its
+//     hidden reasoning), so flow doesn't tell it. A stream as it is written
+//     takes a second or more to write a few hundred tokens; one that takes
+//     under a second is too short a sample to tell a speed by against such
+//     a wait, so a short answer after a long think tells none either.
 func DecodeOf(out, reasoning int, ms, ttft, firstText, flow int64, firstReasoning ...int64) (tokens int, w int64) {
 	start := ttft
 	if reasoning > 0 {
@@ -603,19 +739,24 @@ func DecodeOf(out, reasoning int, ms, ttft, firstText, flow int64, firstReasonin
 	if flow > 0 && flow*HeldShare < w {
 		return 0, 0
 	}
+	if w < HeldWindowMs && start > HeldShare*w {
+		return 0, 0
+	}
 	if reasoning > 0 && firstText > 0 && int64(out)*(firstText-ttft) > ThinkPace*int64(reasoning)*w {
 		return 0, 0
 	}
 	return out, w
 }
 
-// HeldShare and ThinkPace tell a reply held back and let go in a burst
-// (DecodeOf): its content came in under a quarter of its window, or its
-// answer at over 20 times the pace its reasoning came. routing/client.js's
-// decodeOf and app.js's ledDecode have the same.
+// HeldShare, ThinkPace and HeldWindowMs tell a reply held back and let go
+// in a burst (DecodeOf): its content came in under a quarter of its window,
+// its answer at over 20 times the pace its reasoning came, or its window
+// was under a second and under a quarter of the wait before it.
+// routing/client.js's decodeOf and usage/page.js's ledDecode have the same.
 const (
-	HeldShare = 4
-	ThinkPace = 20
+	HeldShare    = 4
+	ThinkPace    = 20
+	HeldWindowMs = 1000
 )
 
 // Decode is the record's DecodeOf.
@@ -703,6 +844,26 @@ func (t Totals) HitRate() (float64, bool) {
 	return float64(t.CacheRead) / float64(p), true
 }
 
+// HitPct is a hit rate (0 to 1) as a percent, whole unless rounding would
+// say 100% or 0% of a prompt not all or none cached, then to one or two
+// decimals (ZhangXiaof48473 on X); the GUI's hitPct says it the same way.
+func HitPct(h float64) string {
+	s, v := "", 0.0
+	for d := 0; d <= 2; d++ {
+		s = strconv.FormatFloat(100*h, 'f', d, 64)
+		if v, _ = strconv.ParseFloat(s, 64); h <= 0 || h >= 1 || (v > 0 && v < 100) {
+			break
+		}
+	}
+	switch {
+	case h < 1 && v >= 100:
+		s = "99.99"
+	case h > 0 && v <= 0:
+		s = "0.01"
+	}
+	return s + "%"
+}
+
 func (t *Totals) add(r Record, price *catalog.Price) { t.addFrom(Row{Record: r}, price) }
 
 // addFrom is add for a ledger row, whose speed is told as Row.Decode tells
@@ -717,7 +878,8 @@ func (t *Totals) addFrom(row Row, price *catalog.Price) {
 	t.CacheWrite1h += r.CacheWrite1h
 	t.countCache(r)
 	t.Reasoning += r.Reasoning
-	if r.TTFT > 0 && !r.Failed() {
+	t.addBytes(&r)
+	if r.TTFT > 0 && r.Answered() {
 		t.Timed++
 		t.TTFT += r.TTFT
 		if n, w := row.Decode(); w > 0 {
@@ -741,8 +903,9 @@ func (t *Totals) addFrom(row Row, price *catalog.Price) {
 // their errors.
 const LoopErrType = "reply_loop"
 
-// count counts r as the request it ends: failed, answered on a retry, or
-// answered; a try handed on to another is no request of its own.
+// count counts r as the request it ends: failed, canceled by its agent,
+// answered on a retry, or answered; a try handed on to another is no
+// request of its own.
 func (t *Totals) count(r Record) {
 	// a try handed on is billed its credits too, though it is no request
 	if r.Credits != nil {
@@ -754,6 +917,8 @@ func (t *Totals) count(r Record) {
 	}
 	t.Calls++
 	switch {
+	case r.Canceled():
+		t.Canceled++
 	case r.Failed():
 		t.Errors++
 		if r.ErrType == LoopErrType {
@@ -769,8 +934,8 @@ func (t *Totals) count(r Record) {
 func (r Record) LostRequest() bool { return r.Failed() && !r.HandedOn }
 
 // RetriedRequest is whether r ends a request that was answered after a try
-// that failed first.
-func (r Record) RetriedRequest() bool { return !r.HandedOn && !r.Failed() && r.Tries > 1 }
+// that failed first (not one its agent canceled after a failed try).
+func (r Record) RetriedRequest() bool { return !r.HandedOn && r.Answered() && r.Tries > 1 }
 
 // Group is the share of one agent or model.
 type Group struct {
@@ -910,184 +1075,13 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 }
 
 func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[string]bool, read func(func(Record))) Summary {
-	renamed := provider.UsageRenames()
-	// the names models' usage is counted under (SlouchyQuill507): a model's
-	// row sums its ids, each call priced by its own id first
-	alias := provider.UsageAlias()
-	normalizedKeys := map[string]bool{}
-	for id := range historicalKeys {
-		for _, next := range renamed.Each(id) {
-			normalizedKeys[next] = true
-		}
-	}
-	historicalKeys = normalizedKeys
-	// a picked range's own days alone: its chart can start on the Monday
-	// before its first, and it ends before now (#1492)
-	from, until := p.Since(now), p.Until(now)
-	visit := func(fn func(Record)) {
-		read(func(r Record) {
-			if r.Time.Before(from) || after(until, r.Time) {
-				return
-			}
-			r.Provider = renamed.Of(r.Provider, r.Time)
-			fn(r)
-		})
-	}
-	s := Summary{Period: p, Bucket: "day", Agents: []Group{}, Models: []Group{}, ProviderKeys: []Group{}, Accounts: []Group{}, CallerKeys: []Group{}, Sessions: []Group{}, Series: []Point{}}
-	s.Since, s.Bucket, s.Series = timeline(p, now, first)
-	s.Period = p.shown()
-
-	priceOf := Pricer()
-	// the places each provider id went in the period, and goes now
-	hosts := map[string]map[string]bool{}
-	// the providers whose calls are told apart by account: those an
-	// account answered for in the period, and those signed in now
-	accountProviders := map[string]bool{}
-	visit(func(r Record) {
-		if r.IsRejected() {
-			return
-		}
-		if r.Account() != "" && !r.Time.Before(s.Since) {
-			accountProviders[r.Provider] = true
-		}
-		if r.Host != "" && !r.Time.Before(s.Since) {
-			if hosts[r.Provider] == nil {
-				hosts[r.Provider] = map[string]bool{}
-			}
-			hosts[r.Provider][who(r.Host)] = true
-		}
-	})
-	goesNow := map[string]string{}
-	keyProviders := map[string]bool{}
-	for _, p := range provider.All() {
-		goesNow[p.ID] = who(p.Where())
-		keyProviders[p.ID] = p.Account == nil && p.Key != ""
-		if p.Account != nil {
-			accountProviders[p.ID] = true
-		}
-	}
-	for id := range historicalKeys {
-		keyProviders[id] = true
-	}
-	agents := map[string]*Group{}
-	models := map[string]*Group{}
-	keys := map[string]*Group{}
-	accounts := map[string]*Group{}
-	callerKeys := map[string]*Group{}
-	sessions := map[string]*Group{}
-	visit(func(r Record) {
-		if r.IsRejected() {
-			return
-		}
-		t := r.Time.In(now.Location())
-		if t.Before(s.Since) {
-			return
-		}
-		pr := priceOf(r)
-		s.Totals.add(r, pr)
-		i := bucketIndex(s.Bucket, s.Since, t)
-		if i >= 0 && i < len(s.Series) {
-			s.Series[i].add(r, pr)
-		}
-		id := ReportedAs(r.Agent) // one kept before magpie knew the agent by name
-		a := agents[id]
-		if a == nil {
-			a = &Group{ID: id}
-			agents[id] = a
-		}
-		a.add(r, pr)
-		model := r.Model
-		if alias != nil {
-			model = alias(model)
-		}
-		k, host := r.Provider+"/"+model, ""
-		if w := who(r.Host); w != "" && (len(hosts[r.Provider]) > 1 || w != goesNow[r.Provider]) {
-			k, host = k+" @ "+w, w
-		}
-		m := models[k]
-		if m == nil {
-			m = &Group{ID: k, Provider: r.Provider, Model: model, Host: host}
-			models[k] = m
-		}
-		m.add(r, pr)
-		m.addOwn(r, pr)
-		if r.CallerKeyID != "" {
-			g := callerKeys[r.CallerKeyID]
-			if g == nil {
-				g = &Group{ID: r.CallerKeyID, CallerKeyID: r.CallerKeyID}
-				callerKeys[r.CallerKeyID] = g
-			}
-			g.CallerKeyName = r.CallerKeyName
-			g.add(r, pr)
-		}
-		if keyProviders[r.Provider] {
-			id := r.Provider + "#" + r.ProviderKeyID
-			g := keys[id]
-			if g == nil {
-				g = &Group{ID: id, Provider: r.Provider, ProviderKeyID: r.ProviderKeyID}
-				keys[id] = g
-			}
-			g.ProviderKeyName = r.ProviderKeyName
-			g.add(r, pr)
-			g.addOwn(r, pr)
-		}
-		if accountProviders[r.Provider] {
-			who := r.Account()
-			id := r.Provider + "@" + who
-			g := accounts[id]
-			if g == nil {
-				g = &Group{ID: id, Provider: r.Provider, Account: who}
-				accounts[id] = g
-			}
-			g.add(r, pr)
-			g.addOwn(r, pr)
-		}
-		if r.Session != "" {
-			g := sessions[id+"|"+r.Session]
-			if g == nil {
-				g = &Group{ID: r.Session, Agent: id}
-				sessions[id+"|"+r.Session] = g
-			}
-			g.add(r, pr)
-		}
-	})
-	for _, g := range agents {
-		s.Agents = append(s.Agents, *g)
-	}
-	for _, g := range models {
-		s.Models = append(s.Models, *g)
-	}
-	byTokens := func(gs []Group) {
-		sort.SliceStable(gs, func(i, j int) bool {
-			if a, b := gs[i].Tokens(), gs[j].Tokens(); a != b {
-				return a > b
-			}
-			if gs[i].Calls != gs[j].Calls {
-				return gs[i].Calls > gs[j].Calls
-			}
-			return gs[i].ID < gs[j].ID
-		})
-	}
-	byTokens(s.Agents)
-	byTokens(s.Models)
-	for _, g := range keys {
-		s.ProviderKeys = append(s.ProviderKeys, *g)
-	}
-	byTokens(s.ProviderKeys)
-	for _, g := range accounts {
-		s.Accounts = append(s.Accounts, *g)
-	}
-	byTokens(s.Accounts)
-	for _, g := range callerKeys {
-		s.CallerKeys = append(s.CallerKeys, *g)
-	}
-	byTokens(s.CallerKeys)
-	for _, g := range sessions {
-		s.Sessions = append(s.Sessions, *g)
-	}
-	byTokens(s.Sessions)
-	s.SessionCount = len(s.Sessions)
-	return s
+	u := newSummaryRun(p, now, first, historicalKeys)
+	hosts := newSummaryHosts()
+	u.read(read, func(r Record) { hosts.note(r, u.since) })
+	keyed := u.keying(hosts)
+	counts := u.newCounts()
+	u.read(read, func(r Record) { counts.add(u, &keyed, r) })
+	return counts.summary(u)
 }
 
 // ---- last seen --------------------------------------------------------------
@@ -1117,22 +1111,52 @@ func Vias(since time.Time) ViaIndex {
 	return cachedVias(since)
 }
 
+// LogVersion is a number for the log as it stands, which changes when a
+// call is written to it, and whether there is one: a synthetic log
+// (LogCalls), or one not read to its end, has none; no log yet is one. The Sessions page
+// keys an unchanged list on it.
+func LogVersion() (uint64, bool) {
+	if LogCalls != nil {
+		return 0, false
+	}
+	s := readLogSnapshot()
+	return s.version, s.info == nil || s.complete()
+}
+
 // A provider renamed since is listed by the id it has now (renames): the
 // Sessions tab named a renamed one by its old id (cybercaius).
 func buildVias(snapshot *logSnapshot, since time.Time, renames provider.Renames) *viaLists {
-	out := map[string][]Via{}
-	first := map[string]time.Time{}
-	keep := keptStrings{}
-	snapshot.visit(since, func(r Record) {
+	counted := map[string]viaAcc{}
+	countVias(snapshot.blocks, since, renames, nil, counted, keptStrings{})
+	return listedVias(&viaLists{m: map[string][]Via{}, first: map[string]time.Time{}}, counted)
+}
+
+// viaAcc is one session's lists as counted, in the order its calls first
+// named each, and when its first call was.
+type viaAcc struct {
+	vs    []Via
+	first time.Time
+}
+
+// countVias counts blocks' calls into own, a session's counts begun from
+// a copy of base's: base is never written.
+func countVias(blocks []*rowChunk, since time.Time, renames provider.Renames, base, own map[string]viaAcc, keep keptStrings) {
+	visitBlocks(blocks, since, func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Session == "" || r.Model == "" {
 			return
 		}
 		r.Provider, r.Model, r.Effort = keep.of(renames.Of(r.Provider, r.Time)), keep.of(r.Model), keep.of(r.Effort)
 		k := ReportedAs(r.Agent) + "|" + r.Session
-		vs := out[k]
-		if t, seen := first[k]; !seen || r.Time.Before(t) {
-			first[k] = r.Time
+		a, seen := own[k]
+		if !seen {
+			if b, ok := base[k]; ok {
+				a, seen = viaAcc{vs: slices.Clone(b.vs), first: b.first}, true
+			}
 		}
+		if !seen || r.Time.Before(a.first) {
+			a.first = r.Time
+		}
+		vs := a.vs
 		i := slices.IndexFunc(vs, func(v Via) bool { return v.Provider == r.Provider && v.Model == r.Model && v.Effort == r.Effort })
 		if i < 0 {
 			vs, i = append(vs, Via{Provider: r.Provider, Model: r.Model, Effort: r.Effort}), len(vs)
@@ -1146,12 +1170,24 @@ func buildVias(snapshot *logSnapshot, since time.Time, renames provider.Renames)
 		if r.Time.After(vs[i].Last) {
 			vs[i].Last = r.Time
 		}
-		out[k] = vs
+		a.vs = vs
+		own[k] = a
 	})
-	for _, vs := range out {
-		sort.SliceStable(vs, func(i, j int) bool { return vs[i].Calls > vs[j].Calls })
+}
+
+// listedVias is lists with each session counted in counted listed in
+// place of its own, the most calls first; lists itself is not written.
+func listedVias(lists *viaLists, counted map[string]viaAcc) *viaLists {
+	if len(counted) == 0 {
+		return lists
 	}
-	return &viaLists{m: out, first: first}
+	out := &viaLists{m: maps.Clone(lists.m), first: maps.Clone(lists.first)}
+	for k, a := range counted {
+		vs := slices.Clone(a.vs)
+		sort.SliceStable(vs, func(i, j int) bool { return vs[i].Calls > vs[j].Calls })
+		out.m[k], out.first[k] = vs, a.first
+	}
+	return out
 }
 
 // Saw notes a request from an agent arriving now.

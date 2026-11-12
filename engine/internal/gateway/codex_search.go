@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,10 @@ type alphaSearchRequest struct {
 		SearchQuery []alphaQuery `json:"search_query"`
 		ImageQuery  []alphaQuery `json:"image_query"`
 	} `json:"commands"`
+	Settings struct {
+		// Codex's web_search mode: false "cached", true "live"
+		ExternalWebAccess json.RawMessage `json:"external_web_access"`
+	} `json:"settings"`
 }
 
 type alphaQuery struct {
@@ -123,12 +128,23 @@ func chatGPTSearchers(r *http.Request, model string) ([]provider.Provider, strin
 // with why returned.
 func (s *Server) alphaSearchOn(w http.ResponseWriter, r *http.Request, body []byte, model string, ons []provider.Provider) (bool, string) {
 	start := time.Now()
+	// as written only when every account it may be asked on is set to go
+	// unmasked (provider.SkipsRedaction, isee1_1 on Discord); magpie's own
+	// search in its place masks its query itself (maskedQuery)
+	if len(ons) > 0 && !slices.ContainsFunc(ons, func(p provider.Provider) bool { return !p.SkipsRedaction() }) {
+		return s.alphaSearchAsked(w, r, body, model, ons, start)
+	}
 	w, body, unmask, hits, err := redactedHits(r.Context(), w, body)
 	defer unmask()
 	if err != nil {
 		return false, err.Error()
 	}
-	noteMasked(r, "search", hits, string(body), 0, "openai", model)
+	noteMasked(r, "search", hits, sentOf(hits, body), 0, "openai", model)
+	return s.alphaSearchAsked(w, r, body, model, ons, start)
+}
+
+// alphaSearchAsked is alphaSearchOn once body is as it goes.
+func (s *Server) alphaSearchAsked(w http.ResponseWriter, r *http.Request, body []byte, model string, ons []provider.Provider, start time.Time) (bool, string) {
 	var errs []string
 	for _, on := range ons {
 		who := "OpenAI (" + on.Account.User + "): "
@@ -164,7 +180,7 @@ func (s *Server) alphaSearchOn(w http.ResponseWriter, r *http.Request, body []by
 		}
 		noteSignIn(ctx, on.Account, req, res)
 		c := Call{Time: start, From: provider.Responses, To: provider.Responses, Model: model, Provider: on.ID,
-			Agent: agentOf(r), Kind: "web_search", Status: res.StatusCode}
+			Agent: callerOf(r).agent, Via: callerOf(r).via, Kind: "web_search", Status: res.StatusCode}
 		if res.StatusCode < 200 || res.StatusCode > 299 {
 			msg, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
 			res.Body.Close()
@@ -210,7 +226,7 @@ func (s *Server) alphaSearchHere(w http.ResponseWriter, r *http.Request, q alpha
 		writeJSON(w, http.StatusOK, alphaSearchReply{Output: note + "magpie can only search the web for " + q.Model + ": give web.run a search_query. Opening, clicking or finding in a page goes to the ChatGPT backend, for a ChatGPT account's model in magpie."})
 		return
 	}
-	ctx := context.WithValue(r.Context(), searchForKey{}, &CallFor{Agent: callerOf(r).agent, Model: q.Model})
+	ctx := withWebAccess(context.WithValue(r.Context(), searchForKey{}, &CallFor{Agent: callerOf(r).agent, Model: q.Model}), q.Settings.ExternalWebAccess)
 	var said []string
 	for _, query := range queries {
 		found, _, err := s.webSearch(ctx, query)

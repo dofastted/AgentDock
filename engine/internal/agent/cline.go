@@ -61,7 +61,7 @@ func cline(home string) *Agent { return clineIn(here(home)) }
 func clineIn(at place) *Agent {
 	dir := at.getenv("CLINE_DIR")
 	if dir == "" {
-		dir = filepath.Join(at.home, ".cline")
+		dir = at.join(".cline")
 	}
 	data := at.getenv("CLINE_DATA_DIR")
 	if data == "" {
@@ -161,8 +161,14 @@ func clineIn(at place) *Agent {
 		}
 		return "cline"
 	}
+	// the setting its CLI reads for every telemetry event; its env path wins
+	settingsPath := at.getenv("CLINE_GLOBAL_SETTINGS_PATH")
+	if settingsPath == "" {
+		settingsPath = filepath.Join(data, "settings", "global-settings.json")
+	}
 	return &Agent{
-		ID: "cline", Name: "Cline", Icon: "cline", Aliases: []string{"cline-cli"}, Spelled: prefixed,
+		Telemetry: clineTelemetry(at, settingsPath),
+		ID:        "cline", Name: "Cline", Icon: "cline", Aliases: []string{"cline-cli"}, Spelled: prefixed,
 		UA:  []string{"cline"},
 		Bin: "cline", Dir: dir, Path: path,
 		Sync: func() error {
@@ -254,7 +260,7 @@ func clineIn(at place) *Agent {
 					edit.KV{Path: "providers." + p + ".settings.model", Value: v})
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur["model"]), viaMagpie("cline", magpieID+"/")...)
+				return withVia(ownOptions("", cur["model"]), "cline", magpieID+"/")
 			},
 		}, {
 			// the reasoning of the provider in use, what Cline's --thinking
@@ -375,7 +381,7 @@ func clineModels(model string) map[string]any { return clineModelsAt(model, gate
 // clineModelsAt is clineModels for a Cline reaching the gateway's /v1 at v1.
 func clineModelsAt(model, v1 string) map[string]any {
 	ms := map[string]any{}
-	for _, m := range magpieModels("cline") {
+	for _, m := range sharedModels("cline") {
 		caps := []string{"streaming", "tools"}
 		if m.Images {
 			caps = append(caps, "images")

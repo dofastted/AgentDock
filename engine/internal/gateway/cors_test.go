@@ -238,13 +238,17 @@ func TestForeignPagesRefused(t *testing.T) {
 		{"POST", "/v1beta/models/plan/m1:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},
 		{"POST", "/v1/embeddings", `{"model":"plan/m1","input":"hi"}`},
 		{"POST", "/v1/rerank", `{"model":"plan/m1","query":"hi","documents":["a"]}`},
+		{"POST", "/v1/decisions", `{"model":"plan/m1","input":"hi","questions":[{"type":"predicate","instructions":"is it?"}]}`},
 		{"POST", "/v1/audio/transcriptions", "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nplan/m1\r\n--b--\r\n"},
+		{"POST", "/v1/audio/speech", `{"model":"plan/m1","input":"hi","voice":"coral"}`},
 		{"POST", "/v1/images/generations", `{"model":"plan/m1","prompt":"hi"}`},
 		{"POST", "/v1/videos", `{"model":"plan/m1","prompt":"hi"}`},
 		{"POST", CodexPath + "/responses", `{"model":"plan/m1","input":"hi"}`},
 		{"POST", "/mcp/notes", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`},
 		{"POST", "/_magpie/claude-mcp/tok", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`},
 		{"POST", provider.RemoteRefreshPath, ""},
+		{"POST", provider.RemoteCodexResetPath + "?user=me@example.com", ""},
+		{"POST", provider.RemoteUpdatePath + "?version=v0.1.9999", ""},
 		{"GET", "/v1/magpie/quotas", ""},
 		{"GET", "/v1/models", ""},
 		{"OPTIONS", "/v1/chat/completions", ""},
@@ -353,6 +357,7 @@ func TestOpaqueOriginNeedsAKey(t *testing.T) {
 		{"POST", "/v1/messages"},
 		{"POST", "/v1/images/generations"},
 		{"POST", "/v1/embeddings"},
+		{"POST", "/v1/decisions"},
 		{"GET", "/v1/models"},
 	} {
 		if w := do(p.method, p.path, "null", ""); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "gateway key") || w.Header().Get("Access-Control-Allow-Origin") != "" {
@@ -611,5 +616,237 @@ func TestCORSExtensionOrigin(t *testing.T) {
 	}
 	if w := do("POST", other, secret); w.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Errorf("another extension: %d %v", w.Code, w.Header())
+	}
+}
+
+// A preflight that reaches the gateway from another machine was refused
+// 401 for the key a preflight may not carry (#4931: the same preflight
+// for a listed origin was answered 204 on loopback and 401, with no CORS
+// headers, on the LAN address and behind an HTTPS reverse proxy, whose
+// forwarding header makes it remote from loopback too — a browser
+// reports it as PreflightMissingAllowOriginHeader and the page's fetch
+// fails). lanGuard now hands a preflight to corsGuard, which answers a
+// listed origin's and refuses any other page's, while the call it asks
+// after still needs the key, and the network's rules (the allow list,
+// sharing on the LAN) are judged first, as for every request.
+func TestCORSPreflightFromLAN(t *testing.T) {
+	fresh(t)
+	s := settings.Load()
+	s.CORSOrigins = []string{"https://learn.trancy.org"}
+	s.LAN = true
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	srv := lanGuard(New().Handler())
+	do := func(remote, host, method, origin, key string, hdr map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, "/v1/models", nil)
+		r.RemoteAddr = remote
+		r.Host = host
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if key != "" {
+			r.Header.Set("Authorization", "Bearer "+key)
+		}
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w
+	}
+	pf := map[string]string{"Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization"}
+	const trancy = "https://learn.trancy.org"
+	const lan = "192.168.1.9:50123"
+	const lanHost = "192.168.1.5:3425"
+
+	// the issue's first row: on loopback the preflight was answered
+	if w := do("127.0.0.1:50123", "127.0.0.1:3425", "OPTIONS", trancy, "", pf); w.Code != http.StatusNoContent ||
+		w.Header().Get("Access-Control-Allow-Origin") != trancy || w.Header().Get("Access-Control-Allow-Headers") != "authorization" {
+		t.Errorf("loopback preflight: %d %v", w.Code, w.Header())
+	}
+	// direct on the LAN: was 401, with no CORS headers
+	if w := do(lan, lanHost, "OPTIONS", trancy, "", pf); w.Code != http.StatusNoContent ||
+		w.Header().Get("Access-Control-Allow-Origin") != trancy || w.Header().Get("Access-Control-Allow-Headers") != "authorization" {
+		t.Errorf("LAN preflight: %d %v", w.Code, w.Header())
+	}
+	// behind a reverse proxy that forwards with a header (nginx): was 401
+	if w := do("127.0.0.1:50123", "magpie.example.com", "OPTIONS", trancy, "",
+		map[string]string{"Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization", "X-Forwarded-For": "203.0.113.7"}); w.Code != http.StatusNoContent ||
+		w.Header().Get("Access-Control-Allow-Origin") != trancy {
+		t.Errorf("proxied preflight: %d %v", w.Code, w.Header())
+	}
+
+	// a page not listed is refused, as on loopback: no 204, no headers
+	if w := do(lan, lanHost, "OPTIONS", "https://evil.example", "", pf); w.Header().Get("Access-Control-Allow-Origin") != "" || w.Code == http.StatusNoContent {
+		t.Errorf("unlisted origin's preflight: %d %v", w.Code, w.Header())
+	}
+	// the call the preflight asks after still needs the key
+	if w := do(lan, lanHost, "GET", trancy, "", nil); w.Code != http.StatusUnauthorized {
+		t.Errorf("keyless call from the LAN: %d", w.Code)
+	}
+	// an OPTIONS that declares no call is no preflight
+	if w := do(lan, lanHost, "OPTIONS", trancy, "", nil); w.Code != http.StatusUnauthorized {
+		t.Errorf("plain OPTIONS from the LAN: %d", w.Code)
+	}
+	// and while magpie isn't shared, the network's rules refuse a
+	// preflight as they refuse everything else from another machine
+	s.LAN = false
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	if w := do(lan, lanHost, "OPTIONS", trancy, "", pf); w.Code == http.StatusNoContent || w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("preflight while not shared: %d %v", w.Code, w.Header())
+	}
+}
+
+// A preflight from another machine is let past the key check for a listed
+// origin alone, and then corsGuard answers it with nothing behind it
+// reached (#4931). corsGuard passes some unlisted origins on unkeyed (a
+// page on this computer, the request's own origin, an app's scheme), and
+// a route that takes OPTIONS (Codex's relay, the MCP paths) would serve
+// such a "preflight" with no key, so those meet the key check as before;
+// and no request but a preflight skips it for a preflight's headers.
+func TestCORSPreflightFromLANReachesNothing(t *testing.T) {
+	fresh(t)
+	s := settings.Load()
+	s.CORSOrigins = []string{"https://learn.trancy.org"}
+	s.LAN = true
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	var reached []string
+	srv := lanGuard(corsGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = append(reached, r.Method+" "+r.URL.Path+" "+r.Header.Get("Origin"))
+		w.WriteHeader(http.StatusTeapot)
+	})))
+	const lan = "192.168.1.9:50123"
+	const lanHost = "192.168.1.5:3425"
+	do := func(method, path, origin string, hdr map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, nil)
+		r.RemoteAddr = lan
+		r.Host = lanHost
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w
+	}
+	pf := map[string]string{"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization"}
+	for _, path := range []string{CodexPath + "/responses", "/mcp/github", "/v1/models"} {
+		for _, origin := range []string{
+			"http://localhost:5173",     // a page on this computer
+			"http://127.0.0.1:8080",     // the same, by address
+			"http://foo.localhost",      // a localhost subdomain
+			"http://" + lanHost,         // the request's own origin
+			"chrome-extension://abcdef", // an extension
+			"app://obsidian.md",         // an app's scheme
+			"null",                      // a sandboxed frame
+			"https://evil.example",      // a site elsewhere
+		} {
+			reached = nil
+			w := do(http.MethodOptions, path, origin, pf)
+			if len(reached) > 0 || w.Code == http.StatusNoContent || w.Header().Get("Access-Control-Allow-Origin") != "" {
+				t.Errorf("keyless preflight for %s from %s: %d %v, reached %v", path, origin, w.Code, w.Header(), reached)
+			}
+		}
+		// a listed origin's preflight is answered, by corsGuard alone
+		reached = nil
+		if w := do(http.MethodOptions, path, "https://learn.trancy.org", pf); w.Code != http.StatusNoContent || len(reached) > 0 {
+			t.Errorf("listed preflight for %s: %d, reached %v", path, w.Code, reached)
+		}
+		// a preflight's headers on any other method skip nothing
+		for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+			reached = nil
+			if w := do(m, path, "https://learn.trancy.org", pf); w.Code != http.StatusUnauthorized || len(reached) > 0 {
+				t.Errorf("keyless %s for %s with a preflight's headers: %d, reached %v", m, path, w.Code, reached)
+			}
+		}
+	}
+}
+
+// Copilot for Obsidian streams its chat through the window's fetch, from
+// Origin app://obsidian.md, and the agent "obsidian" wires it with no key
+// (shirotokiren on X): its preflight is answered and its calls read their
+// replies without being listed in Settings or carrying a key. Another
+// app:// origin is still neither answered nor refused, as before, and from
+// another machine the call needs the key as every other call does.
+func TestCORSObsidian(t *testing.T) {
+	fresh(t)
+	var hits atomic.Int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "plan", Name: "Plan", Key: "upstream-secret", Chat: up.URL + "/v1", Models: []string{"m1"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := settings.Load()
+	s.LAN = true
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	const obsidian = "app://obsidian.md"
+	srv := lanGuard(New().Handler())
+	do := func(remote, method, path, origin string) *httptest.ResponseRecorder {
+		t.Helper()
+		var body io.Reader
+		if method == "POST" {
+			body = strings.NewReader(chatReq)
+		}
+		r := httptest.NewRequest(method, path, body)
+		r.RemoteAddr = remote
+		r.Host = "127.0.0.1:3425"
+		r.Header.Set("Origin", origin)
+		r.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 obsidian/1.9.12 Chrome/138.0 Electron/37.2.0 Safari/537.36")
+		if method == "OPTIONS" {
+			r.Header.Set("Access-Control-Request-Method", "POST")
+			r.Header.Set("Access-Control-Request-Headers", "content-type, x-stainless-os, x-stainless-lang")
+		} else {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w
+	}
+	const here = "127.0.0.1:50123"
+	w := do(here, "OPTIONS", "/v1/chat/completions", obsidian)
+	if w.Code != http.StatusNoContent || w.Header().Get("Access-Control-Allow-Origin") != obsidian ||
+		w.Header().Get("Access-Control-Allow-Headers") != "content-type, x-stainless-os, x-stainless-lang" ||
+		!strings.Contains(w.Header().Get("Access-Control-Allow-Methods"), "POST") {
+		t.Fatalf("preflight: %d %v", w.Code, w.Header())
+	}
+	if hits.Load() != 0 {
+		t.Fatal("a preflight reached the vendor")
+	}
+	w = do(here, "POST", "/v1/chat/completions", obsidian)
+	if w.Code != http.StatusOK || w.Header().Get("Access-Control-Allow-Origin") != obsidian || !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("chat without a key: %d %v %s", w.Code, w.Header(), w.Body)
+	}
+	if w := do(here, "GET", "/v1/models", obsidian); w.Code != http.StatusOK || w.Header().Get("Access-Control-Allow-Origin") != obsidian {
+		t.Errorf("models: %d %v", w.Code, w.Header())
+	}
+	// another app's scheme: passed on as before, with no CORS headers
+	if w := do(here, "OPTIONS", "/v1/chat/completions", "app://other.example"); w.Code == http.StatusNoContent || w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("another app's preflight: %d %v", w.Code, w.Header())
+	}
+	if w := do(here, "POST", "/v1/chat/completions", "app://other.example"); w.Code != http.StatusOK || w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("another app's call: %d %v", w.Code, w.Header())
+	}
+	// from another machine, the key as always
+	n := hits.Load()
+	if w := do("192.168.1.9:50123", "POST", "/v1/chat/completions", obsidian); w.Code != http.StatusUnauthorized {
+		t.Errorf("keyless from the LAN: %d %s", w.Code, w.Body)
+	}
+	if hits.Load() != n {
+		t.Error("a keyless call from the LAN reached the vendor")
 	}
 }

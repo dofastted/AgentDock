@@ -30,6 +30,19 @@ func mainMacWindow() application.MacWindow {
 	}
 }
 
+// frameOnlyResizeJS leaves resizing the main window on Windows to its own
+// frame. Wails' page script arms a resize along every edge inside the page
+// (SM_CYSIZEFRAME pixels, its drag.ts) whenever the window is resizable on
+// Windows, frame or no frame; meant for a frameless window, in the framed
+// main window it made the top of the page, under the title bar, drag the
+// window's height too (shangyuan0818 on Discord). Its switch is turned off,
+// and kept off: Wails turns it on again once its script is ready, which may
+// come before this or after. Linux and the Mac never arm it on a framed
+// window.
+const frameOnlyResizeJS = `(()=>{const w=window._wails;if(!w||typeof w.setResizable!=="function")return;` +
+	`if(!w.setResizable.frameOnly){const f=w.setResizable;w.setResizable=()=>f(false);w.setResizable.frameOnly=true}` +
+	`w.setResizable(false)})();`
+
 type closeAction int
 
 const (
@@ -59,7 +72,7 @@ func (h *host) hideMain() {
 	application.InvokeSync(func() {
 		if h.main != nil {
 			h.main.ExecJS(mainClosedJS)
-			h.main.Hide()
+			hideWebview(h.main)
 		}
 	})
 	h.dock(settings.Load(), false)

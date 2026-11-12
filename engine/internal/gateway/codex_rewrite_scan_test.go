@@ -55,13 +55,14 @@ var codexRewrites = func() []codexRewrite {
 		{"plainItemIDs", plainItemIDs, wasPlainItemIDs},
 		{"withoutBareReasoning", withoutBareReasoning, wasWithoutBareReasoning},
 		{"withoutReasoningText", withoutReasoningText, wasWithoutReasoningText},
+		{"withoutOffsetlessCitations", withoutOffsetlessCitations, wasWithoutOffsetlessCitations},
 		{"withModel", func(b []byte) []byte { return withModel(b, "gpt-5.5<&>") }, func(b []byte) []byte {
 			if string(trimJSON(b)) == "null" {
 				return b // was a panic
 			}
 			return wasWithModel(b, "gpt-5.5<&>")
 		}},
-		{"forVendor", func(b []byte) []byte { return forVendor(relay, b) }, func(b []byte) []byte { return wasForVendor(relay, b) }},
+		{"forVendor", func(b []byte) []byte { return forVendor(relay, b, false) }, func(b []byte) []byte { return wasForVendor(relay, b) }},
 	}
 	for _, magpie := range []bool{false, true} {
 		for _, native := range []bool{false, true} {
@@ -97,10 +98,10 @@ func TestCodexRewritesLeaveTurnUndecoded(t *testing.T) {
 	plain := codexSession(60, func(_ int, it map[string]any) { delete(it, "internal_chat_message_metadata_passthrough") })
 	plain = append(plain[:len(plain)-1], []byte(`,"note":"internal_chat_message_metadata_passthrough"}`)...)
 	relay := provider.Provider{Responses: "https://relay.example/v1"}
-	if got := forVendor(relay, plain); !bytes.Equal(got, plain) {
+	if got := forVendor(relay, plain, false); !bytes.Equal(got, plain) {
 		t.Fatal("forVendor changed a body with nothing to leave out")
 	}
-	if a := testing.AllocsPerRun(5, func() { forVendor(relay, plain) }); a > 10 {
+	if a := testing.AllocsPerRun(5, func() { forVendor(relay, plain, false) }); a > 10 {
 		t.Errorf("forVendor: %v allocations for a body it leaves as it came", a)
 	}
 }
@@ -126,6 +127,13 @@ func TestMarshalRawAllocatesOnce(t *testing.T) {
 // shapes it has to read as encoding/json read them.
 var codexMarks = []func(it map[string]any){
 	func(it map[string]any) { it["id"] = "fc_x" },
+	// ids of the lengths Copilot hands out, of the characters OpenAI
+	// takes (#4525, #4527): only their length turns an upstream that
+	// checks ids away, and one of them on a reasoning item is that
+	// vendor's own to read back
+	func(it map[string]any) { it["id"] = "msg_" + strings.Repeat("a", 440) },
+	func(it map[string]any) { it["id"] = strings.Repeat("A", 442) + "==" },
+	func(it map[string]any) { it["type"] = "reasoning"; it["id"] = "rs_" + strings.Repeat("b", 417) },
 	func(it map[string]any) { it["id"] = "rs_a:rs_b" },
 	func(it map[string]any) { it["id"] = "" },
 	func(it map[string]any) { it["id"] = 7 },
@@ -136,6 +144,38 @@ var codexMarks = []func(it map[string]any){
 	func(it map[string]any) {
 		it["type"] = "reasoning"
 		it["content"] = []any{map[string]any{"type": "reasoning_text", "text": "t"}}
+	},
+	// a reply another vendor's Responses endpoint wrote, its citation
+	// without the offsets OpenAI's schema wants (#4921), beside one with
+	// them
+	func(it map[string]any) {
+		it["type"] = "message"
+		it["role"] = "assistant"
+		it["content"] = []any{map[string]any{"type": "output_text", "text": "t", "annotations": []any{
+			map[string]any{"type": "url_citation", "url": "https://a", "title": "A"},
+			map[string]any{"type": "url_citation", "start_index": 0, "end_index": 1, "url": "https://b"},
+		}}}
+	},
+	func(it map[string]any) {
+		it["type"] = "message"
+		it["content"] = "text"
+	},
+	func(it map[string]any) {
+		it["type"] = "message"
+		it["content"] = []any{map[string]any{"type": "output_text", "text": "t", "annotations": []any{
+			map[string]any{"type": "url_citation", "start_index": nil, "end_index": 2},
+		}}}
+	},
+	func(it map[string]any) {
+		it["type"] = "message"
+		it["content"] = []any{map[string]any{"type": "input_text", "text": "t", "annotations": []any{
+			map[string]any{"type": "url_citation", "url": "https://a"},
+		}}}
+	},
+	func(it map[string]any) {
+		it["content"] = []any{map[string]any{"type": "output_text", "text": "t", "annotations": []any{
+			map[string]any{"type": "url_citation", "url": "https://a"},
+		}}}
 	},
 	func(it map[string]any) { it["type"] = "reasoning"; it["content"] = nil },
 	func(it map[string]any) { it["type"] = "reasoning"; it["content"] = "text" },
@@ -156,6 +196,9 @@ var codexMarks = []func(it map[string]any){
 	func(it map[string]any) { it["type"] = "custom_tool_call"; it["id"] = "fc_9" },
 	func(it map[string]any) { it["type"] = "custom_tool_call"; it["id"] = "ctc" },
 	func(it map[string]any) { it["encrypted_function_args"] = "sealed" },
+	func(it map[string]any) { it["encrypted_content"] = "gAAAA-output" },
+	func(it map[string]any) { it["encrypted_content"] = nil },
+	func(it map[string]any) { it["type"] = "context_compaction"; it["encrypted_content"] = "gAAAA" },
 	func(it map[string]any) { it["internal_chat_message_metadata_passthrough"] = nil },
 }
 
@@ -171,6 +214,9 @@ var codexRawMarks = [][2]string{
 	{`"type":"function_call_output"`, `"type":"configuration_update"`},
 	{`"internal_chat_message_metadata_passthrough"`, `"internal_chat_message_metadata_passthrough"`},
 	{`"input":[`, `"input":[null,`},
+	{`"include":["reasoning.encrypted_content"]`, `"include":["reasoning.encrypted_content","output.encrypted_content"]`},
+	{`"include":["reasoning.encrypted_content"]`, `"include":["output.encrypted_content"]`},
+	{`"include":["reasoning.encrypted_content"]`, `"include":"output.encrypted_content"`},
 	{`"input":[`, `"input":[1,`},
 	{`"input":[`, `"input":["x",[],`},
 	{`"input":[`, `"input":null,"x":[`},
@@ -428,6 +474,70 @@ func wasWithoutReasoningText(body []byte) []byte {
 	return b
 }
 
+func wasWithoutOffsetlessCitations(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"annotations"`)) {
+		return body
+	}
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return body
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(q["input"], &items) != nil {
+		return body
+	}
+	changed := false
+	for i, raw := range items {
+		var it map[string]json.RawMessage
+		if json.Unmarshal(raw, &it) != nil {
+			continue
+		}
+		var parts []json.RawMessage
+		if json.Unmarshal(it["content"], &parts) != nil {
+			continue
+		}
+		itemChanged := false
+		for j, p := range parts {
+			var part map[string]json.RawMessage
+			if json.Unmarshal(p, &part) != nil || string(part["type"]) != `"output_text"` {
+				continue
+			}
+			var notes []json.RawMessage
+			if json.Unmarshal(part["annotations"], &notes) != nil {
+				continue
+			}
+			kept := notes[:0:0]
+			dropped := false
+			for _, a := range notes {
+				if annotationLacksOffsets(a) {
+					dropped = true
+					continue
+				}
+				kept = append(kept, a)
+			}
+			if dropped {
+				part["annotations"], _ = wasMarshalPlain(kept)
+				parts[j], _ = wasMarshalPlain(part)
+				itemChanged = true
+			}
+		}
+		if itemChanged {
+			it["content"], _ = wasMarshalPlain(parts)
+			items[i], _ = wasMarshalPlain(it)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	q["input"], _ = wasMarshalPlain(items)
+	nb, err := wasMarshalPlain(q)
+	if err != nil {
+		return body
+	}
+	return nb
+}
+
 func wasCallItemIDs(body []byte) []byte {
 	if !bytes.Contains(body, []byte(`"tool_search_call"`)) && !bytes.Contains(body, []byte(`"custom_tool_call"`)) {
 		return body
@@ -489,15 +599,23 @@ func wasPlainItemIDs(body []byte) []byte {
 	for _, raw := range items {
 		var it map[string]json.RawMessage
 		var typ, id string
-		if json.Unmarshal(raw, &it) != nil || json.Unmarshal(it["id"], &id) != nil || id == "" || safeIDChars.MatchString(id) {
+		if json.Unmarshal(raw, &it) != nil || json.Unmarshal(it["id"], &id) != nil || id == "" ||
+			len(id) <= itemIDCap && safeIDChars.MatchString(id) {
 			kept = append(kept, raw)
 			continue
 		}
 		changed = true
-		if json.Unmarshal(it["type"], &typ) == nil && typ == "reasoning" {
+		if json.Unmarshal(it["type"], &typ) == nil && typ == "reasoning" && !safeIDChars.MatchString(id) {
 			continue
 		}
-		it["id"], _ = json.Marshal(unsafeToolID.ReplaceAllString(id, "_"))
+		switch {
+		case len(id) > itemIDCap && idOptional[typ]:
+			delete(it, "id")
+		case len(id) > itemIDCap:
+			it["id"], _ = json.Marshal(boundItemID(id, typ))
+		default:
+			it["id"], _ = json.Marshal(unsafeToolID.ReplaceAllString(id, "_"))
+		}
 		b, err := wasMarshalPlain(it)
 		if err != nil {
 			return body
@@ -539,6 +657,15 @@ func wasForVendor(p provider.Provider, body []byte) []byte {
 			}
 		}
 	}
+	var include []string
+	if json.Unmarshal(q["include"], &include) == nil && slices.Contains(include, "output.encrypted_content") {
+		changed = true
+		if include = slices.DeleteFunc(include, func(v string) bool { return v == "output.encrypted_content" }); len(include) == 0 {
+			delete(q, "include")
+		} else {
+			q["include"], _ = wasMarshalPlain(include)
+		}
+	}
 	var items []json.RawMessage
 	if json.Unmarshal(q["input"], &items) == nil {
 		out := items[:0]
@@ -554,10 +681,18 @@ func wasForVendor(p provider.Provider, body []byte) []byte {
 			}
 			_, meta := it["internal_chat_message_metadata_passthrough"]
 			_, sealed := it["encrypted_function_args"]
-			if meta || sealed {
+			_, replay := it["encrypted_content"]
+			switch string(it["type"]) {
+			case `"reasoning"`, `"compaction"`, `"compaction_summary"`, `"context_compaction"`:
+				replay = false
+			}
+			if meta || sealed || replay {
 				changed = true
 				delete(it, "internal_chat_message_metadata_passthrough")
 				delete(it, "encrypted_function_args")
+				if replay {
+					delete(it, "encrypted_content")
+				}
 				raw, _ = wasMarshalPlain(it)
 			}
 			out = append(out, raw)

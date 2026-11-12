@@ -37,7 +37,7 @@ func TestClaudeModelPickedInClaudeCode(t *testing.T) {
 
 	set("model", "deepseek/pro")
 	set("haiku", "deepseek/lite")
-	if m, _ := edit.GetJSON(path, "model"); m != "deepseek/pro" || env("ANTHROPIC_MODEL") != "" {
+	if m := writtenModel(path); m != "deepseek/pro" || env("ANTHROPIC_MODEL") != "" {
 		t.Fatalf("the main model is settings.json's alone:\n%s", readFile(path))
 	}
 
@@ -48,17 +48,17 @@ func TestClaudeModelPickedInClaudeCode(t *testing.T) {
 	if v := a.Values(); v["model"] != "deepseek/flash" || v["opus"] != "" || v["haiku"] != "deepseek/lite" {
 		t.Fatalf("the pick is the main model, the tiers that followed still follow: %v", v)
 	}
-	if got := claudeStandInAt(path, "claude-sonnet-5", gateway.URL()); got != "deepseek/pro" {
+	if got := claudeStandInAt(here(""), path, "claude-sonnet-5"); got != "deepseek/pro" {
 		t.Fatalf("sonnet's stand-in before Follow: %q", got)
 	}
 	if err := a.Follow(); err != nil {
 		t.Fatal(err)
 	}
-	if m, _ := edit.GetJSON(path, "model"); m != "deepseek/flash" || env("ANTHROPIC_DEFAULT_OPUS_MODEL") != "deepseek/flash" ||
+	if m := writtenModel(path); m != "deepseek/flash" || env("ANTHROPIC_DEFAULT_OPUS_MODEL") != "deepseek/flash" ||
 		env("ANTHROPIC_DEFAULT_SONNET_MODEL") != "deepseek/flash" || env("ANTHROPIC_DEFAULT_HAIKU_MODEL") != "deepseek/lite" {
 		t.Fatalf("followers go with the pick, haiku keeps its own:\n%s", readFile(path))
 	}
-	if got := claudeStandInAt(path, "some-unknown-model", gateway.URL()); got != "deepseek/flash" {
+	if got := claudeStandInAt(here(""), path, "some-unknown-model"); got != "deepseek/flash" {
 		t.Fatalf("a model of no tier stands in for the pick: %q", got)
 	}
 
@@ -80,7 +80,7 @@ func TestClaudeModelPickedInClaudeCode(t *testing.T) {
 	if err := a.Follow(); err != nil {
 		t.Fatal(err)
 	}
-	if m, _ := edit.GetJSON(path, "model"); m != "deepseek/pro" || env("ANTHROPIC_MODEL") != "" || env("CLAUDE_CODE_SUBAGENT_MODEL") != "" || env("ANTHROPIC_DEFAULT_OPUS_MODEL") != "deepseek/pro" {
+	if m := writtenModel(path); m != "deepseek/pro" || env("ANTHROPIC_MODEL") != "" || env("CLAUDE_CODE_SUBAGENT_MODEL") != "" || env("ANTHROPIC_DEFAULT_OPUS_MODEL") != "deepseek/pro" {
 		t.Fatalf("legacy ANTHROPIC_MODEL:\n%s", readFile(path))
 	}
 	// nothing to follow: settings.json isn't written

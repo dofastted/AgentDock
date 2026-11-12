@@ -1,2 +1,5 @@
 .wrangler/
 node_modules/
+public/contributors.json
+public/contributors.json.tmp
+public/contributors/

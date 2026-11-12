@@ -41,10 +41,17 @@ import (
 // So is a page at a subdomain of localhost (localhostSubdomain, #2256):
 // Safari and other WebKit views ask the DNS for such a name, and a
 // resolver that answers it serves the page from anywhere.
+//
+// Obsidian (appOrigin) gets the headers without being listed and without a
+// key: its plugins call from app://obsidian.md, which only Obsidian's own
+// window sends, and Copilot for Obsidian's streaming chat goes through
+// the window's fetch, which reads no reply without them (the agent
+// "obsidian" wires it keyless, shirotokiren on X).
 func corsGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" || !corsAllowed(origin) {
+		app := appOrigin(origin)
+		if origin == "" || !app && !corsAllowed(origin) {
 			if foreignPage(r, origin) {
 				log.Printf("refused %s %s from the web page %s: not one listed in Settings", r.Method, r.URL.Path, origin)
 				writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer the web page "+origin+": list it in Settings → Network and sharing → Web pages to let it call magpie with a gateway key")
@@ -67,7 +74,7 @@ func corsGuard(next http.Handler) http.Handler {
 		h.Set("Access-Control-Allow-Origin", origin)
 		h.Add("Access-Control-Expose-Headers", SessionHeader)
 		h.Add("Vary", "Origin")
-		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+		if corsPreflight(r) {
 			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			if asked := corsHeaders(r.Header.Get("Access-Control-Request-Headers")); asked != "" {
 				h.Set("Access-Control-Allow-Headers", asked)
@@ -81,8 +88,10 @@ func corsGuard(next http.Handler) http.Handler {
 			return
 		}
 		// lanGuard, in front of Handler on the real server, has already
-		// taken the key and put magpie's own token in its place
-		if !keyedCaller(r) {
+		// taken the key and put magpie's own token in its place. An app's
+		// window is no page: it is held to the network's rules alone, as
+		// the app's own requests without an Origin are.
+		if !app && !keyedCaller(r) {
 			writeError(w, provider.Chat, http.StatusUnauthorized, "a web page or browser extension calls magpie with a gateway key: create one in magpie's Gateway page and send it as Authorization: Bearer <key> (or x-api-key)")
 			return
 		}
@@ -195,6 +204,19 @@ func hostPort(hp, scheme string) string {
 	return net.JoinHostPort(strings.Trim(hp, "[]"), port)
 }
 
+// appOrigins are the origins of desktop apps whose plugins call the
+// gateway from the app's own window, under its CORS: Obsidian's
+// (app://obsidian.md, the origin Copilot for Obsidian's docs give Ollama's
+// OLLAMA_ORIGINS). No web page and no browser extension can send one, so
+// a call that carries it is the app's, and is answered as the app's calls
+// without an Origin are.
+var appOrigins = []string{"app://obsidian.md"}
+
+// appOrigin: origin is one of appOrigins.
+func appOrigin(origin string) bool {
+	return slices.Contains(appOrigins, strings.ToLower(strings.TrimRight(origin, "/")))
+}
+
 // corsAllowed: origin is one the user listed.
 func corsAllowed(origin string) bool {
 	saved := settings.Load().CORSOrigins
@@ -205,6 +227,15 @@ func corsAllowed(origin string) bool {
 	list, _ := settings.CleanOrigins(saved)
 	o, err := settings.CleanOrigins([]string{origin})
 	return err == nil && len(o) == 1 && slices.Contains(list, o[0])
+}
+
+// corsPreflight: r is a browser's CORS preflight, an OPTIONS that
+// declares the actual call to come. A browser puts no key on one —
+// neither an Origin-headered one on the headers it asks for — which is
+// why lanGuard passes one to this file's guard before asking for a key
+// (#4931).
+func corsPreflight(r *http.Request) bool {
+	return r.Method == http.MethodOptions && r.Header.Get("Origin") != "" && r.Header.Get("Access-Control-Request-Method") != ""
 }
 
 // corsHeaders is a preflight's Access-Control-Request-Headers as the

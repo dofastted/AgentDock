@@ -16,8 +16,10 @@ import (
 // been routed; Phase is said only when the gateway knows it: "slot" while
 // it waits in a key's or account's queue (MaxConcurrency), "rpm" while it
 // waits for room in the minute (MaxRPM), "upstream" while a try is out at
-// the vendor (the request sent, or its reply streaming). A request served
-// another way (a subscription bridge, a title helper) has none.
+// the vendor (the request sent, or its reply streaming), "redact" while
+// it is masked (noteRedacting: the rules, and the local model with its
+// wait for a turn). A request served another way (a subscription bridge,
+// a title helper) has none.
 type Active struct {
 	ID       int64     `json:"id"`
 	Agent    string    `json:"agent"`
@@ -44,6 +46,14 @@ type inflight struct {
 	begun []*Route
 	// unrouted: its watch while no route is begun for it (unrouted.go)
 	unrouted *unroutedHold
+	// tr: the trace its routes are in, for the phase they say (under mu)
+	tr *trace
+	// curves: the speed meter its reply is counted in (under mu)
+	curves *curveMeter
+	// redaction: its maskings, their phase and time (redact_phase.go)
+	redaction redaction
+	// live: its reply counted as it reaches the agent (live.go)
+	live atomic.Pointer[liveRow]
 }
 
 type inflightKey struct{}
@@ -58,7 +68,7 @@ type inflights struct {
 // add counts r in and answers it with its inflight on its context, and the
 // func that counts it out.
 func (l *inflights) add(r *http.Request) (*http.Request, func()) {
-	f := &inflight{agent: agentOf(r), session: sessionOf(r.Header), start: time.Now()}
+	f := &inflight{agent: callerFrom(r).agent, session: sessionOf(r.Header), start: time.Now()}
 	l.mu.Lock()
 	if l.m == nil {
 		l.m = map[int64]*inflight{}
@@ -94,7 +104,12 @@ func notePhase(ctx context.Context, phase string) (restore func()) {
 	}
 	was, _ := f.phase.Load().(string)
 	f.phase.Store(phase)
-	waited := noteWait(ctx)
+	// masking's phase is named by noteMasking's own wait
+	kind := phase
+	if phase == phaseRedact {
+		kind = ""
+	}
+	waited := noteWait(ctx, kind)
 	return func() { waited(); f.phase.Store(was) }
 }
 

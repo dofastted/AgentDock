@@ -2,7 +2,8 @@ package provider
 
 // A plan bought with an API key — Zhipu's GLM Coding Plan (and Z.ai's),
 // Kimi Code, OpenCode Go, a Command Code plan, MiniMax's Coding (Token)
-// Plan, Ollama Cloud's included allowance, StepFun's Step Plan, Volcengine Ark's Coding and Agent Plans and
+// Plan, Ollama Cloud's included allowance, a Le Chat plan's month of Mistral
+// Vibe, StepFun's Step Plan, Volcengine Ark's Coding and Agent Plans and
 // Tencent Cloud's Token Plan 企业版 — has windows of allowance like a
 // subscription's, which the vendor tells to the key (StepFun only to a
 // sign-in, stepfun_plan.go; Volcengine and Tencent Cloud only to the
@@ -57,14 +58,21 @@ func planQuotaSourceOf(p Provider) (planQuotaSource, bool) {
 			// preset too, and is told the plan's 5-hour and weekly windows;
 			// a pay-as-you-go key has none, and no card
 			return planQuotaSource{"https://api.commandcode.ai/alpha/billing/credits", true, readCommandCodePlan, false}, true
-		case "api.minimaxi.com", "api.minimax.io":
+		case "api.minimaxi.com", "api.minimax.cn", "api.minimax.io":
 			// a Coding Plan key (sk-cp-…) is told its windows; a
-			// pay-as-you-go key isn't, and gets no card (#387)
+			// pay-as-you-go key isn't, and gets no card (#387).
+			// api.minimax.cn is MiniMax China's host since mmx-cli
+			// 8746d48f (2026-09-28), beside api.minimaxi.com, and
+			// answers the same query
 			return planQuotaSource{"https://" + hostOf(base) + "/v1/token_plan/remains", true, readMiniMaxPlan, false}, true
 		case "ollama.com":
 			// Ollama Cloud's included allowance (#1888); a key with none
 			// gets no card
 			return planQuotaSource{ollamaBalanceURL, true, readOllamaPlan, false}, true
+		case "api.mistral.ai":
+			// a Le Chat plan's Vibe key is told its month of Vibe
+			// (mistral_plan.go); a key with no Vibe budget gets no card
+			return planQuotaSource{mistralBudgetURL, true, readMistralPlan, false}, true
 		}
 	}
 	return planQuotaSource{}, false
@@ -101,6 +109,13 @@ func readZhipuPlan(b []byte) (string, []QuotaWindow, error) {
 	if code, msg, ok := zhipuEnvelope(b); ok && ZhipuKeyRefused(code) {
 		// the key itself refused, which no plan can be read past
 		return "", nil, zhipuKeyRefusal{msg}
+	} else if ok && code != 1113 && zhipuCodeStatus(code) == http.StatusTooManyRequests {
+		// /api/monitor answers its rate limits 200 in the envelope too
+		// (1302 "并发数过高", 1303 "频率过高", …), in Chinese words a
+		// passing failure isn't recognised by: said as the 429 it is, so
+		// the card keeps what was last read (keepLast) instead of losing
+		// it to a read that told nothing about the plan
+		return "", nil, fmt.Errorf("429 rate limited (%d): %s", code, msg)
 	}
 	if r.Success != nil && !*r.Success || r.Data == nil {
 		if r.Msg != "" {
@@ -402,11 +417,31 @@ func KimiCodeSearch(p Provider) string {
 //
 // usage is the week's allowance, each of limits a shorter window; the
 // numbers come as strings or numbers, used or what remains.
+//
+// A plan on Kimi's monthly allowance (lidazi2016 on Discord) is also, or
+// only, told as shares in usages, as kimi-code reads them
+// (packages/oauth/src/managed-usage.ts, usage-format.ts):
+//
+//	"usages":{"limit_5h":{"used_ratio":0.4372,"reset_time":"…"},
+//	  "limit_7d":{…},"limit_month_total":{…},"limit_month_code":{…}}
+//
+// limit_month_total is the month's allowance. limit_month_code is code's
+// share of it (kimi-code) or, on the membership of 2026-09, the coding
+// allowance itself with no total beside it (GCMP's kimiUsage.ts), so it
+// is the month only when limit_month_total isn't there. A window told
+// both ways is taken from usages, as kimi-code does. Each share is read
+// under its camelCase name too, a reset as text or epoch seconds or
+// milliseconds (EchoBird's fixture), and a limits[] window counted in
+// weeks or months by its length. A booster wallet (加油包) is its
+// balance, beside the windows (kimiBooster).
 func readKimiCode(b []byte) (string, []QuotaWindow, error) {
 	type row map[string]any
 	var r struct {
-		Usage  row `json:"usage"`
-		Limits []struct {
+		Usage   row            `json:"usage"`
+		Usages  map[string]row `json:"usages"`
+		Booster row            `json:"booster_wallet"`
+		Camel   row            `json:"boosterWallet"`
+		Limits  []struct {
 			Window row `json:"window"`
 			Detail row `json:"detail"`
 		} `json:"limits"`
@@ -424,6 +459,25 @@ func readKimiCode(b []byte) (string, []QuotaWindow, error) {
 		}
 		return 0, false
 	}
+	// a reset as RFC 3339 text or as epoch seconds or milliseconds, under
+	// either spelling of its name
+	resetOf := func(d row) *time.Time {
+		for _, k := range []string{"resetTime", "resetAt", "reset_at", "reset_time"} {
+			if s, _ := d[k].(string); s != "" {
+				if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+					return &t
+				}
+			}
+			if n, ok := num(d[k]); ok && n > 0 {
+				t := time.Unix(int64(n), 0)
+				if n > 1e11 {
+					t = time.UnixMilli(int64(n))
+				}
+				return &t
+			}
+		}
+		return nil
+	}
 	window := func(d row, name string, span time.Duration) (QuotaWindow, bool) {
 		limit, ok := num(d["limit"])
 		if !ok || limit <= 0 {
@@ -438,14 +492,7 @@ func readKimiCode(b []byte) (string, []QuotaWindow, error) {
 			used = limit - left
 		}
 		w := QuotaWindow{Name: name, Span: span, Used: max(0, min(100, used/limit*100))}
-		for _, k := range []string{"resetTime", "resetAt", "reset_at", "reset_time"} {
-			if s, _ := d[k].(string); s != "" {
-				if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-					w.ResetsAt = &t
-					break
-				}
-			}
-		}
+		w.ResetsAt = resetOf(d)
 		return w, true
 	}
 	out := []QuotaWindow{}
@@ -464,9 +511,15 @@ func readKimiCode(b []byte) (string, []QuotaWindow, error) {
 			span = time.Duration(n) * time.Hour
 		case strings.Contains(unit, "DAY"):
 			span = time.Duration(n) * 24 * time.Hour
+		case strings.Contains(unit, "WEEK"):
+			span = time.Duration(n) * 7 * 24 * time.Hour
+		case strings.Contains(unit, "MONTH"):
+			span = time.Duration(n) * 30 * 24 * time.Hour
 		}
 		name := "Allowance"
 		switch {
+		case span == 30*24*time.Hour:
+			name = "Month"
 		case span > 24*time.Hour && span%(24*time.Hour) == 0:
 			name = fmt.Sprintf("%d days", span/(24*time.Hour))
 		case span >= time.Hour && span%time.Hour == 0:
@@ -481,10 +534,97 @@ func readKimiCode(b []byte) (string, []QuotaWindow, error) {
 	if w, ok := window(r.Usage, "7 days", 7*24*time.Hour); ok {
 		out = append(out, w)
 	}
+	shares := []QuotaWindow{}
+	for _, k := range []struct {
+		key, name string
+		span      time.Duration
+	}{{"limit_5h", "5 hours", 5 * time.Hour}, {"limit_7d", "7 days", 7 * 24 * time.Hour},
+		{"limit_month_total", "Month", 30 * 24 * time.Hour}, {"limit_month_code", "Month", 30 * 24 * time.Hour}} {
+		d := r.Usages[k.key]
+		if d == nil {
+			d = r.Usages[camel(k.key)]
+		}
+		ratio, ok := num(d["used_ratio"])
+		if !ok {
+			ratio, ok = num(d["usedRatio"])
+		}
+		if d == nil || !ok || math.IsNaN(ratio) || math.IsInf(ratio, 0) ||
+			slices.ContainsFunc(shares, func(s QuotaWindow) bool { return s.Span == k.span }) {
+			continue
+		}
+		shares = append(shares, QuotaWindow{Name: k.name, Span: k.span, Used: max(0, min(100, ratio*100)), ResetsAt: resetOf(d)})
+	}
+	if len(shares) > 0 {
+		out = slices.DeleteFunc(out, func(w QuotaWindow) bool {
+			return slices.ContainsFunc(shares, func(s QuotaWindow) bool { return s.Span == w.Span })
+		})
+		out = append(out, shares...)
+		// shortest first, as the counted windows come; one of no known
+		// length last
+		span := func(w QuotaWindow) time.Duration {
+			if w.Span == 0 {
+				return math.MaxInt64
+			}
+			return w.Span
+		}
+		slices.SortStableFunc(out, func(a, b QuotaWindow) int {
+			switch sa, sb := span(a), span(b); {
+			case sa < sb:
+				return -1
+			case sa > sb:
+				return 1
+			}
+			return 0
+		})
+	}
 	if len(out) == 0 {
 		return "", nil, fmt.Errorf("no usage in the reply")
 	}
+	wallet := r.Booster
+	if len(wallet) == 0 {
+		wallet = r.Camel
+	}
+	if left, unit, ok := kimiBooster(wallet, num); ok {
+		if left > 0 {
+			// Kimi goes on past the plan's windows on the booster (#5721):
+			// one used up doesn't stop the key while it holds money
+			for i := range out {
+				out[i].Credits = true
+			}
+		}
+		out = append(out, QuotaWindow{Name: "Extra usage", Balance: &left, Unit: unit, Aside: true})
+	}
 	return "", out, nil
+}
+
+// kimiBooster reads Kimi Code's booster wallet (加油包, "Extra usage"),
+// as kimi-code's parseBoosterWallet does (packages/oauth/src/
+// managed-usage.ts): a balance of type BOOSTER whose amount and
+// amountLeft are cents times 10^6, amountLeft missing meaning none is
+// left; the currency is the monthly limit's or used figure's, else USD.
+// left is in the currency's units (yuan); ok is false when there is no
+// booster.
+func kimiBooster(wallet map[string]any, num func(any) (float64, bool)) (left float64, unit string, ok bool) {
+	bal, _ := wallet["balance"].(map[string]any)
+	if bal == nil || bal["type"] != "BOOSTER" {
+		return 0, "", false
+	}
+	if amount, ok := num(bal["amount"]); !ok || amount <= 0 {
+		return 0, "", false
+	}
+	if l, ok := num(bal["amountLeft"]); ok && l > 0 {
+		left = math.Round(l/1e6) / 100
+	}
+	unit = "USD"
+	for _, k := range []string{"monthlyChargeLimit", "monthlyUsed"} {
+		if m, _ := wallet[k].(map[string]any); m != nil {
+			if c, _ := m["currency"].(string); c != "" {
+				unit = c
+				break
+			}
+		}
+	}
+	return left, unit, true
 }
 
 // planWindows asks the vendor for the plan key is on and its windows.
@@ -517,7 +657,7 @@ func planBody(ctx context.Context, src planQuotaSource, key string) ([]byte, err
 	// Go's usage is asked at its gateway, which routes nothing that names
 	// no session
 	OpenCodeSession(req.Header, src.url)
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -581,6 +721,9 @@ func vendorSaid(b []byte, status string) string {
 		Message string          `json:"message"`
 	}
 	if json.Unmarshal(b, &e) != nil {
+		if said, ok := Unsaid(b); ok {
+			return status + ": " + said
+		}
 		return status
 	}
 	msg := e.Message
@@ -607,6 +750,10 @@ func vendorSaid(b []byte, status string) string {
 func planKeyWindows(ctx context.Context, p Provider, src planQuotaSource, key string) (plan string, ws []QuotaWindow, team bool, err error) {
 	if hostOf(src.url) == "api.commandcode.ai" {
 		plan, ws, err = cmdKeyWindows(ctx, src, key)
+		return plan, ws, false, err
+	}
+	if src.url == mistralBudgetURL {
+		plan, ws, err = mistralKeyWindows(ctx, src, key)
 		return plan, ws, false, err
 	}
 	plan, ws, err = planWindows(ctx, src, key)
@@ -698,9 +845,15 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 			case err == nil && len(ws) == 0:
 				return // a key with no plan
 			case err != nil && !j.src.sure:
-				// no plan, unless one was read before
+				// no plan, unless one was read before: a key whose windows
+				// were read is a plan's, and a read of it that fails is
+				// unknown, not "no plan" — its card stays, with what was
+				// last read when the failure passes, else with why
+				// (larchsis on X: the second of two GLM Coding Plan keys
+				// lost its card on each refresh)
 				q.Error = err.Error()
-				if q = keepReading(ctx, q, tag); q.AsOf != nil {
+				known := hadReading(q.Provider, tag)
+				if q = keepReading(ctx, q, tag); q.AsOf != nil || known {
 					got[i] = &q
 				}
 				return
@@ -721,7 +874,9 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 					q.Resets = <-resets
 				}
 			}
-			q = keepReading(ctx, q, tag)
+			// read just now: the card says when (jiabubu: Kimi Code's
+			// said nothing while every other card did)
+			q = keepReading(ctx, readNow(q), tag)
 			got[i] = &q
 		}()
 	}
@@ -731,6 +886,8 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	go func() { volc <- volcPlanQuotas(ctx) }()
 	tencent := make(chan []SubscriptionQuota, 1)
 	go func() { tencent <- tencentPlanQuotas(ctx) }()
+	ali := make(chan []SubscriptionQuota, 1)
+	go func() { ali <- aliPlanQuotas(ctx) }()
 	wg.Wait()
 	out := []SubscriptionQuota{}
 	for i, q := range got {
@@ -740,9 +897,12 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 			out = append(out, *q)
 		}
 	}
-	out = append(out, <-stepfun...)
-	out = append(out, <-volc...)
-	out = append(out, <-tencent...)
+	// StepFun's, Volcengine's, Tencent's and Alibaba's, read just now too
+	for _, qs := range [][]SubscriptionQuota{<-stepfun, <-volc, <-tencent, <-ali} {
+		for _, q := range qs {
+			out = append(out, readNow(q))
+		}
+	}
 	if ctx.Err() == nil {
 		noteQuotaHistory(out, time.Now())
 		c.Lock()
@@ -827,7 +987,7 @@ func zhipuKeyTeamAt(ctx context.Context, root, quotaURL, key string, team *Zhipu
 			req.Header.Set(k, v)
 		}
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return "", nil, err
 	}
@@ -838,4 +998,16 @@ func zhipuKeyTeamAt(ctx context.Context, root, quotaURL, key string, team *Zhipu
 	}
 	_, ws, err := readZhipuPlan(b)
 	return "GLM Coding Team", ws, err
+}
+
+// camel spells a snake_case name in camelCase: limit_month_total is
+// limitMonthTotal.
+func camel(s string) string {
+	parts := strings.Split(s, "_")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] != "" {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+	}
+	return strings.Join(parts, "")
 }

@@ -3,8 +3,12 @@
 // at the end of the Settings tabs. Words typed in it show every part's rows
 // that say them — in the language shown or in English — each part under its
 // name, the tabs set aside; a part's name or a section's heading brings all
-// of it; the warm-ups' cards all show, Codex's and Claude Code's alike;
-// nothing found says so. Escape, or clearing the box, brings back the part
+// of it; a setting that moved to its provider's editor (the warm-ups, the
+// owner on 11-07) is found as a link per provider, Codex's and Claude
+// Code's alike, whose Open takes the reader to that editor; nothing found
+// says so; a link needs its provider, and its plugin on; a built-in
+// whose name, words or settings match is listed after them, off or on, and
+// Open goes to its row in Plugins › Built-in. Escape, or clearing the box, brings back the part
 // picked as it was. Nothing is posted and the page doesn't scroll. In the
 // smallest window (560 x 420) and magpie web on a phone (390 wide), nothing
 // runs off to the side. Every language; no backend, the API is faked here.
@@ -14,11 +18,11 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { openPart, provPrefsProviders } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
-function server(lang, posts, web) {
+function server(lang, posts, web, { provs = ["codex", "claude"], off = [], builtins = undefined } = {}) {
   const cur = {
     theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd", textSize: 100,
     dock: false, dockWindow: false, proxy: "", redact: false, redactPersonal: false, redactWords: [],
@@ -27,17 +31,19 @@ function server(lang, posts, web) {
     version: "0.1.400", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425",
     proxyNow: "none", proxySource: "none", login: false,
     visionModels: [], imageGenModels: [], workbuddyCheckins: [], lanURLs: [],
-    fx: { rate: 7.2, at: new Date().toISOString(), stale: false },
+    fx: { rate: 7.2, at: new Date().toISOString(), stale: false }, builtins,
   };
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
     if (req.method() !== "GET") posts.push(url.pathname);
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:${web},textSize:100};` });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:${web},textSize:100,featuresOff:${JSON.stringify(off)}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light", textSize: 100 }, fx: cur.fx });
     if (url.pathname === "/api/settings") return json(cur);
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
+    if (url.pathname === "/api/plugins/builtin" && builtins) return json(builtins);
+    if (url.pathname === "/api/providers") return json(provPrefsProviders(provs, { codex: "ChatGPT", claude: "Claude" }));
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/window/fit") return route.fulfill({ status: 204 });
@@ -79,13 +85,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }
       await browser.close();
     });
-    const open = async (lang, posts, { width = 560, height = 420, web = false } = {}) => {
+    const open = async (lang, posts, { width = 560, height = 420, web = false, ...set } = {}) => {
       const context = await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.errors = [];
-      page.on("pageerror", (e) => page.errors.push(e.message));
-      await page.route("**/*", server(lang, posts, web));
+      page.on("pageerror", (e) => { if (engine === "webkit" && /due to access control checks/.test(e.message)) return; page.errors.push(e.message); }); // a goto in WebKit can cut off a fetch (#1350)
+      await page.route("**/*", server(lang, posts, web, set));
       await page.goto("http://magpie.test/?view=settings&tab=general");
       await page.locator("#themeSegs .opt").first().waitFor();
       return page;
@@ -127,13 +134,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(s.parts, ["usage"]);
         assert(await seen(page, "#currencySegs"), "Currency's row shows");
         assert.equal(await seen(page, "#trayUsagePick"), false);
-        assert.equal(await seen(page, "#warmTabs"), false, "the warm-ups' tabs set aside");
+        assert.equal(await seen(page, "#provPrefLinks .agent-pref-link"), false, "no provider's link for currency");
 
-        // the warm-ups: every agent's card that says it, not just the one picked
-        await type(page, (await tr("Warm up on reset")).toLowerCase());
-        assert(await seen(page, "#warmSegs"), "Codex's warm-up shows");
-        assert(await seen(page, "#claudeWarmSegs"), "Claude Code's warm-up shows");
-        assert.equal(await page.locator("#claudeWarmList").evaluate((p) => getComputedStyle(p, "::before").content), JSON.stringify("Claude Code"));
+        // the warm-ups, in their providers' editors now: a link for each
+        // provider that has one, named as the Add sheet names the
+        // subscription (ChatGPT for Codex's, Claude for Claude Code's), and the
+        // rows themselves nowhere in Settings
+        const warm = await tr("Warm up on reset");
+        await type(page, warm.toLowerCase());
+        const links = page.locator("#provPrefLinks .agent-pref-link:visible", { has: page.locator(".name", { hasText: warm }) });
+        assert.equal(await links.count(), 2, "a link for Codex's and one for Claude Code's");
+        const subs = await links.locator(".sub").allTextContents();
+        assert.deepEqual(subs, [await tr("In {provider}'s editor, on the Providers page", { provider: "ChatGPT" }), await tr("In {provider}'s editor, on the Providers page", { provider: "Claude" })]);
+        assert.equal(await page.locator("#view-settings #warmSegs, #view-settings #claudeWarmSegs").count(), 0, "the rows themselves are out of Settings");
+        assert.deepEqual(await overflow(page), []);
+        shots.push([lang + "-warm", await page.screenshot()]);
 
         // a part's name brings the whole part
         await type(page, await tr("Privacy"));
@@ -154,7 +169,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await q.inputValue(), "");
         assert.deepEqual(await state(page), { parts: ["usage"], tabs: true, none: "", misses: 0 });
         assert.equal(await page.locator(":is(#setTab-usage, .nav-s[data-of=setTab-usage]):visible").getAttribute("aria-selected"), "true");
-        assert(await seen(page, "#warmTabs"), "the warm-ups' tabs back");
+        assert.equal(await seen(page, "#provPrefLinks"), false, "the providers' links put away");
         assert(await seen(page, "#trayUsagePick"), "every row back");
         // so does clearing it by hand
         await type(page, "currency");
@@ -164,9 +179,76 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await page.locator("#view-settings").evaluate((v) => v.scrollTop), 0, "searching scrolls nothing");
         assert.deepEqual(posts, [], "searching posts nothing");
         assert.deepEqual(page.errors, []);
+
+        // a link's Open takes the reader to that provider's editor, its
+        // warm-up there
+        await type(page, warm.toLowerCase());
+        await links.nth(1).locator("button", { hasText: await tr("Open") }).click();
+        await page.locator(".editor .prov-prefs #claudeWarmSegs .opt").first().waitFor();
+        assert.equal(await page.locator(".editor .prov-prefs #warmSegs").count(), 0, "Claude Code's editor, not Codex's");
+        assert.deepEqual(posts, [], "opening posts nothing");
+        assert.deepEqual(page.errors, []);
         await page.context().close();
       });
     }
+
+    // a link is only for a provider there is, and goes with the warm-ups
+    // when they are off in Plugins › Built-in (netube99 on X)
+    await t.test("a provider's link needs the provider and its plugin", async () => {
+      for (const [set, want] of [[{ provs: ["codex"] }, ["ChatGPT"]], [{ off: ["warmups"] }, []]]) {
+        const page = await open("en", [], set);
+        await page.waitForFunction(() => providers || providersEarly?.got);
+        await type(page, "warm up on reset");
+        const links = page.locator("#provPrefLinks .agent-pref-link:visible");
+        assert.deepEqual((await links.locator(".sub").allTextContents()).map((s) => s.replace(/^In (.*)'s editor.*$/, "$1")), want, JSON.stringify(set));
+        assert.deepEqual(page.errors, []);
+        await page.context().close();
+      }
+    });
+
+    // the built-ins are found too, with what they set on their own page or
+    // in Plugins › Built-in, and one switched off (its Settings tab gone
+    // with it), and Open goes to its row in Plugins › Built-in
+    await t.test("built-ins are found, and Open goes to their row", async () => {
+      const row = (id, name, sub, on, more) => ({ id, name, sub, on, chosen: on, source: "preset", state: on ? "active" : "off", inUse: 0, ...more });
+      const builtins = [
+        row("otel", "Observability", "Send each request's trace to an OpenTelemetry collector", false, { setAt: "otel #otelList" }),
+        row("gateway", "Gateway page", "", true, { page: "gateway", setAt: "network #portList", config: { callsPage: 20 },
+          schema: { type: "object", properties: { callsPage: { type: "integer", title: "Recent calls at a time", description: "How many of the gateway's recent calls the page shows, and how many more each Show more adds", enum: [10, 20, 50, 100], default: 20 } } } }),
+      ];
+      for (const lang of LANGS) {
+        const posts = [];
+        const page = await open(lang, posts, { builtins, off: ["otel"] });
+        const tr = (s, vars) => page.evaluate(([s, vars]) => t(s, vars), [s, vars]);
+        const found = page.locator("#setFeats .feat-find:visible");
+        for (const [words, want] of [
+          [await tr("Recent calls at a time"), [[await tr("Gateway page"), ""]]],
+          ["recent calls", [[await tr("Gateway page"), ""]]],
+          [await tr("Observability"), [[await tr("Observability"), await tr("Off") + " · " + await tr("Send each request's trace to an OpenTelemetry collector")]]],
+          ["zzqqxx", []],
+        ]) {
+          await type(page, words.toLowerCase());
+          await page.waitForFunction((n) => document.querySelectorAll("#setFeats .feat-find").length === n || (!n && !document.querySelector("#setFeats:not([hidden])")), want.length);
+          const got = [];
+          for (const r of await found.all()) got.push([(await r.locator(".name").textContent()).trim(), (await r.locator(".sub").count() ? (await r.locator(".sub").textContent()).trim() : "")]);
+          assert.deepEqual(got, want, lang + " " + words);
+          const s = await state(page);
+          assert.equal(s.none, want.length ? "" : await tr("No setting matches “{q}”", { q: words.toLowerCase() }), "no 'nothing matches' over a built-in found");
+          if (want.length) assert.equal(await page.locator("#setFeats").getAttribute("data-part"), await tr("Plugins") + " › " + await tr("Built-in"));
+          assert.deepEqual(await overflow(page), []);
+        }
+        await type(page, await tr("Observability"));
+        shots.push([lang + "-builtins", await page.screenshot()]);
+        await type(page, "");
+        assert.equal(await seen(page, "#setFeats"), false, "put away with the search");
+        await type(page, "recent calls");
+        await found.first().locator("button", { hasText: await tr("Open") }).click();
+        await page.locator('#builtinList .feat-row.flash[data-id="gateway"]').waitFor();
+        assert.deepEqual(posts, [], "finding and opening posts nothing");
+        assert.deepEqual(page.errors, []);
+        await page.context().close();
+      }
+    });
 
     await t.test("magpie web on a phone", async () => {
       const page = await open("zh", [], { width: 390, height: 760, web: true });

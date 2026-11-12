@@ -165,7 +165,7 @@ func TestToolLoopIsStoppedOnEveryProtocol(t *testing.T) {
 				return codexRead(i)
 			}
 			got := askAgent(t, gw+x.path, toolTurns(x.from, 60+toolLoopRepeats, turn, x.stream))
-			if !strings.Contains(got, "magpie stopped this turn") || !strings.Contains(got, x.done) || !strings.Contains(got, "sed -n 1,200p src/parser.rs") {
+			if !strings.Contains(got, "This turn was stopped") || !strings.Contains(got, x.done) || !strings.Contains(got, "sed -n 1,200p src/parser.rs") {
 				t.Fatalf("the agent wasn't told of the loop in its API:\n%s", got)
 			}
 			if n := v.asked.Load(); n != 0 {
@@ -200,7 +200,7 @@ func TestToolLoopStoppedOnCodexsOwnSignIn(t *testing.T) {
 	t.Cleanup(gw.Close)
 	body := strings.Replace(toolTurns(provider.Responses, toolLoopRepeats, codexRead, true), `"model":"wb/deepseek-v4-pro"`, `"model":"gpt-5.5"`, 1)
 	got := askAgent(t, gw.URL+CodexPath+"/responses", body)
-	if !strings.Contains(got, "magpie stopped this turn") || !strings.Contains(got, `"type":"response.completed"`) {
+	if !strings.Contains(got, "This turn was stopped") || !strings.Contains(got, `"type":"response.completed"`) {
 		t.Fatalf("Codex wasn't told of the loop:\n%s", got)
 	}
 	if n := v.asked.Load(); n != 0 {
@@ -221,14 +221,14 @@ func TestToolLoopShortOrOffGoesOn(t *testing.T) {
 			v := &countingVendor{}
 			gw := toolLoopOn(t, v)
 			got := askAgent(t, gw+x.path, toolTurns(x.from, toolLoopRepeats-1, codexRead, x.stream))
-			if strings.Contains(got, "magpie stopped") || v.asked.Load() != 1 {
+			if strings.Contains(got, "This turn was stopped") || v.asked.Load() != 1 {
 				t.Fatalf("%d turns of the same call were stopped (vendor asked %d):\n%s", toolLoopRepeats-1, v.asked.Load(), got)
 			}
 			if err := settings.Save(settings.Settings{NoLoopGuard: true}); err != nil {
 				t.Fatal(err)
 			}
 			got = askAgent(t, gw+x.path, toolTurns(x.from, 40, codexRead, x.stream))
-			if strings.Contains(got, "magpie stopped") || v.asked.Load() != 2 {
+			if strings.Contains(got, "This turn was stopped") || v.asked.Load() != 2 {
 				t.Fatalf("the loop was stopped with Stop looping replies off (vendor asked %d):\n%s", v.asked.Load(), got)
 			}
 		})
@@ -241,23 +241,23 @@ func TestToolLoopShortOrOffGoesOn(t *testing.T) {
 // included in the conversation.
 func TestToolLoopLetsProgressBy(t *testing.T) {
 	notice := map[provider.Protocol][]string{
-		provider.Responses: {`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"magpie stopped this turn"}]}`, `{"type":"message","role":"user","content":[{"type":"input_text","text":"read it once more, then fix it"}]}`},
-		provider.Chat:      {`{"role":"assistant","content":"magpie stopped this turn"}`, `{"role":"user","content":"read it once more, then fix it"}`},
-		provider.Anthropic: {`{"role":"assistant","content":"magpie stopped this turn"}`, `{"role":"user","content":"read it once more, then fix it"}`},
-		provider.Gemini:    {`{"role":"model","parts":[{"text":"magpie stopped this turn"}]}`, `{"role":"user","parts":[{"text":"read it once more, then fix it"}]}`},
+		provider.Responses: {`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"This turn was stopped"}]}`, `{"type":"message","role":"user","content":[{"type":"input_text","text":"read it once more, then fix it"}]}`},
+		provider.Chat:      {`{"role":"assistant","content":"This turn was stopped"}`, `{"role":"user","content":"read it once more, then fix it"}`},
+		provider.Anthropic: {`{"role":"assistant","content":"This turn was stopped"}`, `{"role":"user","content":"read it once more, then fix it"}`},
+		provider.Gemini:    {`{"role":"model","parts":[{"text":"This turn was stopped"}]}`, `{"role":"user","parts":[{"text":"read it once more, then fix it"}]}`},
 	}
 	for _, x := range toolLoopAsks {
 		t.Run(x.name, func(t *testing.T) {
 			v := &countingVendor{}
 			gw := toolLoopOn(t, v)
 			got := askAgent(t, gw+x.path, toolTurns(x.from, 200, pollJob, x.stream))
-			if strings.Contains(got, "magpie stopped") || v.asked.Load() != 1 {
+			if strings.Contains(got, "This turn was stopped") || v.asked.Load() != 1 {
 				t.Fatalf("a poll whose answer moves was stopped (vendor asked %d):\n%s", v.asked.Load(), got)
 			}
 			// the loop, magpie's notice and the user's word after it
 			body := toolTurns(x.from, toolLoopRepeats, codexRead, x.stream, notice[x.from]...)
 			got = askAgent(t, gw+x.path, body)
-			if strings.Contains(got, "magpie stopped this turn before") || v.asked.Load() != 2 {
+			if strings.Contains(got, "This turn was stopped before") || v.asked.Load() != 2 {
 				t.Fatalf("the user's word after the notice was stopped (vendor asked %d):\n%s", v.asked.Load(), got)
 			}
 		})
@@ -326,6 +326,68 @@ func BenchmarkToolLoopCheck(b *testing.B) {
 		}
 		if _, ok := toolLoopOf(req.Messages); ok {
 			b.Fatal("a loop")
+		}
+	}
+}
+
+// The conversation's tail is read where it sits in the body: GetBytes
+// copied the whole input list to find the last items, 45 MiB of a Codex
+// turn on every request (#4004).
+func TestTailOfReadsInPlace(t *testing.T) {
+	item := `{"type":"function_call_output","call_id":"c%d","output":"` + strings.Repeat("o", 20<<10) + `"}`
+	items := make([]string, 200)
+	for i := range items {
+		items[i] = fmt.Sprintf(item, i)
+	}
+	body := []byte(`{"model":"m","input":[` + strings.Join(items, ",") + `],"stream":true}`)
+	var tail []byte
+	n := allocated(func() { tail = tailOf(provider.Responses, body) })
+	want := `{"model":"m","input":[` + strings.Join(items[len(items)-tailItems:], ",") + `],"stream":true}`
+	if string(tail) != want {
+		t.Fatalf("tail is %.200s…", tail)
+	}
+	if n > uint64(len(want))+uint64(len(body))/4 {
+		t.Fatalf("%d bytes allocated for a %d byte tail of a %d byte body", n, len(want), len(body))
+	}
+}
+
+// A wait asked again with the same arguments gets the same answer by
+// design (xiaozhi09400: clock__sleep {"duration_ms":60000} while CI ran).
+// Any other call, however it is named, is still a loop.
+func TestToolLoopLetsWaitsBy(t *testing.T) {
+	loopOf := func(name, args string) bool {
+		var msgs []Message
+		for i := range toolLoopRepeats + 2 {
+			id := fmt.Sprintf("call_%d", i)
+			msgs = append(msgs,
+				Message{Role: "assistant", Parts: []Part{{Kind: ToolCall, ID: id, Name: name, Args: json.RawMessage(args)}}},
+				Message{Role: "user", Parts: []Part{{Kind: ToolResult, CallID: id, Text: "ok"}}})
+		}
+		_, ok := toolLoopOf(msgs)
+		return ok
+	}
+	for _, c := range []struct{ name, args string }{
+		{"clock__sleep", `{"duration_ms":60000}`},
+		{"mcp__clock__sleep", `{"duration_ms":60000}`},
+		{"clock.sleep", `{}`},
+		{"wait_for_ci", `{"run":"123"}`},
+		{"waitForBuild", `{"id":"b1"}`},
+		{"delay", `{"ms":500}`},
+		{"pause", `{}`},
+		{"timer__start", `{"seconds":30}`},
+	} {
+		if loopOf(c.name, c.args) {
+			t.Errorf("%s %s was stopped as a loop", c.name, c.args)
+		}
+	}
+	for _, c := range []struct{ name, args string }{
+		{"exec_command", `{"cmd":"sed -n 1,200p src/parser.rs"}`},
+		{"wait__read_file", `{"path":"a.rs"}`}, // a server named wait
+		{"clock__now", `{"tz":"UTC"}`},
+		{"timer__start", `{"seconds":30,"label":"x"}`},
+	} {
+		if !loopOf(c.name, c.args) {
+			t.Errorf("%s %s was let by as a wait", c.name, c.args)
 		}
 	}
 }

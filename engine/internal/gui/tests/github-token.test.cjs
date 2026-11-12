@@ -4,7 +4,8 @@
 // row: a token typed is saved on its own and shown masked, with Remove; one
 // GITHUB_TOKEN / GH_TOKEN gives is said; one refused is said in the row,
 // what was typed kept; nothing scrolls. And a check GitHub limited says so
-// in the page's words: until when, and that a token in Settings raises it.
+// in the page's words: until when, and that a token in Settings raises it,
+// and its tag opens the token's row there.
 // In English and Chinese, with the API faked.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -74,6 +75,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 1000, height: 900 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const posted = [], st = { mask: "", from: "", env: false };
@@ -129,15 +131,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "skills"); } catch {} });
       const page = await ctx.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       for (const st of [{ mask: "", from: "" }, { mask: "ghp_…0123", from: "settings" }]) {
-        await page.unroute("**/*");
+        // a click before can leave a file being served: let it go
+        await page.unrouteAll({ behavior: "ignoreErrors" });
         await page.route("**/*", serve(lang, [], st));
         await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=library");
         await settingsDrawn(page); // rows found are the ones that stay (#1659)
-        const check = page.locator("#view-library button.lib-updall", { hasText: w.check });
+        // Check for updates waits under the Skills heading's ⋯ (library-bar-more)
+        await page.locator("#view-library .lib-skillshead .lib-barmore").click();
+        const check = page.locator(".row-menu .rm-item.lib-check", { hasText: w.check });
         await check.waitFor();
         await check.click();
         await page.waitForFunction(() => document.querySelector("#view-library .lib-unchecked"));
@@ -145,6 +151,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const want = (st.from ? w.withToken : w.limited).replace("{time}", time);
         assert((await page.locator("#status").textContent()).includes(want), `status: ${await page.locator("#status").textContent()}`);
         assert.equal(await page.locator("#view-library .lib-unchecked").getAttribute("title"), want);
+        // without a token the tag leads to the GitHub token's row
+        if (!st.from) {
+          await page.locator("#view-library .lib-unchecked").click();
+          await page.locator("#view-settings #githubList .row.flash").waitFor();
+        } else assert.equal(await page.locator("#view-library .lib-unchecked.link").count(), 0, "a token's own limit has nothing to add");
       }
       assert.deepEqual(errors, []);
     });

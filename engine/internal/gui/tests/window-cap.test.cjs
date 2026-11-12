@@ -30,7 +30,9 @@ const fresh = () => ({
       ],
     },
     // the friend's five hours stop at 50%, its week at 40%; no account cap
-    accountWindowCaps: { "friend@example.com": { "5 hours": 50, weekly: 40 } },
+    // and its plan's credits at 50%, set before a plugin set that window
+    // aside (ferock on Discord)
+    accountWindowCaps: { "friend@example.com": { "5 hours": 50, weekly: 40, credits: 50 } },
   },
 });
 const win = (name, used, h) => ({ name, capId: name.toLowerCase(), used, resetsAt: inHours(h), capped: true });
@@ -43,6 +45,22 @@ const under = () => ({
 const past = () => ({
   "me@example.com": under()["me@example.com"],
   "Friend@Example.com": { provider: "codex", windows: [win("5 hours", 60, 3), win("Weekly", 10, 100)] },
+});
+// a window set aside holds at its own cap only (ownCap): WorkBuddy's
+// plan's credits and the extra ones, the account stopped by their total
+const aside = (name, used) => ({ ...win(name, used, 600), ownCap: true });
+const credits = (plan) => ({ provider: "codex", windows: [aside("Credits", plan), aside("Extra credits", 0), win("Total credits", plan / 4, 600)] });
+const split = () => ({ "me@example.com": credits(60), "Friend@Example.com": credits(60) });
+// counted of a total (WorkBuddy's credits, 9won_25273 on Discord), a
+// window set aside takes a new cap of its own too
+const counted = (name, used) => ({ ...aside(name, used), amount: used * 10, limit: 1000, unit: "credits" });
+const totals = () => ({ "me@example.com": { provider: "codex", windows: [counted("Credits", 30), counted("Extra credits", 0), win("Total credits", 15, 600)] }, "Friend@Example.com": credits(60) });
+// a window counted in a unit with its total (9won_25273 on Discord: a
+// day's credits) can be capped at an amount of it instead: me has used 120
+// of the day's 1000 credits
+const daily = () => ({
+  "me@example.com": { provider: "codex", windows: [win("5 hours", 10, 4), { ...win("Daily credits", 12, 20), amount: 120, limit: 1000, unit: "credits" }] },
+  "Friend@Example.com": under()["Friend@Example.com"],
 });
 
 function serve(lang, posts, use) {
@@ -64,11 +82,17 @@ function serve(lang, posts, use) {
       posts.push(body);
       const p = providers.providers.find((x) => x.id === body.id);
       const all = structuredClone(p.accountWindowCaps || {}), k = body.account.toLowerCase();
-      const caps = all[k] || {};
-      if (body.cap) caps[body.window] = body.cap;
-      else delete caps[body.window];
+      const amts = structuredClone(p.accountWindowAmounts || {});
+      const caps = all[k] || {}, amt = amts[k] || {};
+      // an amount and a share on one window replace each other
+      delete caps[body.window];
+      delete amt[body.window];
+      if (body.amount) amt[body.window] = body.amount;
+      else if (body.cap) caps[body.window] = body.cap;
       if (Object.keys(caps).length) all[k] = caps; else delete all[k];
+      if (Object.keys(amt).length) amts[k] = amt; else delete amts[k];
       p.accountWindowCaps = all;
+      p.accountWindowAmounts = amts;
       return json(providers);
     }
     if (url.pathname.startsWith("/api/")) return json({});
@@ -79,11 +103,11 @@ function serve(lang, posts, use) {
 }
 
 const words = {
-  en: { cap: (n) => `Cap ${n}%`, none: "No cap", byWindow: "Caps by window", held: "At its cap · back in 3h", head: "Cap for 5 hours", account: "Account's cap · none", off: "No cap on this window", other: "Other…" },
-  zh: { cap: (n) => `上限 ${n}%`, none: "不设上限", byWindow: "按窗口设上限", held: "已达上限 · 3 小时后恢复", head: "5 小时的上限", account: "账号上限 · 无", off: "此窗口不设上限", other: "其他…" },
-  "zh-TW": { cap: (n) => `上限 ${n}%`, none: null, byWindow: "按時段設上限", held: null, head: "5 小時的上限", account: "帳號上限 · 無", off: "此時段不設上限", other: null },
-  ja: { cap: null, none: null, byWindow: "ウィンドウごとの上限", held: null, head: "5 時間の上限", account: "アカウントの上限 · なし", off: "このウィンドウは上限なし", other: null },
-  de: { cap: null, none: null, byWindow: "Limits je Zeitfenster", held: null, head: "Limit für 5 Stunden", account: "Limit des Kontos · keins", off: "Kein Limit für dieses Zeitfenster", other: null },
+  en: { cap: (n) => `Cap ${n}%`, none: "No cap", byWindow: "Caps by window", held: "At its cap · back in 3h", head: "Cap for 5 hours", account: "Account's cap · none", off: "No cap on this window", other: "Other…" , amount: "Amount…", own: "Cap 300 credits" },
+  zh: { cap: (n) => `上限 ${n}%`, none: "不设上限", byWindow: "按窗口设上限", held: "已达上限 · 3 小时后恢复", head: "5 小时的上限", account: "账号上限 · 无", off: "此窗口不设上限", other: "其他…" , amount: "固定数量…", own: "上限 300 积分" },
+  "zh-TW": { cap: (n) => `上限 ${n}%`, none: null, byWindow: "按時段設上限", held: null, head: "5 小時的上限", account: "帳號上限 · 無", off: "此時段不設上限", other: null , amount: "固定數量…", own: "上限 300 積分" },
+  ja: { cap: null, none: null, byWindow: "ウィンドウごとの上限", held: null, head: "5 時間の上限", account: "アカウントの上限 · なし", off: "このウィンドウは上限なし", other: null , amount: "固定量…", own: "上限 300 クレジット" },
+  de: { cap: null, none: null, byWindow: "Limits je Zeitfenster", held: null, head: "Limit für 5 Stunden", account: "Limit des Kontos · keins", off: "Kein Limit für dieses Zeitfenster", other: null , amount: "Menge…", own: "Limit 300 Credits" },
 };
 const NEW = [
   "No cap on {window}: it is used to 100%, whatever this account's cap. Click to change",
@@ -93,6 +117,8 @@ const NEW = [
   "Cap for {window}, in percent", "Account's cap · {n}%", "Account's cap · none", "As the account's other windows",
   "No cap on this window", "Use this window to 100%", "Cap for {window}", "Caps by window",
   "A window can have a cap of its own: click its meter below",
+  "Cap {n}", "{window} has a cap of its own: magpie counts this account as used up once it has used {n} of {window}, until it renews. Click to change",
+  "{who} stops at {n} of {window}", "Cap for {window}, in {unit}", "An amount above 0", "Amount…", "At most this much {unit}",
 ];
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -110,6 +136,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         });
         const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const posts = [];
@@ -166,6 +193,84 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const { page, errors } = await open(t, "under", under);
         assert.equal(await row(page, "Friend@Example.com").locator(".acap-held").count(), 0);
         assert.equal(await row(page, "Friend@Example.com").locator(".aq-cap").count(), 2);
+        assert.deepEqual(errors, []);
+      });
+
+      test(`${label}: a window set aside holds the account at the cap set on it before, and only that one`, async (t) => {
+        const { page, errors, posts } = await open(t, "aside", split);
+        // the friend's Credits at 60%, past the 50% set on it: held, marked
+        const held = row(page, "Friend@Example.com").locator(".acap-held");
+        if (w.held) assert.match(await held.textContent(), /^[^·]+·/);
+        assert.equal(await held.count(), 1);
+        assert.deepEqual(await row(page, "Friend@Example.com").locator(".aq-cap").evaluateAll((ms) => ms.map((m) => m.style.left)), ["50%"]);
+        // me has none on it: no note, no mark, and no new cap on a window set aside
+        assert.equal(await row(page, "me@example.com").locator(".acap-held, .aq-cap, .aq-own").count(), 0);
+        assert.equal(await row(page, "me@example.com").locator('.aq-set[role="button"]').count(), 0);
+        // the friend's is lifted from its meter
+        await still(page, "Friend@Example.com", meter(page, "Friend@Example.com", 0));
+        await menu(page).waitFor();
+        const n = posts.length;
+        // set aside, it counts no account's cap: no such item
+        assert.equal(await menu(page).locator(".pm-name").filter({ hasText: w.account }).count(), 0);
+        await item(page, w.off).click();
+        assert.deepEqual(await posted(posts, n), { id: "codex", account: "Friend@Example.com", window: "credits", cap: 0 });
+        await page.waitForFunction(() => !document.querySelector('.editor .acc[data-account-id="Friend@Example.com"] .acap-held'));
+        assert.equal(await row(page, "Friend@Example.com").locator('.aq-set[role="button"]').count(), 0);
+        assert.deepEqual(errors, []);
+      });
+
+      test(`${label}: a window set aside, counted of a total, takes a new cap of its own`, async (t) => {
+        const { page, errors, posts } = await open(t, "aside-new", totals);
+        await still(page, "me@example.com", meter(page, "me@example.com", 0));
+        await menu(page).waitFor();
+        const names = await menu(page).locator(".pm-name").allTextContents();
+        assert.equal(names[0], w.off);
+        assert.equal(names.filter((x) => x === w.account).length, 0);
+        assert.equal(names.at(-1), w.amount);
+        const n = posts.length;
+        await item(page, "50%").click();
+        assert.deepEqual(await posted(posts, n), { id: "codex", account: "me@example.com", window: "credits", cap: 50 });
+        await row(page, "me@example.com").locator(".aq-own").first().waitFor();
+        assert.deepEqual(errors, []);
+      });
+
+      test(`${label}: a window counted in a unit is capped at an amount of it, typed, and lifted`, async (t) => {
+        const { page, errors, posts } = await open(t, "amount", daily);
+        // the day's credits: Amount… last, after Other…
+        await still(page, "me@example.com", meter(page, "me@example.com", 1));
+        await menu(page).waitFor();
+        const names = await menu(page).locator(".pm-name").allTextContents();
+        assert.equal(names.length, 9);
+        assert.equal(names[8], w.amount);
+        let n = posts.length;
+        await item(page, w.amount).click();
+        const typed = row(page, "me@example.com").locator("input.acap-in");
+        await typed.waitFor();
+        await typed.fill("0");
+        await typed.press("Enter");
+        await page.waitForTimeout(150);
+        assert.equal(posts.length, n, "0 posted as an amount");
+        await still(page, "me@example.com", meter(page, "me@example.com", 1));
+        await item(page, w.amount).click();
+        await typed.waitFor();
+        await typed.fill("300");
+        await typed.press("Enter");
+        assert.deepEqual(await posted(posts, n), { id: "codex", account: "me@example.com", window: "daily credits", amount: 300 });
+        await row(page, "me@example.com").locator(".aq-own").first().waitFor();
+        assert.equal(await row(page, "me@example.com").locator(".aq-own").first().textContent(), w.own);
+        // the mark stands at 300 of 1000; 120 used is under it
+        assert.deepEqual(await row(page, "me@example.com").locator(".aq-cap").evaluateAll((ms) => ms.map((m) => m.style.left)), ["30%"]);
+        assert.equal(await row(page, "me@example.com").locator(".acap-held").count(), 0);
+        // the amount is current in the menu; the five hours, with no unit, has no Amount…
+        await still(page, "me@example.com", meter(page, "me@example.com", 1));
+        assert.equal(await menu(page).locator(".pm-item.on .pm-name").textContent(), w.amount);
+        // back to the account's: 0, the amount goes
+        n = posts.length;
+        await item(page, w.account).click();
+        assert.deepEqual(await posted(posts, n), { id: "codex", account: "me@example.com", window: "daily credits", cap: 0 });
+        await page.waitForFunction(() => !document.querySelector('.editor .acc[data-account-id="me@example.com"] .aq-own'));
+        await still(page, "me@example.com", meter(page, "me@example.com", 0));
+        assert.equal(await menu(page).locator(".pm-name").count(), 8);
         assert.deepEqual(errors, []);
       });
 

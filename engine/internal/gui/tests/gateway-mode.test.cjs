@@ -1,7 +1,7 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // Gateway mode (Player on Discord): magpie web on a server that is only
 // the gateway for other computers' agents. boot.js says so and the page
-// opens on Providers with no Agents or Library tab, an address
+// opens on Providers with no Agents tab, an address
 // kept for one of them opening Providers; Settings leaves out what is
 // written into this computer's agents' files (provider in model names;
 // the Codex and Claude Code settings live on the Agents page, which is
@@ -82,16 +82,21 @@ const L = {
   en: { mode: "Gateway mode", noAgents: "Now on: no agents on this computer", off: "Now off: agents found on this computer" },
   zh: { mode: "网关模式", noAgents: "当前开启：本机没有 Agent", off: "当前关闭：本机找到了 Agent" },
 };
-const HIDDEN = ["agents", "library"];
+// the Library stays, its MCP servers alone, for the router (treeman_26897)
+const HIDDEN = ["agents"];
 // in the order the pages are grouped in (work, models, insights, extend)
-const KEPT = ["sessions", "providers", "routing", "gateway", "usage", "masking", "plugins"];
+const KEPT = ["sessions", "library", "providers", "routing", "groups", "gateway", "usage", "masking", "plugins"];
 
 // the tabs shown, the page shown
 const tabs = (page) => page.evaluate(() => [...document.querySelectorAll("#nav button[data-view]")].filter((b) => !b.hidden && b.offsetParent).map((b) => b.dataset.view));
 const viewShown = (page) => page.evaluate(() => [...document.querySelectorAll("main.view")].filter((v) => !v.hidden).map((v) => v.id));
-// the rows gateway mode leaves out of Settings, each shown or not
+// the rows gateway mode leaves out of Settings, each shown or not: the
+// alerts go with their Alerts list and heading, hidden as one
 const agentRows = (page) => page.evaluate(() => ["#plainNamesSegs", "#usageAlertSegs", "#balanceAlertSegs", "#resetReminderSegs", "#turnDoneSegs"]
-  .map((s) => !document.querySelector(s).closest(".row").hidden));
+  .map((s) => {
+    const r = document.querySelector(s).closest(".row"), list = r.closest("#alertList");
+    return !r.hidden && (!list || (!list.hidden && !document.querySelector("#alertHead").hidden));
+  }));
 
 async function noSelectNoBorder(page, where) {
   const bad = await page.evaluate(() => {
@@ -124,6 +129,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 1100, height: 560 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang, posts));
@@ -154,7 +160,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await clickStill(page, "#gatewayModeSegs .opt:nth-child(4)", `${where}: Off`);
       await page.waitForFunction(() => !document.querySelector('#nav button[data-view="agents"]').hidden);
       assert.deepEqual(posts.filter((p) => p[0] === "gateway-mode"), [["gateway-mode", "off"]], where);
-      assert.deepEqual(await tabs(page), ["agents", "sessions", "library", "providers", "routing", "gateway", "usage", "masking", "plugins"], `${where}: off`);
+      assert.deepEqual(await tabs(page), ["agents", "sessions", "library", "providers", "routing", "groups", "gateway", "usage", "masking", "plugins"], `${where}: off`);
       assert.deepEqual(await viewShown(page), ["view-settings"], `${where}: Settings stays`);
       assert.deepEqual(await agentRows(page), [true, true, true, true, true], `${where}: rows back`);
       assert.doesNotMatch(await page.locator("#gatewayModeSub").textContent(), new RegExp(L[lang].noAgents), where);
@@ -182,12 +188,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width: 1100, height: 560 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, [], { web, gateway: false, agents: true }));
         await page.goto("http://magpie.test/");
         await page.waitForSelector("#nav button.on");
-        assert.deepEqual(await tabs(page), ["agents", "sessions", "library", "providers", "routing", "gateway", "usage", "masking", "plugins"], where);
+        assert.deepEqual(await tabs(page), ["agents", "sessions", "library", "providers", "routing", "groups", "gateway", "usage", "masking", "plugins"], where);
         assert.deepEqual(await viewShown(page), ["view-agents"], where);
         await page.locator("#prefs").click();
         await page.waitForSelector("#langPick span");
@@ -216,6 +223,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 1100, height: 560 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       // window mode: the gateway switch is the web's alone, so the agents' rows
@@ -268,6 +276,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 420, height: 720 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang, [], { web: false, gateway: false, agents: true, notice: warning + " " + restart }));

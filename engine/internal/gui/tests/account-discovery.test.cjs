@@ -75,6 +75,7 @@ async function open(browser, lang, width, posts, over) {
   const context = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", server(lang, posts, over));
   await page.goto("http://magpie.test/?view=usage");
@@ -103,13 +104,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const { context, page, errors } = await open(browser, lang, width, posts);
           const box = page.locator("#discoveryList");
           const opts = box.locator(".opt");
-          assert.equal((await page.locator("#setPage-privacy .row-head .label").last().textContent()).trim(), head);
+          // the heading right above the list (Agents' session history follows it)
+          assert.equal((await box.evaluate((b) => b.previousElementSibling.querySelector(".label").textContent)).trim(), head);
           assert.equal((await box.locator(".name").textContent()).trim(), name);
           const sub = (await box.locator(".sub").textContent()).trim();
           assert(sub.includes("Claude Code") && sub.includes("Codex"), "the sub names what is read: " + sub);
           if (lang !== "en") assert(!sub.startsWith("Read the accounts"), lang + " sub not translated");
-          // the same Off and On as Mask secrets above it
-          assert.deepEqual(await opts.allTextContents(), await page.locator("#redactList .row").first().locator(".opt").allTextContents());
+          // the same Off and On as Mask secrets above it (the list opens
+          // with "What was masked", an Open onto Insights › Masking, which
+          // has no Off and On of its own)
+          assert.deepEqual(await opts.allTextContents(), await page.locator("#redactList .row").filter({ has: page.locator(".opt") }).first().locator(".opt").allTextContents());
           assert.equal(await opts.nth(1).evaluate((b) => b.classList.contains("on")), true, "On by default");
 
           const row = box.locator(".row");

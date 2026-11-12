@@ -35,7 +35,7 @@ func anthBody(images ...string) []byte {
 	return []byte(b.String())
 }
 
-func imageSize(t *testing.T, b64 string) (int, int) {
+func fitImageSize(t *testing.T, b64 string) (int, int) {
 	t.Helper()
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestGatewayFitsAnImageFromTheFirst(t *testing.T) {
 	if got[0] == big {
 		t.Fatal("the setting on left the oversized image as sent")
 	}
-	w, h := imageSize(t, got[0])
+	w, h := fitImageSize(t, got[0])
 	if w != 2000 || h != 1000 {
 		t.Fatalf("scaled to %dx%d, want 2000x1000", w, h)
 	}
@@ -157,7 +157,7 @@ func TestGatewayFitsAToolResultImage(t *testing.T) {
 	if got == "" || got == big {
 		t.Fatal("the tool image was not scaled")
 	}
-	w, h := imageSize(t, got)
+	w, h := fitImageSize(t, got)
 	if w != 533 || h != 2000 {
 		t.Fatalf("tool image scaled to %dx%d, want 533x2000", w, h)
 	}

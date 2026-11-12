@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/settings"
@@ -19,10 +20,17 @@ import (
 // opens only on a ChatGPT account again: the gateway leaves such a
 // subagent on the model asked for when the one set can't open it, and the
 // route trace says so. "" leaves every subagent on the model its lead
-// asked for.
+// asked for. CodexSubagentLead puts every subagent on the model its lead's
+// own turns go on, even when the lead names another (cleverpigo on X: a
+// lead on WorkBuddy's DeepSeek named gpt-5.6-sol, the first of Codex's own
+// models spawn_agent lists, and its subagent went to ChatGPT).
+
+// CodexSubagentLead is the value of settings.CodexSubagentModel that puts
+// Codex's subagents on their lead's model, whatever the lead names.
+const CodexSubagentLead = settings.CodexSubagentLead
 
 // CodexSubagentModel is the model Codex's subagents are put on, "" for
-// the one the lead asks for.
+// the one the lead asks for, CodexSubagentLead for the lead's own.
 func CodexSubagentModel() string {
 	return strings.TrimSpace(heldSettings().CodexSubagentModel)
 }
@@ -31,18 +39,24 @@ func CodexSubagentModel() string {
 // may be put on, the ones Codex's own lists show (a model taken out of
 // them, or not picked, isn't offered here either): the ChatGPT accounts'
 // first, as they open a task sealed for them too, then the rest in the
-// catalog's order.
+// catalog's order. The list is kept while the catalog is held, only for
+// reading: Codex's Agents row asked it each poll, a copy of Codex's whole
+// catalog and the list made from it, 17 MB of forty polls with real
+// accounts.
 func CodexSubagentModels() []Entry {
+	return keptOf("codex-subagent-models", codexSubagentModels)
+}
+
+func codexSubagentModels() []Entry {
 	var chatgpt, rest []Entry
-	shown, _ := CatalogFor("codex")
-	for _, e := range shown {
+	for _, e := range catalogKept("codex").shown {
 		if chatGPTEntry(e) {
 			chatgpt = append(chatgpt, e)
 		} else {
 			rest = append(rest, e)
 		}
 	}
-	return append(chatgpt, rest...)
+	return slices.Clip(append(chatgpt, rest...))
 }
 
 func chatGPTEntry(e Entry) bool {
@@ -71,7 +85,7 @@ func CodexSubagentUnserved(id string) string {
 
 // SetCodexSubagentModel puts Codex's subagents on id, a model or routing
 // group of magpie's (provider/model, group/<id>); "" leaves them on the
-// model their lead asks for. One magpie doesn't serve now is kept all the
+// model their lead asks for, CodexSubagentLead puts them on the lead's. One magpie doesn't serve now is kept all the
 // same — a backup or profile put back on a computer whose providers
 // differ, or an account signed in again later — and the gateway leaves
 // subagents on the model asked for until it is served, saying why in the
@@ -79,7 +93,7 @@ func CodexSubagentUnserved(id string) string {
 // model of magpie's to put the request on.
 func SetCodexSubagentModel(id string) error {
 	id = strings.TrimSpace(id)
-	if pid, model, ok := strings.Cut(id, "/"); id != "" && (!ok || pid == "" || model == "") {
+	if pid, model, ok := strings.Cut(id, "/"); id != "" && id != CodexSubagentLead && (!ok || pid == "" || model == "") {
 		return fmt.Errorf("Codex's subagents can't be put on %q: pick one of magpie's models (provider/model)", id)
 	}
 	s := settings.Load()

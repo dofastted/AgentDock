@@ -164,21 +164,24 @@ func openChamber(home, cfg string) *Agent {
 	oc := opencode(home, cfg)
 	ocPath := oc.Path
 	auth := filepath.Join(home, ".local", "share", "opencode", "auth.json")
-	provider := openCodeKept(ocPath, func() any { return magpieProviderJSONFor("opencode", "opencode") })
+	block := func() any { return magpieProviderJSONFor("opencode", "opencode") }
+	// the OpenCode config as the OpenCode on PATH reads it, which writes
+	// it in OpenCode 2's words for an OpenCode 2 (ocFile), as OpenCode's
+	// own Sync does: the two never write it in each other's
+	file := func() ocFile { return ocFile{path: ocPath, two: openCodeTwo(here("")), block: block} }
 	opts := func(key string) func(map[string]string) []Option {
 		return func(cur map[string]string) []Option {
-			return append(ownOptions(auth, cur[key]), viaMagpie("opencode", magpieID+"/")...)
+			return withVia(ownOptions(auth, cur[key]), "opencode", magpieID+"/")
 		}
 	}
 	// stepped off magpie: its provider goes too, when nothing else in the
 	// OpenCode config names one of its models
 	tidy := func() error {
 		m, _ := edit.GetJSON(ocPath, "model")
-		sm, _ := edit.GetJSON(ocPath, "small_model")
-		if usesMagpie(m, sm, s.model(), s.small()) {
+		if usesMagpie(m, file().small(), s.model(), s.small()) {
 			return nil
 		}
-		return edit.DelJSON(ocPath, "provider."+magpieID)
+		return edit.DelJSON(ocPath, "provider."+magpieID, openCodeNativeKey)
 	}
 	return &Agent{
 		ID: "openchamber", Name: "OpenChamber", Icon: "openchamber", Aliases: []string{"chamber"}, Spelled: openCodeSpelled(ocPath, gatewayV1),
@@ -203,14 +206,12 @@ func openChamber(home, cfg string) *Agent {
 			if !usesMagpie(s.model(), s.small()) {
 				return ""
 			}
-			return wiringOff("OpenChamber", ocPath, func(k string) (string, bool) { return edit.GetJSON(ocPath, "provider."+magpieID+".options."+k) },
-				"baseURL", gatewayV1(), "apiKey", hereKey())
+			return openCodeWiringOff("OpenChamber", ocPath, gatewayV1(), hereKey())
 		},
+		ListOnly: true,
 		Sync: func() error {
-			if _, ok := edit.GetJSON(ocPath, "provider."+magpieID); !ok && usesMagpie(s.model(), s.small()) {
-				return edit.SetJSON(ocPath, edit.KV{Path: "provider." + magpieID, Value: provider()})
-			}
-			return syncJSONInOrder(ocPath, "provider."+magpieID, provider)
+			// and the copy under providers its own form writes (#3883)
+			return file().sync(usesMagpie(s.model(), s.small()))
 		},
 		Fields: []Field{
 			{Key: "model", Label: "model", Get: s.model, Options: opts("model"), Set: func(v string) error {

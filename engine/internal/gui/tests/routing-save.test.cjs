@@ -55,8 +55,8 @@ function serve(lang, posts, off = []) {
 }
 
 const ROUTINGS = [
-  ["", "Smart", "智能"], ["order", "In order", "按顺序"], ["rotate", "In turn", "轮流"],
-  ["usage", "Least used first", "用量少的优先"], ["pace", "Weekly pace", "重置前用完"],
+  ["", "Smart", "智能"], ["order", "In order", "按顺序"], ["drain", "Until used up", "用完再换"], ["rotate", "In turn", "轮流"],
+  ["usage", "Least used first", "用量少的优先"], ["pace", "Use before expiry", "到期前用完"],
 ];
 const STAYS = [["", "Auto", "自动"], ["session", "Session", "整个会话"], ["turn", "Within a turn", "一轮之内"], ["off", "Off", "关闭"]];
 
@@ -70,6 +70,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(() => browser.close());
         const page = await (await browser.newContext({ viewport: { width: 900, height: 720 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
@@ -143,6 +144,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const where = `${width}px ${p.name}`;
           const page = await (await browser.newContext({ viewport: { width, height: 720 }, reducedMotion: "reduce" })).newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await page.route("**/*", serve(lang, [], ["rotation"]));
@@ -157,7 +159,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // on again, every routing is back
           await page.evaluate(() => applyFeatures([{ id: "rotation", on: true }]));
           const back = await field.locator(".segs").first().evaluate((box) => [...box.querySelectorAll(".opt")].filter((b) => getComputedStyle(b).display !== "none").length);
-          assert.equal(back, p.account ? 7 : 8, `${where}: every routing back`);
+          // By weight is offered for accounts as for keys (rubbzha on X)
+          assert.equal(back, 9, `${where}: every routing back`);
           assert.deepEqual(errors, [], where);
           await page.context().close();
         }

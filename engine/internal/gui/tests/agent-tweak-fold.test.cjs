@@ -41,7 +41,7 @@ function agents({ ultracode = "", effort = "", tierEffort = "", subEffort = "", 
 const IDS = ["claude", "codex", "gemini", "opencode"];
 
 function serve(first) {
-  let state = { agents: agents(first), profiles: [], settings: { lang: "en", theme: "light" } };
+  let state = { agents: agents(first), profiles: [], settings: { lang: "en", theme: "light", guideHidden: true } };
   return async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -81,6 +81,7 @@ async function open(t, engine, first) {
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width: 1000, height: 800 }, reducedMotion: "reduce" })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(first));

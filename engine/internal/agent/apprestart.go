@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,10 +17,11 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// Claude Desktop and WorkBuddy read what magpie writes for them as they
-// start (微雨南山 and stones on Discord, 10-24: a provider added showed up
-// there only after a restart). Claude Desktop asks the gateway for its
-// models once, at start. WorkBuddy 5.6's app.asar watches models.json only
+// Claude Desktop, WorkBuddy and OpenMausBot read what magpie writes for
+// them as they start (微雨南山 and stones on Discord, 10-24: a provider
+// added showed up there only after a restart; maxleebeta, 11-08: a model
+// picked for OpenMausBot wasn't in its search). Claude Desktop asks the
+// gateway for its models once, at start. WorkBuddy 5.6's app.asar watches models.json only
 // when the file was there at start, and the watch is on the file itself,
 // so a rewrite by rename leaves it watching the old one. While such an app
 // runs on what it read before magpie's last change, its Agents row offers
@@ -35,6 +37,10 @@ type restartable struct {
 	mac    desktopApp
 	winExe string
 	win    func(image string) bool
+	// macCmd, when set, says a main process of the bundle is the copy
+	// magpie wires: Claude Desktop runs twice with the isolated one on
+	// (desktopInstance)
+	macCmd func(cmd string) bool
 }
 
 // claudeDesktopApp is Claude Desktop's bundle (Claude 2.7032's Info.plist:
@@ -43,21 +49,29 @@ var claudeDesktopApp = desktopApp{id: "com.anthropic.claudefordesktop", names: [
 
 // restartApps are the agents whose desktop app the Agents row restarts.
 // macOS: Claude.app, WorkBuddy.app and WorkBuddy AI.app (both run an
-// executable named Electron). Windows: Claude Desktop is claude.exe, from
-// Squirrel's %LOCALAPPDATA%\AnthropicClaude (a claude.exe stub beside
-// app-<version>\claude.exe) or its MSIX (desktopdir's Claude_… and
-// AnthropicPBC.Claude_…), never Claude Code's claude.exe elsewhere;
+// executable named Electron) and OpenMausBot.app. Windows: Claude
+// Desktop is claude.exe, from Squirrel's %LOCALAPPDATA%\AnthropicClaude
+// (a claude.exe stub beside app-<version>\claude.exe) or its MSIX
+// (desktopdir's Claude_… and AnthropicPBC.Claude_…), never Claude
+// Code's claude.exe elsewhere;
 // WorkBuddy is C:\Program Files\WorkBuddy\WorkBuddy.exe (5.6.2, seen on
 // the Windows box). WorkBuddy AI's Windows build wasn't to hand, so it has
-// no Restart there. None of them ships a Linux app.
+// no Restart there. Only OpenMausBot ships a Linux app; magpie doesn't
+// restart it there.
 var restartApps = map[string]restartable{
-	"claude-desktop": {mac: claudeDesktopApp, winExe: "claude.exe", win: func(image string) bool {
+	"claude-desktop": {mac: claudeDesktopApp, macCmd: desktopInstance, winExe: "claude.exe", win: func(image string) bool {
 		return winBase(image, "claude.exe") && (winHas(image, `\AnthropicClaude\`) || winHas(image, `\WindowsApps\Claude_`) || winHas(image, `\WindowsApps\AnthropicPBC.Claude_`))
 	}},
 	"workbuddy": {mac: workbuddyApp, winExe: "WorkBuddy.exe", win: func(image string) bool {
 		return winBase(image, "WorkBuddy.exe") && !winHas(image, `WorkBuddy AI`) && !winHas(image, `WorkBuddy-AI`)
 	}},
 	"workbuddy-ai": {mac: workbuddyAIApp},
+	// OpenMausBot reads its engines, magpie's models among them, once at
+	// start (openmausbot.go); its Windows build is electron-builder's
+	// per-user NSIS, OpenMausBot.exe under Programs\openmausbot
+	"openmausbot": {mac: ombApp, winExe: "OpenMausBot.exe", win: func(image string) bool {
+		return winBase(image, "OpenMausBot.exe")
+	}},
 }
 
 func winBase(image, name string) bool {
@@ -69,44 +83,132 @@ func winHas(image, part string) bool {
 	return strings.Contains(strings.ToLower(image), strings.ToLower(part))
 }
 
-// restartOnWindows and restartOnMac say which system this is; vars so a
-// test runs either.
+// restartOnWindows, restartOnMac and restartOnLinux say which system this
+// is; vars so a test runs any.
 var (
 	restartOnWindows = runtime.GOOS == "windows"
 	restartOnMac     = runtime.GOOS == "darwin"
+	restartOnLinux   = runtime.GOOS == "linux"
 )
 
 // winProc is a process running on Windows: its id, its parent's, its
-// image's full path, when it started, and its AppUserModelID when it is a
-// packaged (Store or MSIX) app's.
+// image's full path, its command line ("" when it can't be read), when it
+// started, and its AppUserModelID when it is a packaged (Store or MSIX)
+// app's.
 type winProc struct {
 	pid, parent int
-	image       string
+	image, cmd  string
 	start       time.Time
 	aumid       string
 }
 
+// runsScript says whether a process of an app's own executable exe runs a
+// script on it as Node (ELECTRON_RUN_AS_NODE), which is no copy of the app
+// itself: its command line names a .js, .cjs or .mjs file, or its first
+// argument that is no flag is a file's absolute path. WorkBuddy 5.5 and
+// 5.6 run their daemon so ("WorkBuddy.exe"
+// --disable-warning=ExperimentalWarning "…\app.asar\main\
+// daemon-app-server-entry.js" --stdio, seen on the Windows box), their
+// sidecar (…/main/sidecar-entry.js --token …) and the CLI workers and
+// prewarmed CLIs it keeps (…/cli/bin/codebuddy --prewarm …, a script with
+// no extension). The sidecar is spawned detached, outlives the app's quit
+// and is taken up again by the next start (ensureSidecar: "reconnected to
+// existing sidecar"). Counted as the app, it kept the app's start at its
+// own, so the row said to restart WorkBuddy after every real restart, and
+// a Restart waited for it to end and never opened WorkBuddy again (Northes
+// on Discord, 11-04). Electron's own processes name no script: the main
+// one runs bare, or with flags, or a link it was opened with
+// (workbuddy://…); its helpers run with flags (--type=renderer …) and, on
+// Windows, /prefetch:N. exe may be "" when it isn't known; the command
+// line's first word is taken for it then. A command line that can't be
+// read ("") is the app's.
+func runsScript(cmd, exe string) bool {
+	cmd = strings.TrimSpace(cmd)
+	for _, f := range strings.Fields(cmd) {
+		f = strings.ToLower(strings.Trim(f, `"'`))
+		if strings.HasSuffix(f, ".js") || strings.HasSuffix(f, ".cjs") || strings.HasSuffix(f, ".mjs") {
+			return true
+		}
+	}
+	// the arguments: the command line past the executable, which a Mac's
+	// may show with spaces in its path, and Windows' in quotes
+	rest := ""
+	switch {
+	case exe != "" && len(cmd) >= len(exe)+2 && strings.EqualFold(cmd[:len(exe)+2], `"`+exe+`"`):
+		rest = cmd[len(exe)+2:]
+	case exe != "" && len(cmd) >= len(exe) && strings.EqualFold(cmd[:len(exe)], exe):
+		rest = cmd[len(exe):]
+	case strings.HasPrefix(cmd, `"`):
+		if i := strings.Index(cmd[1:], `"`); i >= 0 {
+			rest = cmd[i+2:]
+		}
+	default:
+		_, rest, _ = strings.Cut(cmd, " ")
+	}
+	for _, f := range strings.Fields(rest) {
+		f = strings.Trim(f, `"'`)
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		return absArg(f)
+	}
+	return false
+}
+
+// absArg says whether an argument is an absolute file path, on either
+// system: /…, C:\… or C:/…, \\server\…; never Windows' /prefetch:N.
+func absArg(f string) bool {
+	switch {
+	case strings.HasPrefix(f, "/prefetch:"):
+		return false
+	case strings.HasPrefix(f, "/"), strings.HasPrefix(f, `\\`):
+		return true
+	}
+	return len(f) >= 3 && f[1] == ':' && (f[2] == '\\' || f[2] == '/') &&
+		('a' <= f[0]|0x20 && f[0]|0x20 <= 'z')
+}
+
+// appProcs are those of ps, processes of the executable exe, that are the
+// app's own, not a script run on it (runsScript).
+func appProcs(ps []runningProc, exe string) []runningProc {
+	var out []runningProc
+	for _, p := range ps {
+		if !runsScript(p.cmd, exe) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // The Windows part of a restart, vars so tests stand in for each:
 // winProcs lists the running processes named exe, winClose asks pids to close as
-// their windows' close does, winEnd ends pid with its tree, and winLaunch
-// opens what a restart opens again.
+// their windows' close does, winShown says whether any of pids still shows
+// a window (true when it can't tell), winEnd ends pid with its tree, and
+// winLaunch opens what a restart opens again.
 var (
 	winProcs  = listWinProcs
 	winClose  = closeWinProcs
+	winShown  = winWindowsShown
 	winEnd    = endWinTree
 	winLaunch = launchWin
-	// appCloseWait is how long a Windows app has to close by itself
-	// before it is ended, and appBackWait how long it has to come back
+	// appCloseWait is how long a Windows app that still shows a window
+	// has to close by itself before it is ended, and appBackWait how long
+	// it has to come back. appTrayGrace is how long one whose windows have
+	// all closed has to end by itself before it counts as staying in the
+	// tray.
 	appCloseWait = 10 * time.Second
 	appBackWait  = 20 * time.Second
+	appTrayGrace = time.Second
 	appPoll      = 200 * time.Millisecond
 )
 
 // appRunning is r's app as it runs here: when it started, and on macOS its
-// bundle, on Windows its processes and the one the rest hang off.
+// bundle and the bundle's main executable, on Windows its processes and
+// the one the rest hang off.
 type appRunning struct {
 	since  time.Time
 	bundle string
+	exe    string
 	procs  []winProc
 	main   winProc
 }
@@ -119,7 +221,7 @@ func findRestartable(r restartable) (appRunning, bool) {
 		}
 		var ps []winProc
 		for _, p := range winProcs(r.winExe) {
-			if r.win(p.image) {
+			if r.win(p.image) && !runsScript(p.cmd, p.image) {
 				ps = append(ps, p)
 			}
 		}
@@ -152,7 +254,12 @@ func findRestartable(r restartable) (appRunning, bool) {
 		if exe == "" {
 			continue
 		}
-		ps := running("^" + regexp.QuoteMeta(filepath.Join(b, "Contents", "MacOS", exe)) + "( |$)")
+		main := filepath.Join(b, "Contents", "MacOS", exe)
+		found := running("^" + regexp.QuoteMeta(main) + "( |$)")
+		if r.macCmd != nil {
+			found = slices.DeleteFunc(found, func(p runningProc) bool { return !r.macCmd(p.cmd) })
+		}
+		ps := appProcs(found, main)
 		if len(ps) == 0 {
 			continue
 		}
@@ -160,7 +267,7 @@ func findRestartable(r restartable) (appRunning, bool) {
 		for _, p := range ps[1:] {
 			up = max(up, p.up)
 		}
-		return appRunning{since: time.Now().Add(-up), bundle: b}, true
+		return appRunning{since: time.Now().Add(-up), bundle: b, exe: main}, true
 	}
 	return appRunning{}, false
 }
@@ -218,6 +325,7 @@ func (a *Agent) AppBehind() *AppRun {
 // at start, and that part. Claude Desktop: deploymentMode, the profile
 // applied and magpie's profile (or the user's for magpie's gateway), with the models the gateway lists it.
 // WorkBuddy: magpie's models in its models.json (workbuddyPart).
+// OpenMausBot: magpie's engine in its config.json (ombPart).
 func (a *Agent) appReads() (files []string, reads func() string) {
 	switch a.ID {
 	case "claude-desktop":
@@ -231,11 +339,19 @@ func (a *Agent) appReads() (files []string, reads func() string) {
 		return files, func() string {
 			var b strings.Builder
 			for _, p := range ps {
-				m, _ := edit.GetJSON(p.config, "deploymentMode")
-				m3, _ := edit.GetJSON(p.config3p, "deploymentMode")
 				id, _ := edit.GetJSON(p.meta, "appliedId")
+				applied := p.prof
+				if f := desktopAppliedGateway(p); f != "" {
+					applied = f
+				}
+				// the mode Desktop starts in, not the files' words: it
+				// drops a stored deploymentMode itself (desktop3p)
+				mode := "1p"
+				if desktop3p(p, applied) {
+					mode = "3p"
+				}
 				prof, _ := edit.Read(p.prof)
-				b.WriteString(m + "\n" + m3 + "\n" + id + "\n")
+				b.WriteString(mode + "\n" + id + "\n")
 				b.Write(prof)
 				b.WriteString("\n")
 				// a profile of the user's for magpie's gateway, applied
@@ -254,6 +370,8 @@ func (a *Agent) appReads() (files []string, reads func() string) {
 		}
 	case "workbuddy", "workbuddy-ai":
 		return []string{a.Path}, func() string { return workbuddyPart(a.Path) }
+	case "openmausbot":
+		return []string{a.Path}, func() string { return ombPart(a.Path) }
 	}
 	return nil, nil
 }
@@ -285,7 +403,8 @@ func restartErr(n notice, a *Agent) error { return errors.New(n.say("agent", a.N
 // RestartApp quits the agent's desktop app and opens it again, so it reads
 // what magpie wrote. Only the Agents row's Restart calls it, after the
 // user confirmed, and only an app AppBehind lists is quit. macOS: asked to
-// quit as ⌘Q does, every process of its bundle waited for; one still open
+// quit as ⌘Q does, every process of its bundle waited for (but a script
+// run on it, runsScript); one still open
 // then (it may be asking something) is left, never forced, and not opened
 // a second time. Windows: its windows are asked to close; an app still
 // running then (Electron apps stay in the tray) is ended with its tree.
@@ -304,15 +423,24 @@ func (a *Agent) RestartApp(ctx context.Context) error {
 	if !ok {
 		return restartErr(noticeRestartCurrent, a)
 	}
-	if c.bundle != "" {
-		return reopenBundle(ctx, a, c.bundle)
+	if c.bundle != "" && a.ID == "claude-desktop" && desktopIsolatedOn() {
+		return reopenIsolated(ctx, a, r, c.exe)
 	}
+	if c.bundle != "" {
+		return reopenBundle(ctx, a, c.bundle, c.exe)
+	}
+	return a.restartWin(ctx, r, c)
+}
+
+// restartWin asks c's windows to close, ends it when it stays (in
+// the tray, or past appCloseWait), opens it again and waits for it.
+func (a *Agent) restartWin(ctx context.Context, r restartable, c appRunning) error {
 	pids := make([]int, len(c.procs))
 	for i, p := range c.procs {
 		pids[i] = p.pid
 	}
 	_ = winClose(pids)
-	if !waitGone(ctx, r, appCloseWait) {
+	if !waitClosed(ctx, r, appCloseWait) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -323,6 +451,7 @@ func (a *Agent) RestartApp(ctx context.Context) error {
 			return restartErr(noticeRestartStillThere, a)
 		}
 	}
+	appQuitDone(a.ID)
 	if err := winLaunch(c.main); err != nil {
 		return restartErr(noticeRestartNoOpen, a)
 	}
@@ -337,6 +466,42 @@ func (a *Agent) RestartApp(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(appPoll):
+		}
+	}
+}
+
+// waitClosed waits, after its windows were asked to close, until r's app
+// no longer runs: true when it ended by itself. An app that closed every
+// window and still runs after appTrayGrace has gone to the tray, which no
+// waiting ends (Claude Desktop 2.9939 on Windows hides its window in ~0.6s
+// and keeps all nine processes), so it is false then, not after limit;
+// limit is for an app still showing a window, which may be asking
+// something.
+func waitClosed(ctx context.Context, r restartable, limit time.Duration) bool {
+	start := time.Now()
+	end := start.Add(limit)
+	for {
+		c, ok := findRestartable(r)
+		if !ok {
+			return true
+		}
+		now := time.Now()
+		if !now.Before(end) {
+			return false
+		}
+		if now.Sub(start) >= appTrayGrace {
+			pids := make([]int, len(c.procs))
+			for i, p := range c.procs {
+				pids[i] = p.pid
+			}
+			if !winShown(pids) {
+				return false
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
 		case <-time.After(appPoll):
 		}
 	}
@@ -361,14 +526,16 @@ func waitGone(ctx context.Context, r restartable, limit time.Duration) bool {
 }
 
 // reopenBundle quits the app at bundle, as ⌘Q does, waits for every
-// process under it to end and opens it again (codex_app.go's way).
-func reopenBundle(ctx context.Context, a *Agent, bundle string) error {
+// process under it to end, but for a script run on its executable exe,
+// which may outlive it by design (runsScript), and opens it again
+// (codex_app.go's way).
+func reopenBundle(ctx context.Context, a *Agent, bundle, exe string) error {
 	if err := appQuit(ctx, bundle); err != nil {
 		return restartErr(noticeRestartAsk, a)
 	}
 	pat := regexp.QuoteMeta(bundle + "/Contents/")
 	end := time.Now().Add(appQuitWait)
-	for len(running(pat)) > 0 {
+	for len(appProcs(running(pat), exe)) > 0 {
 		if time.Now().After(end) {
 			return restartErr(noticeRestartStillOpen, a)
 		}
@@ -378,8 +545,19 @@ func reopenBundle(ctx context.Context, a *Agent, bundle string) error {
 		case <-time.After(appPoll):
 		}
 	}
+	appQuitDone(a.ID)
 	if err := appOpen(ctx, bundle); err != nil {
 		return restartErr(noticeRestartNoOpen, a)
 	}
 	return nil
+}
+
+// appQuitDone runs once agent id's app has quit and before it opens
+// again: the Codex app's projects are carried to its other accounts then,
+// while it can't write over them (provider.CodexAppClosed). A var so
+// tests don't touch the state file.
+var appQuitDone = func(id string) {
+	if id == "codex" {
+		provider.CodexAppClosed()
+	}
 }

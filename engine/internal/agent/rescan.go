@@ -17,6 +17,12 @@ import (
 func Rescan() {
 	proc.Forget()
 	wslrun.Forget()
+	forgetLooks() // a profile made since shows by its name
+
+	// where updates come from is asked again, too: a version published
+	// after magpie started showed no update until the memo ran out (#4980)
+	latests.expireAll()
+	wslProbes.expireAll()
 
 	cursorLocalSeen.Lock()
 	cursorLocalSeen.at = time.Time{}

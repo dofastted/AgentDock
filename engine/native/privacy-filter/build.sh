@@ -7,7 +7,11 @@
 # windows-amd64) gets two programs: pf-serve-vulkan, linked to the Vulkan
 # loader the GPU's driver installs, and pf-serve, the CPU's alone, for a
 # computer with no loader, where pf-serve-vulkan can't start at all.
-# darwin-arm64's pf-serve uses Metal.
+# darwin-arm64's pf-serve uses Metal. Each x86 target also gets
+# pf-serve-base, built for SSE4.2 alone: pf-serve's AVX2, FMA, F16C and
+# BMI2 end it with SIGILL on a CPU without them (a Celeron, a Pentium, a
+# Mac before Haswell) and under Rosetta before macOS 15, and magpie runs
+# pf-serve-base there (internal/pii's fullX86).
 set -euo pipefail
 
 PF_REPO=https://github.com/localai-org/privacy-filter.cpp
@@ -96,6 +100,7 @@ build() {
 }
 
 x86=(-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON)
+base=(-DGGML_SSE42=ON -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF)
 case $target in
   darwin-arm64)
     build pf-serve -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
@@ -104,12 +109,15 @@ case $target in
   darwin-amd64)
     build pf-serve -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DCMAKE_OSX_ARCHITECTURES=x86_64 \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DGGML_METAL=OFF -DGGML_BLAS=OFF "${x86[@]}"
+    build pf-serve-base -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DGGML_METAL=OFF -DGGML_BLAS=OFF "${base[@]}"
     ;;
   linux-amd64)
     fetch_vulkan
     static=(-DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++")
     build pf-serve "${static[@]}" "${x86[@]}"
     build pf-serve-vulkan "${static[@]}" "${x86[@]}" "${vkargs[@]}"
+    build pf-serve-base "${static[@]}" "${base[@]}"
     ;;
   linux-arm64)
     build pf-serve -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
@@ -120,6 +128,7 @@ case $target in
     win=(-DCMAKE_TOOLCHAIN_FILE="$here/mingw.cmake" -DCMAKE_C_FLAGS=-D_WIN32_WINNT=0x0A00 -DCMAKE_CXX_FLAGS=-D_WIN32_WINNT=0x0A00)
     build pf-serve "${win[@]}" "${x86[@]}"
     build pf-serve-vulkan "${win[@]}" "${x86[@]}" "${vkargs[@]}" -DVulkan_LIBRARY="$vk/lib/libvulkan-1.a"
+    build pf-serve-base "${win[@]}" "${base[@]}"
     ;;
   *)
     echo "unknown target $target" >&2

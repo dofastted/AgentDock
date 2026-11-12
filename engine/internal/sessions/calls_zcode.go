@@ -37,6 +37,9 @@ var zcCallList struct {
 
 // zcodeCallFiles are ZCode's sessions as call sources.
 func zcodeCallFiles() []file {
+	if !Reads("zcode") {
+		return nil
+	}
 	path := zcodeDB()
 	if !fileExists(path) {
 		return nil
@@ -52,7 +55,7 @@ func zcodeCallFiles() []file {
 		out = openCodeDBFilesIn("zcode", path, db, "COUNT(m.id) + COALESCE(SUM(m.time_updated), 0)")
 	})
 	for i := range out {
-		out[i].oc = nil // the handle is not kept; a read opens it again
+		out[i].w().oc = nil // the handle is not kept; a read opens it again
 	}
 	zcCallList.stamp, zcCallList.files = stamp, out
 	return append([]file(nil), out...)
@@ -71,6 +74,7 @@ func readZCodeCalls(f file) (*callFile, bool) {
 	path, sid := f.path[:i], f.path[i+1:]
 	var info ocInfo
 	var msgs [][]byte
+	var copies []bool
 	if !withOCCallDB(path, func(db *sql.DB) {
 		var store ocStore = zcDB{ocDB{db}}
 		if ocHasTable(db, "session_v2") {
@@ -81,19 +85,40 @@ func readZCodeCalls(f file) (*callFile, bool) {
 		}
 		info, _ = store.info(sid)
 		msgs = store.messages(sid)
+		// a copy of a message still in the database (zcDB.copied): the
+		// original's session counts its call. Marked by row, not by id: a
+		// row's id is in its own column and not in its data, so every
+		// message here reads with an empty ID, and one copy marked by id
+		// left out the whole session, a fork's own replies too (Sky,
+		// skyhuang1994: a fork's 11,409 calls of its own, 3.49B tokens).
+		copies = make([]bool, len(msgs))
+		if z, ok := store.(zcDB); ok {
+			for i, b := range msgs {
+				var m ocMessage
+				if json.Unmarshal(b, &m) == nil && m.Role == "assistant" && z.copied(m) {
+					copies[i] = true
+				}
+			}
+		}
 	}) {
 		return st, false
 	}
 	if st.Session == "" {
 		st.Session = info.ID
 	}
-	for _, b := range msgs {
+	for i, b := range msgs {
 		var m ocMessage
-		if json.Unmarshal(b, &m) != nil || m.Role != "assistant" || ocGatewayProvider(m.ProviderID) {
+		if json.Unmarshal(b, &m) != nil || m.Role != "assistant" || ocGatewayProvider(m.ProviderID) || copies[i] {
 			continue
 		}
 		if c, ok := ocCall(st, m, info.Directory); ok {
 			c.Agent = "zcode"
+			// a request names its session without the prefix the database
+			// gives it (zcodeBareID), and a call is paired with the
+			// gateway's record of it by that session: under sess_… none was,
+			// and a call magpie had routed was counted again as a local
+			// session's (nori_tsukiji on X)
+			c.Session = zcodeBareID(c.Session)
 			st.Calls = append(st.Calls, c)
 		}
 	}

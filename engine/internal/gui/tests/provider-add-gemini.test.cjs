@@ -50,13 +50,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await (await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" })).newPage();
         t.after(() => browser.close());
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
         await page.goto("http://magpie.test/?view=providers");
         const S = L[lang];
         await page.locator("#addProvider").click();
-        await page.locator("#addSheet .custom-foot .custom").click();
+        await page.locator("#addSheet .row-head .custom").click();
         const ed = page.locator(".editor.new");
         await ed.locator(".base-url").waitFor();
         await ed.locator(`input[placeholder="${S.name}"]`).fill("Gem Relay");

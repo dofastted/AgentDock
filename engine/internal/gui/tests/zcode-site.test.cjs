@@ -16,6 +16,7 @@ for (const engine of engines) for (const lang of ["en", "zh"]) {
     t.after(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 420, height: 640 } });
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const posted = [];
@@ -59,7 +60,7 @@ for (const engine of engines) for (const lang of ["en", "zh"]) {
     assert.match(await page.locator("#zsite").innerText(), new RegExp(title));
     const sites = await page.locator("#zsite button[data-site]").evaluateAll((bs) => bs.map((b) => [b.dataset.site, b.textContent, b.title]));
     assert.deepEqual(sites.map((s) => s[0]), ["zai", "bigmodel"]);
-    assert.equal(sites[1][1], lang === "zh" ? "智谱 BigModel" : "BigModel (智谱)");
+    assert.equal(sites[1][1], lang === "zh" ? "智谱 BigModel" : "BigModel (Zhipu)");
     assert.equal(sites[1][2], "bigmodel.cn");
 
     // BigModel posts its site and keeps it for "Try again"

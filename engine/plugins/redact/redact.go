@@ -10,6 +10,9 @@
 package redact
 
 import (
+	"slices"
+
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/masking"
 	"github.com/yetone/magpie/internal/pluginrt"
@@ -22,6 +25,7 @@ func init() {
 		Name: "Privacy masking", Sub: "Secrets, personal data and your own words go to vendors as placeholders, and come back as they were",
 		One: "Masking is on", Many: "Masking is on",
 		InUse: InUse,
+		SetAt: "privacy #redactList",
 		// Insights › Masking: what masking did, request by request
 		Parts:  []pluginrt.Part{{Slot: "nav.page", Key: "masking"}},
 		Client: []string{"i18n.js", "redact.css", "client.js", "page.js"},
@@ -40,6 +44,14 @@ func InUse() (int, error) {
 		return 0, err
 	}
 	if masking.Wanted(st) {
+		return 1, nil
+	}
+	// a key held to masking (access.RedactOn) uses it with the setting off
+	keys, err := access.List()
+	if err != nil {
+		return 0, err
+	}
+	if slices.ContainsFunc(keys, func(k access.Key) bool { return k.Redact == access.RedactOn && !k.Off }) {
 		return 1, nil
 	}
 	return 0, nil

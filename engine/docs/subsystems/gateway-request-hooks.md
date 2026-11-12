@@ -28,6 +28,10 @@ its alias `magpie.gateway`, `*.gateway.js`), so a hook that imports `node:fs`
 is never also loaded as middleware.
 Bun runs TypeScript directly. A gateway-only package does not need provider
 main/exports, a client MCP installation, or a client skill.
+Discover lists a GitHub repository tagged `magpie-plugin` whose package.json has
+`magpie.hooks` and no main or exports as a Request hook, picked out with
+middleware (`TaggedRepos` checks that the hooks file is committed, as it does
+middleware's; `TestTaggedHooksAlone`, `plugin-github-hooks.test.cjs`).
 
 `export async function onRequest(body, ctx)` receives the client protocol JSON
 before routing. Return a JSON object to add context; return `undefined` to keep
@@ -38,26 +42,56 @@ reply it asked for). A rolled-back hook counts as failed and gets no `onResponse
 for that request. It cannot reject requests or register tools. The synchronous middleware API remains available separately.
 
 Context fields: `protocol` (`chat`, `responses`, `anthropic`, `gemini`), `model`,
-`stream`, `path`, `origin`, `agent`, `session`, `cwd`, `query`, package `options`, private
+`stream`, `path`, `origin`, `agent`, `session`, `cwd`, `query`, `kind`, package `options`, private
 request `state`, an `AbortSignal` and `report(code, bytes)`. Headers and client
 credentials are not forwarded to the hook. Query extraction keeps original model
 input intact while excluding client environment/instruction notices from recall.
 Empty identity fields must not be interpreted as authenticated user identity.
 
+`kind` is `"subagent"` when the client says the request is a subagent's
+(Claude Code's `x-claude-code-agent-id`, Codex's `x-openai-subagent:
+collab_spawn`; `hookKind` in `internal/gateway/middleware.go`) and `""`
+otherwise. It is read from each request's own headers and is the same in
+`onRequest` and that request's `onResponse`; a main-conversation request
+after a subagent in the same session is `""`. The prompt and tool history
+are never used to guess it.
+
 `origin` is host-derived: `local` for a direct loopback request without
-forwarding headers or a named gateway key, `gateway-key` for a named key
-(including one used on loopback), otherwise `remote`. Forwarded traffic stays
+forwarding headers or a named gateway key; `magpie-key` for the sharing key
+magpie made itself (`access.Identity.Default`: the key marked `lan`, the one
+`LANKeyID` names, or an older magpie's settings-only key) when it comes from
+this computer (`ownComputer`: loopback, one of this computer's own
+addresses, or a WSL distro's network; never with forwarding headers, a
+trusted proxy's included, nor through magpie web's page port), which is
+where magpie writes it into the owner's own agents; `gateway-key` for any
+other named key, on loopback too (one the owner made for someone else, a
+value a user brought, a `sk-magpie-` key that didn't authenticate), and for
+the sharing key from anywhere else: Gateway keys lists it with a Copy
+button and offers it to connect other computers, so a friend may hold it;
+otherwise `remote`. magpie has no "this named key is mine" mark, so every
+key the owner made reads `gateway-key`. A plugin that serves the owner's own
+agents beyond `local` checks `magpie-key`, never `gateway-key`
+(plugins#526). Hosts before `magpie-key` (v0.1.2208) sent `gateway-key` for
+the sharing key too, so a plugin that trusts only `local` sees both as
+not local, as before. Forwarded traffic stays
 remote even with `MAGPIE_TRUST_PROXY=1`. No key, key name, peer address or
 client-supplied origin claim is exposed. Missing origin on an older host means
 unknown. This classification is not a user identity; plugins that export
 conversations must obtain their own explicit opt-in and default to skipping
 non-local or unknown origins. It is available in both lifecycle callbacks.
 
-The `gatewayTimeoutMs` option accepts 100–10000 ms (default 1000 ms). The
-entire request hook chain is bounded to ten seconds, with an eleven-second host
-startup/RPC limit, including waiting for a host already starting during provider
-discovery. The first request waits within that budget rather than skipping its
-hook because startup holds the host lock. Client cancellation aborts the wait
+The `gatewayTimeoutMs` option is an integer from 100 to 30000 ms (default
+1000 ms); a value outside the range is clamped to the nearer bound, and one that
+isn't an integer gets the default. The request hook chain's budget is the hooks'
+timeouts summed within two to ten seconds, or the longest hook's own timeout when
+that is longer, so a slow deep recall configured for 15 seconds gets them (#5890,
+plugins#926). Starting the host, including waiting for one already starting
+during provider discovery, is bounded to eleven seconds; the whole run (startup
+and the request RPC) to the budget plus one second, never under eleven seconds
+(`gatewayWait` in `gateway.go`, which mirrors host.js's `gatewayTimeout` and
+`gatewayBudget`). With every hook at 10000 ms or less both are the one
+eleven-second limit they always were. The first request waits within that budget
+rather than skipping its hook because startup holds the host lock. Client cancellation aborts the wait
 and request-hook I/O. Hooks run in
 plugin order. Failure keeps the last accepted request; diagnostics contain fixed
 outcome codes and byte counts rather than private content.
@@ -84,9 +118,43 @@ reply). This is best-effort delivery, not a durable queue: shutdown, host
 retirement and capacity limits may discard notifications. Hooks must not blindly
 retry non-idempotent external writes.
 
+## Sign-in notification
+
+`export async function onSignIn(event, ctx)` is optional, and a hooks file may
+export it alone, with no `onRequest` (a hook without `onRequest` is passed by
+for requests). It hears of a subscription account that has to be signed in
+again, or whose sign-in ends soon (shannnnnks on X: of several Codex accounts
+behind the gateway, one is signed out now and then). `event` is
+`{provider, providerName, account, state, endsAt?}`: the provider's id and
+name, the account's label as the Providers page shows it (its email for most
+sign-ins), and `state` `signed-out`, or `ending` with `endsAt` (an ISO time)
+for a Claude sign-in within three days of its end. No token, credential mark
+or vendor text is sent. `ctx` has the package `options` and an `AbortSignal`;
+each hook gets its own timeout (`gatewayTimeoutMs`) within the chain's budget,
+and one that throws or times out is logged and holds up none after it.
+
+The accounts and the test are the app's sign-in alert's
+([providers-accounts](providers-accounts.md), `provider.WatchSignIns`): an
+account in use of a subscription switched on whose row says Sign in again
+(any mark on a Claude, Copilot or plugin account; a built-in's revoked or
+refused sign-in, ChatGPT's `token_revoked` and refused refresh among them),
+told once until it is usable again. The magpie serving the gateway looks a
+minute after it starts and every two minutes after
+(`keepHooksToldOfSignIns`, `tellHooksOfSignIns` in
+`internal/gateway/signin_hooks.go`), reading magpie's own files only. What
+the hooks were told is kept in `signin-hooks.json` beside `providers.json`,
+apart from the app's `signin-alerts.json`, so the desktop notification and
+the hooks are each told, and a restart tells neither again. With no hook
+installed (`plugin.HasGateway`) nothing is looked at or marked, so a hook
+installed later hears of an account already signed out. Delivery
+(`plugin.GatewaySignIn`) is fire-and-forget and best-effort like
+`onResponse`: the mark is set as it is handed over, and a host that fails
+to start loses it. An older host never calls `onSignIn`, and fails
+to load a hooks file without `onRequest`.
+
 Host request state is limited to 128 runs and expires after 15 minutes. The
-response RPC has an eleven-second limit; each callback uses the configured
-bounded hook timeout. Request-owned state is released after notification.
+response RPC has the request RPC's limit (the budget plus one second, at least
+eleven seconds); each callback uses the configured bounded hook timeout. Request-owned state is released after notification.
 
 ## Sources and verification
 
@@ -95,11 +163,26 @@ bounded hook timeout. Request-owned state is released after notification.
 - `internal/gateway/middleware.go`: `gatewayHooks`, before routing and around the
   middleware, so `onResponse` sees what the agent got. `serveAgent` runs it for
   every agent request; Codex's own ChatGPT sign-in passthrough
-  (`codex_backend.go`) runs it without the synchronous middleware.
+  (`codex_backend.go`) runs it without the synchronous middleware. The
+  requests magpie makes on its own call `serve` directly and run no hooks:
+  Codex's compaction and its fallback turn, titles, System One's
+  classifier, search and vision (#4847). A request over a provider's byte
+  cap is fitted in the gateway itself, not by a hook (`body_cap.go`).
 - `internal/gateway/gateway_hooks.go`: bounded response observation and
   `gatewayReply`, a stream made one reply.
+- `internal/gateway/signin_hooks.go`: sign-in events, and
+  `internal/plugin/gateway.go`'s `GatewaySignIn` and host.js's
+  `gatewaySignIn` that deliver them.
 - `internal/plugin/gateway_test.go` and `internal/gateway/gateway_hook_test.go`:
   failures, cancellation, ownership and real HTTP streaming.
+  `internal/plugin/gateway_budget_test.go`: a 12-second recall and response
+  given 15 seconds, the default and 10000 ms still cut by the host, two
+  8000 ms hooks still sharing ten seconds, an over-long timeout
+  clamped, caller cancellation under a long budget, and the Go mirror of the
+  budget.
+  `TestGatewaySignInHook` (a sign-in-only hook, options, a throwing hook)
+  and `TestRevokedAccountToldToHooksOnce` (a revoked ChatGPT account told
+  once, not before a hook is installed, with no token) guard sign-ins.
 
 Follow [provider plugin verification](provider-plugins.md#verification) to use
 isolated HOME and resolved Go/Bun executables. Targeted race acceptance:

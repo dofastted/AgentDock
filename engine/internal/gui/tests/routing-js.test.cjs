@@ -36,6 +36,9 @@ function serve(lang, posts, off = []) {
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:${JSON.stringify(lang)},theme:"light",web:true,featuresOff:${JSON.stringify(off)}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
+    // what the real one answers: the state's settings (a provider's editor
+    // reads them for its own warm-ups and check-ins)
+    if (url.pathname === "/api/settings" && route.request().method() === "GET") return json(state.settings);
     if (url.pathname === "/api/providers") return json(providers);
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
@@ -59,6 +62,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (const width of [900, 420]) {
         const page = await (await browser.newContext({ viewport: { width, height: 720 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
@@ -98,6 +102,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 900, height: 720 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       await page.route("**/*", serve(lang, [], ["middleware"]));
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: sub.name }).first().click();

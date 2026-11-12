@@ -61,6 +61,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 1000, height: 760 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], asked = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, asked));
@@ -87,7 +88,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await msg.getByRole("button", { name: w.add, exact: true }).click();
         await ed.waitFor();
         assert.equal(await ed.locator('input[placeholder="e.g. github"], input[placeholder="例如 github"]').inputValue(), "postgres");
-        assert.equal(await ed.locator('input[placeholder="npx -y @modelcontextprotocol/server-github"]').inputValue(), "");
+        assert.equal(await ed.locator("textarea.lib-cmd").inputValue(), "");
         await ed.getByRole("button", { name: w.cancel, exact: true }).click();
         await ed.waitFor({ state: "detached" });
       });

@@ -2,9 +2,12 @@
 // Settings → Privacy's local masking model (#1977): a row under the masking
 // switches, there while either is on. On downloads the model, its progress
 // shown and a Cancel beside it; once it is on, the row says where it runs.
-// Off, a downloaded model can be deleted, after asking. Its words are shown
-// in full, in every language, in a wide window and a narrow one, and a
-// click moves nothing.
+// Off, a downloaded model can be deleted, after asking. What it says while
+// downloading or on is a state, shown in full; off, its line explains it
+// and rests out of sight, for the hover card (settingshints.js), as the
+// threshold's does. In every language, in a wide window and a narrow one,
+// and a click moves nothing. Under it, the model's threshold is picked from the
+// app's menu too.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -36,8 +39,9 @@ function serve(lang, masking, model, posts) {
     if (url.pathname === "/api/settings") return json(settings());
     if (url.pathname === "/api/privacy-model") {
       if (r.request().method() === "POST") {
-        const { do: doing, model: id } = JSON.parse(r.request().postData());
-        posts.push(id ? doing + " " + id : doing);
+        const { do: doing, model: id, score } = JSON.parse(r.request().postData());
+        posts.push([doing, id, score].filter((x) => x !== undefined && x !== "").join(" "));
+        if (doing === "score") model.minScore = score || model.defaultScore;
         if (doing === "on") Object.assign(model, { downloading: true, done: 0, total: size, ticks: 0 });
         if (doing === "cancel") Object.assign(model, { downloading: false, done: 0 });
         if (doing === "remove") Object.assign(model, { installed: false, on: false });
@@ -61,10 +65,11 @@ function serve(lang, masking, model, posts) {
   };
 }
 
-async function open(engine, lang, width, masking, model, posts) {
+async function open(engine, lang, width, masking, model, posts, context = {}) {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-  const page = await (await browser.newContext({ viewport: { width, height: 1400 } })).newPage();
+  const page = await (await browser.newContext({ viewport: { width, height: 1400 }, ...context })).newPage();
   page.setDefaultTimeout(8000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, masking, model, posts));
@@ -84,8 +89,51 @@ const pickWords = {
   de: { head: "Lokales Modell", note: "Chinesisch und Englisch, wenig Fehlalarme in Code · 39 MB" },
 };
 
-// what the row shows: its words and its New mark, whether they are cut,
-// that it is inside the list, and that it is the page's first setting
+const scoreWords = {
+  en: { name: "Confidence threshold", def: "Default (0.8)", most: "Masks the most" },
+  zh: { name: "置信度阈值", def: "默认（0.8）", most: "遮得最多" },
+  "zh-TW": { name: "信賴度門檻", def: "預設（0.8）", most: "遮得最多" },
+  ja: { name: "信頼度のしきい値", def: "デフォルト（0.8）", most: "最も多くマスク" },
+  de: { name: "Konfidenzschwelle", def: "Standard (0.8)", most: "Maskiert am meisten" },
+};
+
+// where AstrLink Guard runs (yyhhyyyyyy on Discord: it said "on the CPU"
+// while CoreML ran it): CoreML on the device its plan picked, the CPU
+// with CoreML's error after a failed read, the CPU where there's no CoreML,
+// and a slow line with its fix under Rosetta
+const runWords = {
+  en: { ne: "On, with CoreML on the Neural Engine", gpu: "On, with CoreML on the GPU", ml: "On, with CoreML", failed: "On, on the CPU: CoreML failed (prediction failed)", cpu: "On, on the CPU", rosetta: "On, slowly under Rosetta: the next update installs magpie for Apple silicon" },
+  zh: { ne: "已开启，通过 CoreML 运行在神经网络引擎", gpu: "已开启，通过 CoreML 运行在 GPU", ml: "已开启，通过 CoreML 运行", failed: "已开启，运行在 CPU：CoreML 出错（prediction failed）", cpu: "已开启，运行在 CPU", rosetta: "已开启，但在 Rosetta 下运行较慢：下次更新会装上 Apple 芯片版 magpie" },
+  "zh-TW": { ne: "已開啟，透過 CoreML 執行於神經網路引擎", gpu: "已開啟，透過 CoreML 執行於 GPU", ml: "已開啟，透過 CoreML 執行", failed: "已開啟，執行於 CPU：CoreML 出錯（prediction failed）", cpu: "已開啟，執行於 CPU", rosetta: "已開啟，但在 Rosetta 下執行較慢：下次更新會裝上 Apple 晶片版 magpie" },
+  ja: { ne: "オン、CoreML により Neural Engine で実行中", gpu: "オン、CoreML により GPU で実行中", ml: "オン、CoreML で実行中", failed: "オン、CPU で実行中：CoreML が失敗しました（prediction failed）", cpu: "オン、CPU で実行中", rosetta: "オン、Rosetta で動作中のため低速です。次のアップデートで Apple シリコン版の magpie が入ります" },
+  de: { ne: "An, mit CoreML auf der Neural Engine", gpu: "An, mit CoreML auf der GPU", ml: "An, mit CoreML", failed: "An, auf der CPU: CoreML ist ausgefallen (prediction failed)", cpu: "An, auf der CPU", rosetta: "An, unter Rosetta langsam: das nächste Update installiert magpie für Apple Silicon" },
+};
+const runs = {
+  ne: { via: "CoreML", device: "Neural Engine" }, gpu: { via: "CoreML", device: "GPU" }, ml: { via: "CoreML" },
+  failed: { device: "CPU", gpuError: "prediction failed" }, cpu: { device: "CPU" },
+  // the Intel build on Apple silicon (cdredfox on Discord: 150% of a core)
+  rosetta: { device: "CPU", rosetta: true },
+};
+
+// Privacy Filter moved to the CPU after its GPU was lost (plugins#853,
+// kongbai01203: "GPU error, running on CPU" read as a fault of the
+// model's): a GPU the graphics driver reset says so, and either says until
+// when, 14:38 UTC here (zh-TW says it 下午02:38)
+const lostWords = {
+  en: { reset: "On, on the CPU until 02:38 PM: the graphics driver reset the GPU (device lost)", failed: "On, on the CPU until 02:38 PM: the GPU failed (ended)" },
+  zh: { reset: "已开启，14:38 前运行在 CPU：显卡驱动重置了 GPU（设备丢失）", failed: "已开启，14:38 前运行在 CPU：GPU 出错（ended）" },
+  "zh-TW": { reset: "已開啟，下午02:38 前執行於 CPU：顯示卡驅動程式重設了 GPU（裝置遺失）", failed: "已開啟，下午02:38 前執行於 CPU：GPU 出錯（ended）" },
+  ja: { reset: "オン、14:38 まで CPU で実行中：グラフィックスドライバーが GPU をリセットしました（デバイスロスト）", failed: "オン、14:38 まで CPU で実行中：GPU が失敗しました（ended）" },
+  de: { reset: "An, bis 14:38 auf der CPU: der Grafiktreiber hat die GPU zurückgesetzt (Gerät verloren)", failed: "An, bis 14:38 auf der CPU: die GPU ist ausgefallen (ended)" },
+};
+const lostRuns = {
+  reset: { gpuError: "pf-serve-vulkan ended (exit status 3): terminate called after throwing an instance of 'vk::DeviceLostError' | what():  vk::Device::waitForFences: ErrorDeviceLost", gpuReset: true },
+  failed: { gpuError: "ended" },
+};
+
+// what the row shows: its words and its New mark, whether they rest out of
+// sight for the hover card (hint) or are cut, that it is inside the list,
+// and that it is the page's first setting
 const look = (page) => page.evaluate(() => {
   const r = document.querySelector("#privacyModelRow"), list = r.closest(".list").getBoundingClientRect();
   const sub = r.querySelector(".sub"), b = r.getBoundingClientRect(), v = r.querySelector(".val").getBoundingClientRect();
@@ -93,6 +141,7 @@ const look = (page) => page.evaluate(() => {
     name: r.querySelector(".name").firstChild.textContent, badge: r.querySelector(".name .badge.new")?.textContent, sub: sub.textContent,
     first: r === document.querySelector("#setPage-privacy .list.prefs > .row"),
     on: r.querySelector(".segs .opt.on")?.textContent, buttons: [...r.querySelectorAll("button.text")].map((x) => x.textContent),
+    hint: getComputedStyle(sub).getPropertyValue("--hint").trim() === "1",
     cut: sub.scrollWidth > sub.clientWidth + 1 || sub.scrollHeight > sub.clientHeight + 1,
     inside: b.left >= list.left - 1 && b.right <= list.right + 1 && v.right <= b.right + 1,
     wide: document.documentElement.scrollWidth > document.documentElement.clientWidth,
@@ -115,7 +164,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(m.first, "the model is the first setting under the card");
         assert(m.sub.includes("1.6 GB"), `says what it downloads: ${m.sub}`);
         if (lang !== "en") assert(!/no rule can find|Turning it on/.test(m.sub), `translated: ${m.sub}`);
-        assert(!m.cut && m.inside && !m.wide, `shown in full and inside: ${JSON.stringify(m)}`);
+        assert(m.hint && m.inside && !m.wide, `off, the explanation rests out of sight, for the hover card: ${JSON.stringify(m)}`);
 
         await page.mouse.move(width / 2, 300);
         for (let i = 0; i < 20 && (await row.boundingBox()).y > 900; i++) {
@@ -131,15 +180,50 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         m = await look(page);
         assert.equal(m.buttons.length, 1, "a Cancel while it downloads");
         assert.equal(m.on, w.on);
-        assert(!m.cut && m.inside && !m.wide, `shown in full and inside: ${JSON.stringify(m)}`);
+        assert(!m.hint && !m.cut && m.inside && !m.wide, `the download's progress shown in full and inside: ${JSON.stringify(m)}`);
         // then on, on the GPU
         await page.waitForFunction((want) => document.querySelector("#privacyModelRow .sub").textContent === want, w.gpu);
         m = await look(page);
         assert.deepEqual(m.buttons, [], "nothing to cancel or delete while it is on");
-        assert(!m.cut && m.inside && !m.wide, `shown in full and inside: ${JSON.stringify(m)}`);
+        assert(!m.hint && !m.cut && m.inside && !m.wide, `shown in full and inside: ${JSON.stringify(m)}`);
         assert.deepEqual(posts, ["on"]);
         assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.querySelector("#view-settings").scrollTop]), before, "the click moved nothing");
         assert.deepEqual(errors, []);
+      });
+    }
+  }
+
+  for (const lang of Object.keys(runWords)) {
+    for (const width of [1100, 640]) {
+      test(`${engine} ${lang} ${width}px: AstrLink Guard says what runs it`, async (t) => {
+        for (const [k, run] of Object.entries(runs)) {
+          const model = { ...guard, installed: true, on: true, running: true, minScore: 0.8, defaultScore: 0.8, ...run };
+          const { browser, page, errors } = await open(engine, lang, width, true, model, []);
+          await page.locator("#privacyModelRow .segs").waitFor();
+          const m = await look(page);
+          await browser.close();
+          assert.equal(m.sub, runWords[lang][k], k);
+          assert(!m.hint && !m.cut && m.inside && !m.wide, `${k} shown in full and inside: ${JSON.stringify(m)}`);
+          assert.deepEqual(errors, []);
+        }
+      });
+    }
+  }
+
+  for (const lang of Object.keys(lostWords)) {
+    for (const width of [1100, 640]) {
+      test(`${engine} ${lang} ${width}px: Privacy Filter on the CPU says how the GPU was lost, and until when`, async () => {
+        for (const [k, run] of Object.entries(lostRuns)) {
+          const model = { supported: true, installed: true, on: true, running: true, device: "cpu", size, gpuAgain: Date.UTC(2026, 10, 8, 14, 38), ...run };
+          const { browser, page, errors } = await open(engine, lang, width, true, model, [], { locale: "en-US", timezoneId: "UTC" });
+          await page.locator("#privacyModelRow .segs").waitFor();
+          const m = await look(page);
+          await browser.close();
+          // an engine's ICU may put a narrow space before PM
+          assert.equal(m.sub.replace(/[\u202f\u00a0]/g, " "), lostWords[lang][k], k);
+          assert(!m.hint && !m.cut && m.inside && !m.wide, `${k} shown in full and inside: ${JSON.stringify(m)}`);
+          assert.deepEqual(errors, []);
+        }
       });
     }
   }
@@ -205,7 +289,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await page.locator("#privacyModelRow select").count(), 0, "no native select");
         assert.equal((await pick.textContent()).trim(), "Privacy Filter");
         let m = await look(page);
-        assert(!m.cut && m.inside && !m.wide, `shown in full and inside: ${JSON.stringify(m)}`);
+        assert(!m.hint && !m.cut && m.inside && !m.wide, `where it runs shown in full and inside: ${JSON.stringify(m)}`);
+        // the menu and the switch are two boxes: they stand apart, on one line
+        const gap = await page.evaluate(() => {
+          const p = document.querySelector("#privacyModelRow .pm-model").getBoundingClientRect(), s = document.querySelector("#privacyModelRow .segs").getBoundingClientRect();
+          return { gap: s.left - p.right, mid: Math.abs(p.top + p.height / 2 - (s.top + s.height / 2)) };
+        });
+        assert(gap.gap >= 6 && gap.gap <= 12 && gap.mid <= 1, `the menu stands apart from the switch: ${JSON.stringify(gap)}`);
         const before = await page.evaluate(() => [scrollX, scrollY, document.querySelector("#view-settings").scrollTop]);
         await pick.click();
         const menu = page.locator(".proto-menu");
@@ -225,6 +315,66 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForFunction(() => !document.querySelector(".proto-menu"));
         assert.deepEqual(posts, ["pick astrlink-guard"]);
         assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.querySelector("#view-settings").scrollTop]), before, "the pick moved nothing");
+        assert.deepEqual(errors, []);
+      });
+    }
+  }
+
+  // the threshold (@Yayoi_no_yume on X): under the model, its default
+  // or one the user picks from the app's menu, in every language; the
+  // pick is sent with the model it is for, and shown once magpie has it
+  for (const lang of Object.keys(scoreWords)) {
+    for (const width of [1100, 640]) {
+      test(`${engine} ${lang} ${width}px: the model's threshold is picked from the app's menu`, async (t) => {
+        const w = scoreWords[lang];
+        const posts = [], model = { ...guard, installed: true, on: true, running: true, device: "CPU", minScore: 0.8, defaultScore: 0.8 };
+        const { browser, page, errors } = await open(engine, lang, width, true, model, posts);
+        t.after(() => browser.close());
+        const row = page.locator("#pmScoreRow");
+        await row.waitFor();
+        await wheelTo(page, row, 300);
+        assert(await page.evaluate(() => document.querySelector("#privacyModelRow").nextElementSibling === document.querySelector("#pmScoreRow")), "right under the model");
+        assert.equal(await row.locator("select").count(), 0, "no native select");
+        const shown = () => row.evaluate((r) => {
+          const sub = r.querySelector(".sub"), b = r.getBoundingClientRect(), list = r.closest(".list").getBoundingClientRect();
+          return {
+            name: r.querySelector(".name").textContent, sub: sub.textContent, pick: r.querySelector("button.pm-score").textContent.trim(),
+            hint: getComputedStyle(sub).getPropertyValue("--hint").trim() === "1",
+            cut: sub.scrollWidth > sub.clientWidth + 1 || sub.scrollHeight > sub.clientHeight + 1,
+            inside: b.left >= list.left - 1 && b.right <= list.right + 1, wide: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+          };
+        });
+        let m = await shown();
+        assert.equal(m.name, w.name);
+        if (lang !== "en") assert(!/less sure/.test(m.sub), `translated: ${m.sub}`);
+        assert.equal(m.pick, "0.8");
+        assert(m.hint && m.inside && !m.wide, `the threshold's explanation rests out of sight, for the hover card: ${JSON.stringify(m)}`);
+        const before = await page.evaluate(() => [scrollX, scrollY, document.querySelector("#view-settings").scrollTop]);
+        const menu = page.locator(".proto-menu");
+        const items = async () => {
+          await row.locator("button.pm-score").click();
+          await menu.waitFor();
+          return menu.evaluate((b) => ({
+            head: b.querySelector(".pm-head").textContent,
+            items: [...b.querySelectorAll(".pm-item")].map((i) => [i.querySelector(".pm-name").textContent, i.querySelector(".pm-note").textContent, i.classList.contains("on")]),
+            inside: b.getBoundingClientRect().left >= 0 && b.getBoundingClientRect().right <= innerWidth,
+          }));
+        };
+        let got = await items();
+        assert.equal(got.head, w.name);
+        assert.deepEqual(got.items.map((i) => i[0]), [w.def, "0.5", "0.6", "0.7", "0.85", "0.9", "0.95"]);
+        assert.deepEqual(got.items.map((i) => i[2]), [true, false, false, false, false, false, false], "the default is ticked");
+        assert.equal(got.items[1][1], w.most);
+        assert(got.inside, "the menu is inside the window");
+        await menu.locator(".pm-item", { hasText: /^0\.9$/ }).click();
+        await page.waitForFunction(() => document.querySelector("#pmScoreRow button.pm-score")?.textContent.trim() === "0.9");
+        assert.deepEqual(posts, ["score astrlink-guard 0.9"]);
+        got = await items();
+        assert.deepEqual(got.items.map((i) => i[2]), [false, false, false, false, false, true, false], "0.9 is ticked");
+        await menu.locator(".pm-item").first().click();
+        await page.waitForFunction(() => document.querySelector("#pmScoreRow button.pm-score")?.textContent.trim() === "0.8");
+        assert.deepEqual(posts, ["score astrlink-guard 0.9", "score astrlink-guard 0"]);
+        assert.deepEqual(await page.evaluate(() => [scrollX, scrollY, document.querySelector("#view-settings").scrollTop]), before, "the picks moved nothing");
         assert.deepEqual(errors, []);
       });
     }

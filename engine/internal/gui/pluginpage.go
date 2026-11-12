@@ -1,6 +1,8 @@
 package gui
 
 import (
+	"cmp"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +24,7 @@ import (
 
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -67,7 +72,7 @@ type pluginPage struct {
 	Spec  string `json:"spec"`
 	Name  string `json:"name"`  // its package's
 	Key   string `json:"key"`   // the window's page key
-	Title string `json:"title"` // the page's, or the package's short name
+	Title string `json:"title"` // the page's, or the package's magpie.name or short name
 	// Titles are its title by the window's language (plugin.PageSpec)
 	Titles map[string]string `json:"titles,omitempty"`
 	URL    string            `json:"url"` // the page, under pluginPagePrefix
@@ -79,8 +84,19 @@ type pluginPage struct {
 	// Actions are its items in magpie's menus (plugin.ActionSpec); each
 	// opens this page
 	Actions []pluginAction `json:"actions,omitempty"`
-	token   string
-	dir     string
+	// Service is where a browser reaches the page's local service
+	// (plugin.ServiceSpec) through this server, relative to the page's own
+	// address: only on a page served to a browser (servePageService)
+	Service string `json:"service,omitempty"`
+	// KeepAlive keeps its frame while the reader is on another page
+	// (plugin.PageSpec); else the window lets it go after a while hidden
+	KeepAlive bool `json:"keepAlive,omitempty"`
+	token     string
+	dir       string
+	file      string // its HTML, relative to dir, with forward slashes
+	hosted    bool   // its plugin has a part for the host too (pageHost)
+	service   *plugin.ServiceSpec
+	options   map[string]any // its plugin's, as plugins.json keeps them
 }
 
 // pluginAction is an item a plugin's page adds to one of magpie's menus.
@@ -98,12 +114,14 @@ type pluginPanel struct {
 	Name   string            `json:"name"`  // its package's
 	Key    string            `json:"key"`   // the panel's, among every plugin's
 	Slot   string            `json:"slot"`  // the page it is in
-	Title  string            `json:"title"` // the panel's, or the package's short name
+	Title  string            `json:"title"` // the panel's, or the package's magpie.name or short name
 	Titles map[string]string `json:"titles,omitempty"`
 	URL    string            `json:"url"`   // the panel, under pluginPagePrefix
 	Reads  []string          `json:"reads"` // what it may read, of plugin.PageReads
 	token  string
 	dir    string
+	file   string
+	hosted bool
 }
 
 // pageKeyChars are what a window page's key can't have
@@ -119,7 +137,7 @@ func windowParts() (pages []pluginPage, panels []pluginPanel) {
 		if e.Off {
 			continue
 		}
-		w, _ := plugin.Window(plugin.Target(e.Spec))
+		w, only := plugin.Window(plugin.Target(e.Spec))
 		if w == nil {
 			continue
 		}
@@ -143,9 +161,12 @@ func windowParts() (pages []pluginPage, panels []pluginPanel) {
 			tok := pageToken(e.Spec)
 			rel, _ := filepath.Rel(spec.Dir, spec.File)
 			p := pluginPage{Spec: e.Spec, Name: name, Key: key, Title: spec.Title, Titles: spec.Titles, Reads: reads, token: tok, dir: spec.Dir,
-				URL: pluginPagePrefix + tok + "/" + filepath.ToSlash(rel)}
+				URL: pluginPagePrefix + tok + "/" + filepath.ToSlash(rel), file: filepath.ToSlash(rel), hosted: !only, options: e.Options, KeepAlive: spec.KeepAlive}
+			if !only {
+				p.service = spec.Service
+			}
 			if p.Title == "" {
-				p.Title = plugin.ShortName(name)
+				p.Title = cmp.Or(plugin.InstalledName(e.Spec), plugin.ShortName(name))
 			}
 			if spec.Icon != "" {
 				p.Icon = pluginPagePrefix + tok + "/" + spec.Icon
@@ -168,9 +189,9 @@ func windowParts() (pages []pluginPage, panels []pluginPanel) {
 			tok := pageToken(e.Spec + "\x00panel\x00" + strconv.Itoa(i))
 			rel, _ := filepath.Rel(spec.Dir, spec.File)
 			p := pluginPanel{Spec: e.Spec, Name: name, Key: fmt.Sprintf("%s-%d", key, i), Slot: spec.Slot, Title: spec.Title, Titles: spec.Titles, Reads: reads,
-				token: tok, dir: spec.Dir, URL: pluginPagePrefix + tok + "/" + filepath.ToSlash(rel)}
+				token: tok, dir: spec.Dir, URL: pluginPagePrefix + tok + "/" + filepath.ToSlash(rel), file: filepath.ToSlash(rel), hosted: !only}
 			if p.Title == "" {
-				p.Title = plugin.ShortName(name)
+				p.Title = cmp.Or(plugin.InstalledName(e.Spec), plugin.ShortName(name))
 			}
 			panels = append(panels, p)
 		}
@@ -205,22 +226,16 @@ func windowOf(spec string) (name string, reads []string, ok bool) {
 // inline styles, data: pictures, and nothing over the network. sandbox
 // keeps a page opened by itself (not in the window's frame) as shut in as
 // the frame keeps it.
-func pagePolicy(r *http.Request, tok string) string {
+func pagePolicy(r *http.Request, tok string, hashes ...string) string {
 	own := "'self'"
 	if r.Host != "" {
 		// the page's own folder: not the window's files, nor /api
-		own = r.Host + pluginPagePrefix + tok + "/"
-		// WebKit does not match a scheme-less host source under wails://.
-		// Only the native handler supplies this scheme; web keeps its
-		// relative source so HTTP, HTTPS and reverse proxies still work.
-		if scheme, _ := r.Context().Value(windowSchemeKey{}).(string); scheme != "" {
-			own = scheme + "://" + own
-		}
+		own = strings.Join(ownSources(r, pluginPagePrefix+tok+"/"), " ")
 	}
 	return strings.Join([]string{
 		"sandbox allow-scripts",
 		"default-src 'none'",
-		"script-src " + own,
+		"script-src " + strings.Join(append([]string{own}, hashes...), " "),
 		"style-src " + own + " 'unsafe-inline'",
 		"img-src " + own + " data:",
 		"font-src " + own,
@@ -235,12 +250,101 @@ func pagePolicy(r *http.Request, tok string) string {
 	}, "; ")
 }
 
-// servePluginPage serves a file of a plugin's page, by its token.
-func servePluginPage(rw http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
-		return
+// ownSources are the sources, with their scheme, that name path on the
+// address r came to. A sandboxed frame's origin is opaque, and a source
+// with no scheme takes its scheme from that origin: iOS Safari (iOS 18.7)
+// matched the scheme-less host/path to nothing and never asked for a
+// page's scripts, so the page was broken at 10s (#4198, orinsid and
+// YangHonghang). Chromium, and the newer WebKit Playwright runs, take
+// the scheme from the URL loaded, which is why only the iPhone failed.
+//
+// The desktop window names its own transport (ownWindow): wails://, or
+// http:// on Windows (#2501). A browser's page (magpie web) can come over
+// http or https, directly or through a proxy that ends TLS before magpie
+// (nginx, Cloudflare), and nothing magpie trusts says which, so both are
+// named: the same host, port and folder either way, and an https page
+// can't load http:// files anyway (mixed content).
+func ownSources(r *http.Request, path string) []string {
+	if scheme, _ := r.Context().Value(windowSchemeKey{}).(string); scheme != "" {
+		return []string{scheme + "://" + r.Host + path}
 	}
+	own := []string{"https://" + r.Host + path, "http://" + r.Host + path}
+	// A reverse proxy that doesn't pass the browser's Host on (nginx's
+	// proxy_pass does not) leaves r.Host as magpie's own address, which
+	// names nothing the browser asked for: every script and style of the
+	// page was refused and it drew as bare HTML (xuanwo on X, Day card).
+	// The window that framed the page is on the address the browser used,
+	// and says so in the frame's address (pageOriginParam): the frame
+	// sends no Referer.
+	if o := browserOrigin(r); o != "" && o != "https://"+r.Host && o != "http://"+r.Host {
+		own = append(own, o+path)
+	}
+	return own
+}
+
+// pageOriginParam is the query a window adds to its frame's address: the
+// origin the window itself is on (pluginpages.js).
+const pageOriginParam = "_o"
+
+// browserOrigin is the scheme and host the browser reached this server
+// at, from the frame's address, or "" when it names none
+// (or anything but a plain http(s) host and port, which a policy can't be
+// trusted to carry).
+func browserOrigin(r *http.Request) string {
+	u, err := url.Parse(r.URL.Query().Get(pageOriginParam))
+	if err != nil || u.Host == "" || u.User != nil || u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	for _, c := range u.Host {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune(".-:[]", c)) {
+			return ""
+		}
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// pageHostWait is how long a page's HTML waits for its plugin's host,
+// short of the window's 10 seconds for the page to say hello
+// (pluginpages.js's HELLO_MS).
+var pageHostWait = 7 * time.Second
+
+// warmHost starts the plugin host if it isn't up; tests replace it.
+var warmHost = plugin.Warm
+
+// pageHost has the plugin host up for a page whose plugin has a part for
+// it too, waiting pageHostWait at most. Such a page can be the way into
+// a service that part runs: Magiczerowxy/magpie-chat's page sends its
+// frame to the chat server its host part starts. The host starts only on
+// a call, and every Restart (a plugin installed, updated or set, a Bun
+// update) stops it until the next one, so with no other plugin asking,
+// the page went to a server that wasn't there: Chromium shows its
+// connection error, and WebKit (the Mac's and Linux's window) leaves the
+// frame on the page's own "connecting…" for good. The host starts in the
+// background under its own two minutes, as every caller's does, so a
+// slow one isn't cut off when the page stops waiting.
+func pageHost(ctx context.Context) {
+	done := make(chan struct{})
+	warm := warmHost // read here: the start can outlive the page's wait
+	go func() {
+		defer close(done)
+		c, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := warm(c); err != nil {
+			log.Printf("plugin page: starting the plugin host: %v", err)
+		}
+	}()
+	t := time.NewTimer(pageHostWait)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
+
+// servePluginPage serves a file of a plugin's page, by its token, and on
+// a page served to a browser (web) the page's local service too.
+func servePluginPage(rw http.ResponseWriter, r *http.Request, web bool) {
 	rest := strings.TrimPrefix(r.URL.Path, pluginPagePrefix)
 	tok, rel, ok := strings.Cut(rest, "/")
 	if !ok || len(tok) != 32 {
@@ -248,23 +352,63 @@ func servePluginPage(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// the page's or the panel's folder, by its token
-	dir := ""
+	dir, entry, hosted := "", "", false
+	var page *pluginPage
 	pages, panels := windowParts()
-	for _, p := range pages {
+	for i, p := range pages {
 		if hmac.Equal([]byte(p.token), []byte(tok)) {
-			dir = p.dir
+			dir, entry, hosted = p.dir, p.file, p.hosted
+			page = &pages[i]
 		}
+	}
+	// the service's paths are never a file of the page's
+	if strings.HasPrefix(rel, pageServicePath) {
+		if !web || page == nil || page.servicePort() == 0 {
+			http.NotFound(rw, r)
+			return
+		}
+		servePageService(rw, r, page, tok)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 	for _, p := range panels {
 		if hmac.Equal([]byte(p.token), []byte(tok)) {
-			dir = p.dir
+			dir, entry, hosted = p.dir, p.file, p.hosted
 		}
 	}
 	if dir == "" {
 		http.NotFound(rw, r)
 		return
 	}
+	// the page itself, of a plugin with a part for the host: that part is
+	// up before the page is (pageHost)
+	if hosted && rel == entry {
+		pageHost(r.Context())
+	}
 	h := rw.Header()
+	// A page in a browser comes as one document (pageinline.go): its
+	// sandboxed frame sends no cookie for its files, which a proxy that
+	// signs readers in by cookie turns away.
+	if web && rel == entry && isHTML(rel) {
+		if file, ok := plugin.FileIn(dir, rel); ok {
+			b, err := os.ReadFile(file)
+			if err != nil {
+				http.NotFound(rw, r)
+				return
+			}
+			doc, hashes := inlinePage(b, dir)
+			h.Set("Content-Security-Policy", pagePolicy(r, tok, append(hashes, "data:")...))
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Referrer-Policy", "no-referrer")
+			h.Set("Cache-Control", "no-cache")
+			h.Set("Content-Type", "text/html; charset=utf-8")
+			http.ServeContent(rw, r, "index.html", time.Time{}, strings.NewReader(string(doc)))
+			return
+		}
+	}
 	h.Set("Content-Security-Policy", pagePolicy(r, tok))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
@@ -317,14 +461,58 @@ func apiFramed(r *http.Request) bool {
 	return r.Header.Get("Sec-Fetch-Site") == "cross-site" && r.Header.Get("Sec-Fetch-Dest") != "document"
 }
 
-func pluginPageRoutes(mux *http.ServeMux) {
-	mux.HandleFunc(pluginPagePrefix, servePluginPage)
+// pluginPageRoutes are the routes of the plugins' pages and panels. web is
+// whether the window is a browser's (isWeb): only there is a page's local
+// service served through this server (servePageService), since only there
+// can 127.0.0.1 be another computer than this one.
+func pluginPageRoutes(mux *http.ServeMux, web bool) {
+	mux.HandleFunc(pluginPagePrefix, func(rw http.ResponseWriter, r *http.Request) { servePluginPage(rw, r, web) })
+	// a picture a page drew, to the clipboard or to Downloads (pageimage.go)
+	pageImageRoutes(mux)
 	mux.HandleFunc("GET /api/plugin-pages", func(rw http.ResponseWriter, r *http.Request) {
 		out := pluginPages()
 		if out == nil {
 			out = []pluginPage{}
 		}
+		rank := map[string]int{}
+		for i, k := range settings.Load().PluginPageOrder {
+			rank[k] = i + 1
+		}
+		// the sidebar order the reader dragged; a page it doesn't name follows
+		slices.SortStableFunc(out, func(a, b pluginPage) int {
+			ra, rb := rank[a.Key], rank[b.Key]
+			if ra == 0 {
+				ra = len(rank) + 1
+			}
+			if rb == 0 {
+				rb = len(rank) + 1
+			}
+			return ra - rb
+		})
+		for i := range out {
+			if web && out[i].servicePort() > 0 {
+				out[i].Service = strings.Repeat("../", strings.Count(out[i].file, "/")) + pageServicePath
+			}
+		}
 		writeJSON(rw, out)
+	})
+	mux.HandleFunc("POST /api/plugin-pages/arrange", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Order []string }
+		if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 64<<10)).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s, err := settings.LoadChecked()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		s.PluginPageOrder = in.Order
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
 	})
 	mux.HandleFunc("GET /api/plugin-panels", func(rw http.ResponseWriter, r *http.Request) {
 		_, out := windowParts()
@@ -440,6 +628,9 @@ func pageRead(read string, params map[string]any) (any, error) {
 			out = append(out, prov{ID: p.ID, Name: p.Name})
 		}
 		return out, nil
+	case "usage:day":
+		// one day, or a span of them, by agent and model (pageday.go)
+		return pageDay(params)
 	case "usage:summary":
 		period := usage.Today
 		if s, _ := params["period"].(string); s != "" {
@@ -482,4 +673,9 @@ func pageRead(read string, params map[string]any) (any, error) {
 		return out, nil
 	}
 	return nil, fmt.Errorf("no read %q", read)
+}
+
+func isHTML(rel string) bool {
+	ext := strings.ToLower(filepath.Ext(rel))
+	return ext == ".html" || ext == ".htm"
 }

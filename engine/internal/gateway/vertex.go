@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"regexp"
 	"slices"
 	"strings"
 )
@@ -16,6 +15,23 @@ import (
 // at all on 2.5, is a 400 (vertexEffort, vertexThinking). A call's thought
 // signature goes back as Vertex AI gave it, as on every Gemini path
 // (gemini_signature.go): a call made with none on a step it signed is a 400.
+//
+// Its partner models (provider.VertexPartner: deepseek-ai/…, zai-org/…,
+// openai/gpt-oss-…) are not Gemini: Google serves them on its
+// OpenAI-compatible chat completions at the project (Base(Chat)), under
+// the same token, and the gateway asks them there as it asks any chat
+// completions vendor. Nothing in this file is done to them.
+//
+// Nor to Claude (provider.VertexClaude: claude-opus-5-5,
+// claude-sonnet-4-5@20250929), which Google serves on Anthropic's own
+// Messages API at the project (Base(Anthropic)), under the same token.
+// The gateway asks it as it asks any Anthropic vendor, relayed or built,
+// and forwardOnce, last, moves the request to where Anthropic's Vertex SDK
+// sends it (provider.VertexClaudeRequest): the model and whether it
+// streams in the path (:streamRawPredict, :rawPredict), a count at
+// count-tokens:rawPredict, anthropic_version vertex-2023-10-16 in the
+// body. Tool search's beta goes under the name Claude Code gives it for
+// Vertex (bedrockBetas).
 
 // buildVertex is a streamGenerateContent body for Vertex AI, which names the
 // model in its path and has none in here.
@@ -106,32 +122,10 @@ func vertexEffort(req *Request, levels []string) *Request {
 	return &r
 }
 
-// vertexSignatureRefused is Vertex AI turning a call's thought signature
-// away as one it didn't give: "Invalid thought signature.".
-var vertexSignatureRefused = regexp.MustCompile(`(?i)invalid thought signature`)
-
-// withoutSignatures is req with no thought signature on its calls, each of
-// which then goes to Vertex AI waved through (skipSignature); false when it
-// had none.
+// withoutSignatures is req with no Gemini signature on its calls and
+// texts, each call then going waved through (skipSignature); false when
+// it had none.
 func withoutSignatures(req *Request) (*Request, bool) {
-	had := false
-	msgs := slices.Clone(req.Messages)
-	for i, m := range msgs {
-		if !slices.ContainsFunc(m.Parts, func(p Part) bool { return p.Kind == ToolCall && p.Signature != "" }) {
-			continue
-		}
-		parts := slices.Clone(m.Parts)
-		for j := range parts {
-			if parts[j].Kind == ToolCall {
-				parts[j].Signature = ""
-			}
-		}
-		msgs[i].Parts, had = parts, true
-	}
-	if !had {
-		return req, false
-	}
-	r := *req
-	r.Messages = msgs
-	return &r, true
+	r := dropSignatures(req, func(string) bool { return true })
+	return r, r != req
 }

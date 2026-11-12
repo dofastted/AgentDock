@@ -6,3 +6,5 @@
 /rsrc_windows_*.syso
 /magpie-dev-backend
 /magpie-dev.new
+/internal/update/launcher-*.com
+/internal/gui/assets.zip

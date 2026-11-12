@@ -6,10 +6,12 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/daemon"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/gui"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/stats"
 )
 
@@ -60,6 +62,21 @@ func webCmd(args []string) error {
 		}
 		return nil
 	}
+	// the app serves this page on this port already (Settings › Network
+	// and sharing › Browser access): its own is the one to open
+	if a, k := gui.AppPage(); a != "" && samePort(a, addr) && answers(a) {
+		link := webLink(a, k)
+		fmt.Println(green.Render("●"), "the magpie app serves this page:", bold.Render(link))
+		fmt.Println(muted.Render("  Settings › Network and sharing › Browser access turns it off"))
+		if open {
+			openInBrowser(link)
+		}
+		return nil
+	}
+	// what this page's gateway starts (agents, MCP servers) gets the node a
+	// version manager put on PATH only in the shell's profile, as the app's
+	// does: a service or autostart has none of it (#3803)
+	proc.UserPath()
 	w, err := gui.StartWeb(addr, version)
 	if err != nil {
 		return err
@@ -85,9 +102,33 @@ func webCmd(args []string) error {
 	return w.Wait()
 }
 
+// samePort: a and b (host:port) name one port.
+func samePort(a, b string) bool {
+	_, pa, ea := net.SplitHostPort(a)
+	_, pb, eb := net.SplitHostPort(b)
+	return ea == nil && eb == nil && pa == pb
+}
+
+// answers: something listens on addr's port on this computer.
+func answers(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
 // printWeb prints where a started page is, and what its link carries.
 func printWeb(w *gui.Web) {
 	fmt.Println(green.Render("●"), "magpie web on", bold.Render(w.Link))
+	if w.BoxLink != "" {
+		fmt.Println(muted.Render("  the LazyCat box's administrators, signed in to the box, open"), w.BoxLink, muted.Render("without the key"))
+	}
 	if l := tlsLine(); l != "" {
 		fmt.Println(l)
 	}
@@ -99,6 +140,9 @@ func printWeb(w *gui.Web) {
 		}
 		if gateway.ContainerAddrs() {
 			fmt.Println(muted.Render("  " + containerNote))
+		}
+		if l := containerLine(); l != "" {
+			fmt.Println(l)
 		}
 		fmt.Println(amber.Render("!"), lanWarning())
 	} else if l := proxyLink(key); l != "" {
@@ -185,6 +229,7 @@ func serveCmd(args []string) error {
 			return fmt.Errorf("magpie serve: unknown %q · magpie serve [--web[=host:port]] [--tls-cert <file> --tls-key <file>]", a)
 		}
 	}
+	proc.UserPath() // as magpie web's (#3803)
 	if web == "" {
 		return serve()
 	}

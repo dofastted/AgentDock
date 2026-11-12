@@ -30,12 +30,63 @@
 <link rel="alternate" hreflang="en" href="https://usemagpie.ai/docs/privacy">
 <link rel="alternate" hreflang="zh" href="https://usemagpie.ai/docs/zh/privacy">
 <link rel="alternate" hreflang="ja" href="https://usemagpie.ai/docs/ja/privacy">
+<link rel="alternate" hreflang="x-default" href="https://usemagpie.ai/docs/privacy">
+<link rel="canonical" href="https://usemagpie.ai/docs/privacy">
 <link rel="stylesheet" href="/docs.css">
+<meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Privacy">
 <meta property="og:description" content="Everything magpie sends by itself, and how to turn it off.">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/privacy">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Privacy",
+   "description": "What magpie sends on its own and where: the once-a-day user count, the update feed and other public lists, what usemagpie.ai sees, OTLP export, and every switch that turns them off.",
+   "inLanguage": "en",
+   "url": "https://usemagpie.ai/docs/privacy",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Privacy",
+     "item": "https://usemagpie.ai/docs/privacy"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -50,6 +101,15 @@
     <a class="toc-only" href="/docs/docker">Docker</a>
     <a class="toc-only" href="/docs/privacy">Privacy</a>
     <a class="toc-only" href="/docs/masking">Privacy masking</a>
+    <a class="toc-only" href="/docs/mcp-router">MCP router</a>
+    <a class="toc-only" href="/docs/library">Library</a>
+    <a class="toc-only" href="/docs/claude-code-models">Models in Claude Code</a>
+    <a class="toc-only" href="/docs/codex-models">Models in Codex</a>
+    <a class="toc-only" href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a class="toc-only" href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a class="toc-only" href="/docs/local-models">Local models</a>
+    <a class="toc-only" href="/docs/opencode-models">Models in OpenCode</a>
+    <a class="toc-only" href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -110,6 +170,7 @@
       <li><b>models</b> the connected agents are set to, as provider id and vendor model id (<code>deepseek/deepseek-v4</code>). On a key’s provider, a model id that <a href="https://models.dev">models.dev</a> doesn’t list (a local model, a fine-tune) is only <code>&lt;provider&gt;/other</code>; a model on your own provider is <code>custom</code>; a routing group is <code>group</code>.</li>
     </ul>
     <p>With them go <code>magpie partner</code> events: for each partner listed first in the add sheet, by its id, how many times on a day that has ended the sheet showed it, its row was opened, its key page was opened, and a provider was added from it (<code>what</code>: <code>shown</code>, <code>opened</code>, <code>keys</code>, <code>added</code>; at most 20 a day each, 5 adds). Counts only, never a provider of your own.</p>
+    <p id="plugins">With that part on, magpie also tells <code>usemagpie.ai</code>, on the same day, which of the plugins Discover lists are installed and on, so Discover can say how many use each one: <code>POST /api/plugins/report</code> with the same random id and the plugins’ npm names, or <code>github:owner/repo</code> for a repository tagged <code>magpie-plugin</code> (at most 50). A plugin from a folder, a private repository or a package Discover doesn’t list is never named. A like on a plugin’s page goes as <code>POST /api/plugins/like</code> with the id, the plugin and whether it is on, and only for a plugin installed here; the plugins you liked are kept in <code>plugin-likes.json</code>. The site counts the ids that reported a plugin in the last 7 days, drops a report after 30 days, and keeps your address only hashed, for an hour, to limit how often it is asked. Discover reads the counts from <code>GET /api/plugins/stats</code>, which carries no id. The code is <a href="https://github.com/yetone/magpie/blob/main/internal/stats/plugins.go">internal/stats/plugins.go</a> and <a href="https://github.com/yetone/magpie/blob/main/site/pluginstats.js">site/pluginstats.js</a>.</p>
     <p>Every event carries <code>$process_person_profile: false</code>, so PostHog keeps no person profile for the id. No names, base URLs, accounts, keys, prompts, replies or usage are sent. A whole batch looks like this:</p>
     <div class="code">
       <span class="lang">POST https://us.i.posthog.com/batch/</span>
@@ -143,7 +204,7 @@
     <ul>
       <li><span class="ui">Settings</span> → <span class="ui">Privacy</span> → <span class="ui">Count me as a user</span> off, or <code>"noStats": true</code> in <code>settings.json</code> stops the whole daily count.</li>
       <li><code>DO_NOT_TRACK=1</code> or <code>MAGPIE_NO_STATS=1</code> in magpie’s environment (any value but empty, <code>0</code> or <code>false</code>) stops the whole daily count, whatever the settings say.</li>
-      <li><span class="ui">Settings</span> → <span class="ui">Privacy</span> → <span class="ui">Share the agents, providers and models I use</span> off, or <code>"noUsageStats": true</code> leaves out the <code>magpie uses</code> and <code>magpie partner</code> events and the counts in <code>magpie active</code>; the id, version and system are still sent. Partner counts stop being kept too.</li>
+      <li><span class="ui">Settings</span> → <span class="ui">Privacy</span> → <span class="ui">Share the agents, providers, models and plugins I use</span> off, or <code>"noUsageStats": true</code> leaves out the <code>magpie uses</code> and <code>magpie partner</code> events, the counts in <code>magpie active</code> and the <a href="#plugins">plugin report</a>; the id, version and system are still sent. Partner counts stop being kept too.</li>
       <li><span class="ui">Settings</span> → <span class="ui">About</span> → <span class="ui">Automatic updates</span> off, or <code>"noAutoUpdate": true</code> stops magpie asking <code>usemagpie.ai</code> for a newer version by itself (it asks every 6 hours otherwise). This is not part of the count.</li>
     </ul>
     <p>A change in Settings takes effect at the next hourly look; no restart is needed. <code>settings.json</code> sits in magpie’s folder (see <a href="#files">below</a>):</p>
@@ -163,26 +224,30 @@
       <tr><th>File</th><th>What it is</th></tr>
       <tr><td><code>install-id</code></td><td>The random id, made the first time the count is sent</td></tr>
       <tr><td><code>stats-sent</code></td><td>The last day (UTC) the count went, so a day is sent once</td></tr>
+      <tr><td><code>plugin-likes.json</code></td><td>The plugins you liked in Discover</td></tr>
       <tr><td><code>partner-counts.json</code> (in the cache folder)</td><td>Partner counts not yet sent, at most 14 days</td></tr>
     </table></div>
     <p><code>install-id</code> and <code>stats-sent</code> are in magpie’s folder: <code>~/.config/magpie</code> on macOS and Linux, <code>%USERPROFILE%\.config\magpie</code> on Windows, <code>$XDG_CONFIG_HOME/magpie</code> when that is set, and the data folder of a portable magpie. <code>partner-counts.json</code> is in <code>~/.cache/magpie</code> (<code>$XDG_CACHE_HOME/magpie</code>, or <code>cache</code> in a portable magpie’s data folder). You can delete any of them: a deleted <code>install-id</code> is replaced by a new random one at the next send, so you are counted as a new user; with the count off, none of them is written again.</p>
     <p>The request archive (the <span class="ui">Request archive</span> switch on the <span class="ui">Usage</span> page, above the list of requests) is <b>off by default</b>. Turned on while sync has no S3 bucket, it keeps each gateway call’s headers and bodies, secrets masked as for the S3 archive, in <code>request-archive</code> in magpie’s folder, one file per call, readable by your user only. It grows to 1 GiB (<code>requestArchiveLocalMB</code> in settings.json) and the oldest calls are removed past that. The switch is this computer’s own: sync never turns it on at another computer. With an S3 bucket the calls go to the bucket instead, and nothing is written here. Delete the folder whenever you like.</p>
+    <p>The app writes a log of what it did, <code>app.log</code>, in <code>~/Library/Logs/magpie</code> on macOS, <code>%LOCALAPPDATA%\magpie\logs</code> on Windows and <code>~/.local/state/magpie</code> on Linux (see <a href="/docs/start#log">Where is magpie’s log?</a>), readable by your user only. It names what magpie did and the errors it met, never keys, prompts or replies, and stays on your computer unless you send it. It is kept to 5 MiB, with one older file, <code>app.old.log</code>. Delete them whenever you like.</p>
 
     <h2 id="site"><a class="anchor" href="#site">What usemagpie.ai sees</a></h2>
     <p>magpie asks its own site for a few things, whatever the privacy settings say, as any app asks its update server. None of these requests carries the install id or an account.</p>
     <ul>
       <li><code>/api/latest</code>: the update feed, every 6 hours unless <code>noAutoUpdate</code> is on, with <code>?lang=</code> for the notes in your language, and <code>?channel=stable</code> when <span class="ui">Settings</span> → <span class="ui">About</span> → <span class="ui">Update channel</span> is Stable. Neither says who you are. <code>/api/notes</code> gives What’s new after an update.</li>
+      <li><code>/files/&lt;version&gt;/&lt;file&gt;</code>: the release files an update and the installer download, served from Cloudflare R2. A file the site doesn’t hold is sent on to github.com. Nothing is counted.</li>
       <li><code>/api/partners</code>: the add sheet’s partner list, every 6 hours. One fetch in ten is counted as a <code>magpie partners fetch</code> event, with the country Cloudflare gives, while a partner is listed.</li>
       <li><code>/go/&lt;partner&gt;/site</code> and <code>/go/&lt;partner&gt;/keys</code>: a partner’s website and key-page links, opened in your browser, are counted (the partner, which link, a region, a country) as <code>magpie partner go</code> before you are sent on.</li>
+      <li><code>/api/plugins/stats</code>: Discover’s counts of how many use and like each plugin, at most once an hour. It carries no id; the <a href="#plugins">plugin report</a> and likes do, and go only with sharing what you use on.</li>
       <li><code>/api/icon?url=…</code>: icons named by a plugin, an import link or the library are fetched through it, so their hosts see Cloudflare’s address, not yours. The worker passes the picture on and counts and keeps nothing.</li>
     </ul>
-    <p>The site’s own pages (these docs, the home page) carry Cloudflare Web Analytics, which counts page views without cookies. The app doesn’t load it. The code is <a href="https://github.com/yetone/magpie/blob/main/site/worker.js">site/worker.js</a>.</p>
+    <p>The site’s own pages (these docs, the home page) carry Cloudflare Web Analytics and PostHog Web Analytics (<code>us.i.posthog.com</code>), without cookies. PostHog keeps a random visitor id in your browser’s local storage for this site, so a return visit counts as the same visitor. It gets each page’s address, the page that sent you, what you click on the page (not what you type), how fast the page and its requests loaded, errors the page hit, your browser, system and screen size, the country and city your address is in, and a recording of the visit (what the page showed, mouse moves, clicks and scrolls, its console messages) with every input box masked; nothing at all when your browser sends Do Not Track or Global Privacy Control. PostHog’s requests go through this site, under <code>usemagpie.ai/r/</code>, which passes them and your address on to PostHog and keeps the site’s cookies. Following a <code>/download</code> link, or fetching <code>install.sh</code>, sends PostHog a count of its own: which file, your country, and whether a browser or a command asked; no id and no address. The app doesn’t load either. The code is <a href="https://github.com/yetone/magpie/blob/main/site/worker.js">site/worker.js</a>.</p>
 
     <h2 id="lists"><a class="anchor" href="#lists">Public lists magpie fetches</a></h2>
     <p>To price and name models magpie fetches the <a href="https://models.dev">models.dev</a> catalog (<code>models.dev/api.json</code>), and for prices in your currency the USD exchange rate from <code>open.er-api.com</code> (kept 12 hours). Plugins and their updates come from the npm registry, and the library’s items from GitHub. These are plain downloads of public data: nothing about you, your providers or your usage is sent, though, as with any request, those hosts see your IP address (or your proxy’s). magpie also asks each of your providers for your allowance and model list, with your own key or sign-in; <span class="ui">Settings</span> → <span class="ui">Allowances</span> → <span class="ui">Allowance reads</span> → <span class="ui">When I ask</span> limits those to when you ask.</p>
 
     <h2 id="otel"><a class="anchor" href="#otel">OTLP export</a></h2>
-    <p>magpie can export each gateway request to an OpenTelemetry collector of yours (Langfuse, for example). It is <b>off by default</b>, and goes only to the endpoint you set, never to us. When on, it sends per-request spans: agent, provider, model, token counts, status, timing and estimated cost. Optional switches add metrics, local agent conversations, and the request and reply bodies (secrets masked). Turn it on in <span class="ui">Settings</span> → <span class="ui">Observability</span>, or for <code>magpie serve</code> with <code>MAGPIE_OTEL_ENABLED</code>, <code>MAGPIE_OTEL_ENDPOINT</code>, <code>MAGPIE_OTEL_HEADERS</code>, <code>MAGPIE_OTEL_METRICS</code>, <code>MAGPIE_OTEL_SESSIONS</code>, <code>MAGPIE_OTEL_BODIES</code> and <code>MAGPIE_OTEL_BODIES_WHOLE</code>. An endpoint alone doesn’t turn it on. For Langfuse, pick <span class="ui">Langfuse</span> there and give its host and your project’s two keys; magpie makes the endpoint and sign-in from them. The <a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#otlp-export">reference</a> has the details.</p>
+    <p>magpie can export each gateway request to an OpenTelemetry collector of yours (Langfuse, for example). It is <b>off by default</b>, and goes only to the endpoint you set, never to us. When on, it sends per-request spans: agent, provider, model, the name you gave the gateway key it came with (never the key itself), token counts, status, timing and estimated cost. Optional switches add metrics, local agent conversations, and the request and reply bodies (secrets masked). Turn it on in <span class="ui">Settings</span> → <span class="ui">Observability</span>, or for <code>magpie serve</code> with <code>MAGPIE_OTEL_ENABLED</code>, <code>MAGPIE_OTEL_ENDPOINT</code>, <code>MAGPIE_OTEL_HEADERS</code>, <code>MAGPIE_OTEL_METRICS</code>, <code>MAGPIE_OTEL_SESSIONS</code>, <code>MAGPIE_OTEL_BODIES</code> and <code>MAGPIE_OTEL_BODIES_WHOLE</code>. An endpoint alone doesn’t turn it on. For Langfuse, pick <span class="ui">Langfuse</span> there and give its host and your project’s two keys; magpie makes the endpoint and sign-in from them. Each export’s resource is <code>service.name=magpie</code>, plus only what you set yourself in <code>OTEL_RESOURCE_ATTRIBUTES</code> and <code>OTEL_SERVICE_NAME</code> (a server name, for example); nothing about your machine is looked up. The <a href="https://github.com/yetone/magpie/blob/main/docs/reference.md#otlp-export">reference</a> has the details.</p>
 
     <h2 id="masking"><a class="anchor" href="#masking">Masking what goes to providers</a></h2>
     <p>The sections above are what magpie sends by itself. What your agents send goes to the providers you chose, and <b>privacy masking</b> keeps the secrets in it on this computer. It is <b>off by default</b>; turn it on in <span class="ui">Settings</span> → <span class="ui">Privacy</span>.</p>
@@ -216,10 +281,20 @@
     <a href="/docs/docker">Docker</a>
     <a href="/docs/privacy">Privacy</a>
     <a href="/docs/masking">Privacy masking</a>
+    <a href="/docs/mcp-router">MCP router</a>
+    <a href="/docs/library">Library</a>
+    <a href="/docs/claude-code-models">Models in Claude Code</a>
+    <a href="/docs/codex-models">Models in Codex</a>
+    <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>
+    <a href="/docs/subscriptions">Subscriptions in any agent</a>
+    <a href="/docs/local-models">Local models</a>
+    <a href="/docs/opencode-models">Models in OpenCode</a>
+    <a href="/docs/alternatives">magpie vs CC Switch vs CCR</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
+    <a href="/docs/contributors">Contributors</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
   </div>
 </div></footer>

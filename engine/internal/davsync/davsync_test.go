@@ -191,7 +191,7 @@ func TestSync(t *testing.T) {
 	a, b := newComputer(t), newComputer(t)
 	a.use(t)
 	provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k1"})
-	settings.Save(settings.Settings{Theme: "dark", Proxy: "http://127.0.0.1:7890", Window: []int{900, 700}, TrayUsages: []string{"claude|a@b.c"}, TrayUsageEvery: 5, TrayNoLogos: true, TrayNoBird: true, TrayPace: true, TrayNoCost: true})
+	settings.Save(settings.Settings{Theme: "dark", Proxy: "http://127.0.0.1:7890", Window: []int{900, 700}, TrayUsages: []string{"claude|a@b.c"}, TrayUsageEvery: 5, TrayNoLogos: true, TrayNoBird: true, TrayNoNumber: true, TrayPace: true, TrayNoCost: true, TrayWindows: map[string][]string{"claude": {"5h"}}})
 	profile.Save("work", profile.Profile{Fields: map[string]string{"claude.model": "x"}})
 	same := cfg
 	same.Passphrase = cfg.Password
@@ -236,7 +236,7 @@ func TestSync(t *testing.T) {
 	}
 	// nor does a's menu bar: what shows beside the icon is b's own (yoooo
 	// on Discord)
-	if s := settings.Load(); len(s.TrayUsages) != 0 || s.TrayUsage != "" || s.TrayUsageEvery == 5 || s.TrayNoLogos || s.TrayNoBird || s.TrayPace || s.TrayNoCost {
+	if s := settings.Load(); len(s.TrayUsages) != 0 || s.TrayUsage != "" || s.TrayUsageEvery == 5 || s.TrayNoLogos || s.TrayNoBird || s.TrayNoNumber || s.TrayPace || s.TrayNoCost || s.TrayWindows != nil {
 		t.Fatalf("b's menu bar: %+v", s)
 	}
 	if ps, _ := profile.Load(); len(ps) != 1 {
@@ -265,8 +265,20 @@ func TestSync(t *testing.T) {
 	if got := ids(); !slices.Equal(got, []string{"deepseek=k1", "kimi=k2"}) {
 		t.Fatalf("b after a added: %v", got)
 	}
+	// b renames a profile: a has it under the new name alone, what it
+	// held the same (#2721)
+	if err := profile.Rename("work", "desk"); err != nil {
+		t.Fatal(err)
+	}
+	now(t)
+	a.use(t)
+	now(t)
+	if ps, _ := profile.Load(); len(ps) != 1 || ps["desk"].Fields["claude.model"] != "x" {
+		t.Fatalf("a after b renamed: %v", ps)
+	}
+	b.use(t)
 	provider.Delete("deepseek")
-	profile.Delete("work")
+	profile.Delete("desk")
 	now(t)
 	a.use(t)
 	if v := now(t); v.Notice != nil {
@@ -304,6 +316,13 @@ func TestSync(t *testing.T) {
 	b.use(t)
 	Dismiss()
 	settings.Save(settings.Settings{Theme: "light", Lang: "en", Proxy: "direct"})
+	// A file's time is the kernel's clock, which moves in ticks (4 ms at
+	// HZ=250), and the push's is time.Now(): saved within a tick of a's
+	// push, b's newer settings read as the older (red 13 of 100 alone on
+	// a Linux box). They are dated to the moment, as finely as the push.
+	if at := time.Now(); os.Chtimes(settings.Path(), at, at) != nil {
+		t.Fatal("dating b's settings")
+	}
 	v = now(t)
 	if v.Notice == nil || !slices.Equal(v.Notice.There, []string{"settings"}) {
 		t.Fatalf("newer here: %+v", v.Notice)
@@ -641,7 +660,7 @@ func TestConfigurePassword(t *testing.T) {
 // them, and its status names the subscriptions it brought the settings of
 // with no account there (yapechan on Discord: after a WebDAV sync no
 // providers showed, and nothing said why). A plugin taken off one computer
-// stays on the others.
+// goes from the others too (TestSyncPluginRemovalSpreads).
 func TestSyncPluginsAndSignIn(t *testing.T) {
 	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
 	srv := httptest.NewServer(fake)
@@ -693,7 +712,7 @@ func TestSyncPluginsAndSignIn(t *testing.T) {
 		t.Fatalf("b's status names %v to sign in to, want claude", got)
 	}
 
-	// a takes the plugin away: b keeps its own
+	// a takes the plugin away: b asks for nothing more
 	a.use(t)
 	if err := os.WriteFile(pluginsJSON, []byte(`{"plugins":[]}`), 0o600); err != nil {
 		t.Fatal(err)

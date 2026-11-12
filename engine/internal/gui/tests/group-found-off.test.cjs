@@ -76,10 +76,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, posts));
-      await page.goto("http://magpie.test/?view=routing");
+      await page.goto("http://magpie.test/?view=groups");
       const card = (name) => page.locator(".rt-group", { hasText: name });
       await card("Model M").waitFor();
       const box = page.locator(".rt-gsec .rt-gfound");
@@ -88,13 +89,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await sw.getAttribute("aria-checked"), "true");
       assert((await box.textContent()).includes(w.label));
       assert((await box.textContent()).includes(w.onHint), "it says what found groups are");
-      // by the list: right under the routing groups' head, over the cards
+      // under the list, in the page's Settings, the names in agents' lists
+      // (for every group) after it
       const order = await page.evaluate(() => {
         const s = document.querySelector(".rt-gsec");
-        return [...s.children].map((c) => c.className);
+        return [...s.children].map((c) => c.className).filter((c) => c !== "rt-goff");
       });
-      // (the names in agents' lists, for every group, between them)
-      assert.deepEqual(order.slice(0, 4), ["row-head", "rt-gfound", "rt-gnames", "list rt-groups"]);
+      assert.deepEqual(order.slice(0, 4), ["row-head", "list rt-groups", "row-head rt-gset-head", "list rt-gset"]);
+      assert.deepEqual(await page.evaluate(() => [...document.querySelector(".rt-gset").children].map((c) => c.className)), ["rt-gfound hint-row", "rt-gnames hint-row", "rt-gdef rt-gdef-sink hint-row", "rt-gdef rt-gdef-first hint-row", "rt-gdef rt-gdef-patience hint-row"]);
       const border = await sw.evaluate((e) => { const c = getComputedStyle(e); return c.borderLeftWidth !== c.borderRightWidth || c.borderLeftColor !== c.borderRightColor; });
       assert.equal(border, false, "no left-border accent");
 

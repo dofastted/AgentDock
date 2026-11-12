@@ -40,12 +40,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 440, height: 760 } })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", server(lang));
       await page.goto("http://magpie.test/?view=providers");
       await page.waitForFunction(() => typeof quotaError === "function");
-      const generic = await page.evaluate(() => t("Allowance unavailable"));
+      const generic = await page.evaluate(() => t("Allowance unavailable — hover for why"));
       const want = await page.evaluate((w) => t("Allowance unavailable: {why}", { why: w }), why);
       assert.ok(want.includes(why), want);
       if (lang !== "en") assert.notEqual(want, `Allowance unavailable: ${why}`, `${lang} has its own words`);
@@ -63,7 +64,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.ok(long.length < 220, long);
       // magpie's own errors keep their words: a plugin error it knows is
       // still said its way, and one that isn't the plugin's stays generic
-      assert.equal(await page.evaluate(() => quotaError("your sign-in has expired", { pluginError: true })), await page.evaluate(() => t("Signed out — add this account again to use it")));
+      const out = await page.evaluate(() => quotaError("your sign-in has expired", { pluginError: true }));
+      assert.equal(out, await page.evaluate(() => t("Signed out — choose Sign in again on this account under Providers")));
+      // a signed-out account is signed in again in place, so the words name
+      // the row's own button and the page it is on, never "add it again"
+      // (blue12345655 on Discord: Command Code signed out, no 重新登录 found)
+      for (const word of await page.evaluate(() => [t("Sign in again"), t("Providers")])) assert.ok(out.includes(word), `${lang}: ${out} names ${word}`);
+      assert.ok(!/add this account again/.test(out), out);
+      // so do Command Code's and Devin's plugins, in their own words
+      for (const e of ["Command Code's sign-in has expired; sign in again", "Devin's sign-in has expired — sign in again"])
+        assert.equal(await page.evaluate((e) => quotaError(e, { pluginError: true }), e), out);
       assert.equal(await page.evaluate((w) => quotaError(w, { error: w }), why), generic);
       assert.equal(await page.evaluate((w) => quotaError(w), why), generic);
       assert.deepEqual(errors, []);

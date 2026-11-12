@@ -46,6 +46,26 @@ func (s *Server) Busy() Busy {
 	return b
 }
 
+// CodexBusy is how many of Codex's requests are in flight and when its
+// last ended: a turn of the Codex app's that a restart of its app-server
+// would cut short (provider.KeepCodexAppOnItsProvider). Other agents'
+// requests don't hold it.
+func (s *Server) CodexBusy() (int, time.Time) {
+	n := 0
+	s.active.mu.Lock()
+	for _, f := range s.active.m {
+		if f.agent == "codex" {
+			n++
+		}
+	}
+	s.active.mu.Unlock()
+	var last time.Time
+	if d := s.codexDone.Load(); d != 0 {
+		last = time.Unix(0, d)
+	}
+	return n, last
+}
+
 // bridgeTurn counts a turn served through the subscription bridge for
 // Busy.Bridge until done is called.
 func (s *Server) bridgeTurn() (done func()) {
@@ -65,6 +85,16 @@ func (s *Server) counted(h http.Handler) http.Handler {
 		}
 		s.inFlight.Add(1)
 		r, done := s.active.add(r)
+		shut := func() {}
+		if f := inflightOf(r.Context()); f != nil {
+			f.mu.Lock()
+			f.tr = &s.trace
+			f.curves = &s.curves
+			f.mu.Unlock()
+			// the session's curve counts it in flight, its tool gaps
+			// being the time between
+			shut = s.curves.open(f.agent, f.session)
+		}
 		w, r, unwatch := s.watchUnrouted(w, r, inflightOf(r.Context()))
 		defer func() {
 			// a panic is net/http's to recover, as before; the routes it
@@ -74,8 +104,12 @@ func (s *Server) counted(h http.Handler) http.Handler {
 				defer panic(p)
 			}
 			unwatch()
+			shut()
 			done()
 			s.lastDone.Store(time.Now().UnixNano())
+			if f := inflightOf(r.Context()); f != nil && f.agent == "codex" {
+				s.codexDone.Store(time.Now().UnixNano())
+			}
 			if s.inFlight.Add(-1) == 0 {
 				s.armRelease(s.idle.restFor())
 			}
@@ -92,8 +126,12 @@ type busyCounters struct {
 	// the subscription bridge's turns among them, and when the last ended
 	bridgeInFlight atomic.Int64
 	bridgeDone     atomic.Int64 // unix ns
+	// when Codex's last request ended (CodexBusy)
+	codexDone atomic.Int64 // unix ns
 	// handing back what requests left once it rests (idle_memory.go)
 	idle idleMemory
+	// each session's output speed, for the Sessions page (session_speed.go)
+	curves curveMeter
 }
 
 // parked is how many runs wait on their caller's tool results.

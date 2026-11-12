@@ -110,7 +110,10 @@ func volcPlanQuotas(ctx context.Context) []SubscriptionQuota {
 			continue
 		}
 		if p.AccessKeyID == "" || p.SecretAccessKey == "" {
-			keyless = append(keyless, job{p, action, plan, region})
+			// a custom provider is asked for none (AsksAccessKey)
+			if AsksAccessKey(p) != "" {
+				keyless = append(keyless, job{p, action, plan, region})
+			}
 			continue
 		}
 		keyed[action] = true
@@ -135,6 +138,10 @@ func volcPlanQuotas(ctx context.Context) []SubscriptionQuota {
 		go func() {
 			defer wg.Done()
 			out[i] = volcPlanQuota(j.p.Via(ctx), j.p, j.action, j.plan, j.region)
+			if out[i].Error == "" {
+				// what routing goes by, read just now (KeyAllowance)
+				noteKeyAllowance(j.p, out[i].Windows, time.Now())
+			}
 			// a failed read shows what was last read, as a key's plan does
 			out[i] = keepReading(ctx, out[i], keyTag("volc "+j.action, j.p.AccessKeyID))
 		}()
@@ -245,7 +252,7 @@ func volcOpenAPICall(ctx context.Context, ak, sk, region, action string, now tim
 	req.Header.Set("X-Content-Sha256", contentSHA)
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
 	}

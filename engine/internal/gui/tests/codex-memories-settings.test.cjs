@@ -90,6 +90,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 520 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [], sets = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, sets, true));
@@ -165,6 +166,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const page = await browser.newPage({ viewport: { width: 900, height: 520 } });
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.route("**/*", server("en", [], false));
@@ -173,7 +175,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.goto("http://magpie.test/?view=agents");
     await openAgentSettings(page, "claude");
     await page.locator('.row.agent[data-id="claude"] .ag-prefs #fullContextRow').waitFor();
-    assert.equal(await page.locator(".ag-prefs .row.pref").count(), 1, "Claude Code's settings are Long conversations alone");
+    // Long conversations, Claude Code's own size and its prompt cache under it
+    await page.locator('.row.agent[data-id="claude"] .ag-prefs .agent-compact').waitFor();
+    assert.equal(await page.locator(".ag-prefs .row.pref:not(.agent-compact):not(.claude-cache)").count(), 1, "Claude Code's settings are Long conversations and its own");
+    assert.equal(await page.locator(".ag-prefs .row.pref.claude-cache").count(), 2);
     assert.equal(await page.locator("#codexMemoriesRow").isHidden(), true);
     assert.deepEqual(errors, []);
   });

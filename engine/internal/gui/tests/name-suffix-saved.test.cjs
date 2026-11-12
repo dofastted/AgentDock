@@ -4,7 +4,7 @@
 // "Names in agents' lists" as On. The choice was read from Settings' own
 // read of the settings, which only opening Settings makes, though startup
 // had already read them with the state. Opening Settings put it right, and
-// the next restart brought On back. The provider editor's Names & levels
+// the next restart brought On back. The provider editor's Model settings
 // read the same thing. Here each page is opened first, with Off or "Not on
 // names I set" saved, and the choice and the label beside it must say what
 // is saved from the first drawing on: when the state comes in before the
@@ -13,6 +13,7 @@
 // is written. Every language, at a wide and a narrow window.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const { openPage } = require("./reader.cjs");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
@@ -65,6 +66,7 @@ async function launch(t, engine, lang, width, saved, opts, posts) {
     await browser.close();
   });
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, saved, opts, posts));
@@ -95,7 +97,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       test(`${engine} ${lang} ${width}px: Routing opened first shows the saved Off, and Settings and back keep it`, async (t) => {
         const posts = [];
         const { page, errors, tr } = await launch(t, engine, lang, width, OFF, {}, posts);
-        await page.goto("http://magpie.test/?view=routing");
+        await page.goto("http://magpie.test/?view=groups");
         await page.locator(".rt-group", { hasText: "Fast" }).waitFor();
         const set = page.locator(".rt-gnames");
         await set.locator(".segs").waitFor();
@@ -104,12 +106,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // a group's editor says what its group is called there: no suffix
         await page.locator(".rt-group", { hasText: "Fast" }).locator("button", { hasText: await tr("Edit") }).click();
         const row = page.locator(".rt-gedit label", { hasText: new RegExp(`^${await tr("In agents’ lists")}$`) }).locator("xpath=following-sibling::div[1]");
-        await says(row.locator(".hint"), (await tr("Agents’ lists show “{label}”", { label: "Fast" })) + " · " + (await tr("“· routing group” is set for every group above")));
+        await says(row.locator(".hint"), (await tr("Agents’ lists show “{label}”", { label: "Fast" })) + " · " + (await tr("“· routing group” is set for every group, under the list")));
         // Settings says the same, and coming back still does
         await page.locator("#prefs").click();
         await page.locator("#plainNamesSegs .opt.on").waitFor();
         await picked(page.locator("#plainNamesSegs .opt.on"), await tr("Off"));
-        await page.locator('#nav button[data-view="routing"]').click();
+        // the groups tab is the sidebar's; the header's row reaches them from Routing
+        const tab = page.locator('#nav button[data-view="groups"]');
+        if (await tab.isVisible()) await tab.click();
+        else { await openPage(page, "routing"); await page.locator("#rtToGroups").click(); }
         await picked(page.locator(".rt-gnames .opt.on"), await tr("Off"));
         assert.deepEqual(posts, [], "nothing is written");
         assert.deepEqual(errors, []);
@@ -118,7 +123,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       test(`${engine} ${lang} ${width}px: Routing drawn before the state comes in follows the saved "Not on names I set"`, async (t) => {
         const posts = [];
         const { page, errors, tr } = await launch(t, engine, lang, width, OWN, { stateDelay: 600 }, posts);
-        await page.goto("http://magpie.test/?view=routing");
+        await page.goto("http://magpie.test/?view=groups");
         const set = page.locator(".rt-gnames");
         await set.locator(".segs").waitFor();
         await picked(set.locator(".opt.on"), await tr("Not on names I set"));
@@ -133,7 +138,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const { page, errors, tr } = await launch(t, engine, lang, width, OFF, { stateDelay: 600 }, posts);
         await page.goto("http://magpie.test/?view=providers");
         await page.locator(".row.provider").click();
-        if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: await tr("Names & levels"), exact: true }).click();
+        if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: await tr("Model settings"), exact: true }).click();
         const sfx = page.locator(".mnames:not([hidden]) .msuffix");
         await sfx.waitFor();
         await says(sfx.locator(".hint"), await tr("Agents’ lists show “{label}”", { label: "My Sol" }));

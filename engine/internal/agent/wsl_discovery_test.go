@@ -27,8 +27,8 @@ func TestParseProbeNativeGeminiBehindWindowsPATH(t *testing.T) {
 	if !d.Has["bin:gemini"] {
 		t.Fatalf("native gemini lost: %v", d.Has)
 	}
-	if d.Bins["gemini"] != "/home/mci777/.nvm/versions/node/v20.20.0/bin/gemini" {
-		t.Fatalf("native path %q", d.Bins["gemini"])
+	if d.Paths["gemini"] != "/home/mci777/.nvm/versions/node/v20.20.0/bin/gemini" {
+		t.Fatalf("native path %q", d.Paths["gemini"])
 	}
 	if d.WinBins["gemini"] != "/mnt/c/Users/Administrator/AppData/Roaming/npm/gemini" {
 		t.Fatalf("interop path %q", d.WinBins["gemini"])

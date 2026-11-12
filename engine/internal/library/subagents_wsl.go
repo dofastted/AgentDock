@@ -2,6 +2,8 @@ package library
 
 import (
 	"fmt"
+
+	"github.com/yetone/magpie/internal/agent"
 	"path/filepath"
 	"strings"
 )
@@ -29,17 +31,23 @@ func wslSubagentSpecOf(t *Target) (*subagentSpec, string) {
 		return nil, why
 	}
 	c := *sp
-	if a.Dir != "" && under(c.dir, a.Dir) {
+	if a.Dir != "" && underDir(c.dir, a.Dir) {
 		return &c, ""
 	}
-	if !under(c.dir, a.Home) {
+	if !underDir(c.dir, a.Home) {
 		return nil, fmt.Sprintf("magpie gives subagents to %s only on this computer, not in WSL", a.Name)
 	}
 	return &c, ""
 }
 
 // under is whether path is in dir, Windows' case aside.
-func under(path, dir string) bool {
+func underDir(path, dir string) bool {
 	rel, err := filepath.Rel(strings.ToLower(dir), strings.ToLower(path))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// wslAsleepNoSubagents is why a, an agent in a stopped WSL distro, has no
+// subagents written now: the distro isn't opened or started for it.
+func wslAsleepNoSubagents(a *agent.Agent) string {
+	return fmt.Sprintf("WSL %s isn't running: %s is given its subagents once it runs", a.WSL, a.Name)
 }

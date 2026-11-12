@@ -3,12 +3,15 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/claudetui"
 )
 
 const subscriptionNotice = "You are currently using your subscription to power your Claude Code usage"
@@ -156,6 +159,11 @@ func TestClaudeUsageExpiredReadingDoesNotSwitchAccounts(t *testing.T) {
 			}
 			if tt.back {
 				setLoginReturn("claude", loginReturn{Back: "b@example.com", To: "a@example.com"})
+				// Claude Code goes back to the first only In order
+				// (returnsToFirst)
+				if err := SetRouting("claude", Ordered); err != nil {
+					t.Fatal(err)
+				}
 			}
 			NoteClaudeLimits("b@example.com", []ClaudeLimit{{Kind: "five_hour", Used: .1, ResetsAt: future.Unix()}})
 			AskClaudeUsage()
@@ -186,7 +194,6 @@ func TestClaudeUsageFailureDoesNotHideAccountErrors(t *testing.T) {
 		subscriptionNotice + ".\nHTTP 401 Unauthorized",
 		"Current session: 40% used\nHTTP 401 Unauthorized",
 		"You've hit your limit · resets 3:30am (UTC)",
-		"You are currently using your overages to power your Claude Code usage. We will automatically switch you back to your subscription rate limits when they reset",
 	} {
 		t.Run(text, func(t *testing.T) {
 			out, card := claudeUsageCards(t, "Current session: 40% used", nil)
@@ -310,5 +317,129 @@ func TestClaudeUsageUnavailableRecovers(t *testing.T) {
 	retryClaudeUsage()
 	if q := card(); q.Error != "" || q.AsOf == nil || !q.AsOf.After(at) || len(q.Windows) != 1 || q.Windows[0].Used != 25 {
 		t.Fatalf("next failure should keep the recovered reading: %+v", q)
+	}
+}
+
+// A /usage read that showed no figures is unknown, never an account with
+// no allowance. Seagull fries' Claude Code 2.1.316 on Windows told /usage's
+// panel while it still loaded its figures, and the card said "/usage told
+// no allowance". The helper now says when the panel couldn't load them,
+// and the card keeps the account's last reading then, as for Claude
+// Code's own "temporarily unavailable"; any other panel with no figures
+// is told as what it showed.
+func TestClaudeUsageWithoutFiguresIsUnknown(t *testing.T) {
+	at := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	reset := time.Now().Add(time.Hour).Truncate(time.Second)
+	snapshot := lastQuota{At: at, Q: SubscriptionQuota{Provider: "claude", Plan: "pro", Windows: []QuotaWindow{
+		{Name: "5 hours", Used: 40, ResetsAt: &reset},
+	}}}
+	// the result the helper gave for the panel as the pseudo console drew it
+	chrome := "❯ /usage ──────────── Settin s Status Config Usage Stats Session Total cost: $0.0000 Total duration (API): 0s Total duration (wall): 1s Total code changes: 0 lines added, 0 lines removed Usage: 0 input, 0 output, 0 cache read, 0 cache write Loading usage data… Esc to cancel"
+	_, card := claudeUsageCards(t, chrome, nil)
+	if q := card(); !strings.HasPrefix(q.Error, "Claude Code's /usage showed no usage figures: ❯ /usage") || len(q.Windows) != 0 {
+		t.Fatalf("the panel's frame read as %+v", q)
+	}
+	for _, err := range []string{
+		"Claude Code: /usage couldn't load the plan's usage: ❯ /usage Error: Failed to load usage data r to retry · Esc to cancel",
+		"Claude Code: /usage couldn't load the plan's usage: ❯ /usage Loading usage data… Esc to cancel",
+	} {
+		t.Run(err, func(t *testing.T) {
+			_, card := claudeUsageCards(t, "", &snapshot)
+			UsageClaudeVia(func(context.Context, string) (string, error) { return "", errors.New(err) })
+			q := card()
+			if q.Error != "" || q.AsOf == nil || !q.AsOf.Equal(at) || len(q.Windows) != 1 || q.Windows[0].Used != 40 {
+				t.Fatalf("a panel that couldn't load its figures should keep this account's reading: %+v", q)
+			}
+		})
+	}
+}
+
+// An interactive /usage panel with none of the account's windows (a Claude
+// Enterprise account with a five-hour window only, idle) is an account
+// whose windows haven't started, never a failure: it was told as the
+// panel's words, and the card showed Claude Code's banner as its error
+// and no window (koohoko5924, v0.1.3057).
+func TestClaudeUsageNoWindowStarted(t *testing.T) {
+	if claudeNoWindow != claudetui.NoUsageWindow {
+		t.Fatalf("the helper says %q, the card reads %q", claudetui.NoUsageWindow, claudeNoWindow)
+	}
+	_, card := claudeUsageCards(t, claudeNoWindow, nil)
+	q := card()
+	if q.Error != "" || len(q.Windows) != 1 || q.Windows[0].Name != "5 hours" || q.Windows[0].Used != 0 || q.Windows[0].ResetsAt != nil {
+		t.Fatalf("no window started read as %+v", q)
+	}
+}
+
+// A panel that couldn't load its figures is told with its whole reason,
+// and Anthropic turning the usage page away for a while, "(not your usage
+// limit)", is no account refused: read as "usage limit", it was.
+func TestClaudeUsageWhyKept(t *testing.T) {
+	now := time.Now()
+	why := "Settings Status Config Usage Stats Session What's contributing to your usage? Approximate · sessions on this machine only · Last 7d · 403 requests · 388 sessions · Esc to cancel"
+	_, err := parseClaudeUsage(why, now)
+	want := "Claude Code's /usage showed no usage figures: Settings Status Config Usage Stats Session What's contributing to your usage? Approximate · sessions on this machine only · Esc to cancel"
+	if err == nil || err.Error() != want {
+		t.Fatalf("told %v, want %q", err, want)
+	}
+	if claudeDenied(err.Error()) {
+		t.Fatalf("%q read as an account refused", err)
+	}
+	limited := "Claude Code: /usage couldn't load the plan's usage: Error: Claude is temporarily limiting requests to the usage page (not your usage limit). Try again in a moment."
+	if claudeDenied(limited) {
+		t.Fatalf("%q read as an account refused", limited)
+	}
+	if !claudeDenied("You've hit your session limit · resets 7pm") || !claudeDenied("Error: 401 unauthorized") {
+		t.Fatal("an account refused isn't read as one")
+	}
+	at := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	reset := time.Now().Add(time.Hour).Truncate(time.Second)
+	snapshot := lastQuota{At: at, Q: SubscriptionQuota{Provider: "claude", Plan: "pro", Windows: []QuotaWindow{
+		{Name: "5 hours", Used: 40, ResetsAt: &reset},
+	}}}
+	_, card := claudeUsageCards(t, "", &snapshot)
+	UsageClaudeVia(func(context.Context, string) (string, error) { return "", errors.New(limited) })
+	if q := card(); q.Error != "" || q.AsOf == nil || !q.AsOf.Equal(at) || len(q.Windows) != 1 || q.Windows[0].Used != 40 {
+		t.Fatalf("the usage page turned away should keep this account's reading: %+v", q)
+	}
+}
+
+// A warm-up has the account it started read again, and until that read
+// its card keeps the last reading's time: the warm-up cleared that time
+// and kept the windows, so the card stamped a reading minutes old as
+// read just now (koohoko5924, v0.1.3057), and nothing read it again,
+// the next read waiting on when /usage last ran.
+func TestClaudeWarmedReadAgain(t *testing.T) {
+	reset := time.Now().Add(2 * time.Hour).UTC().Format("3:04pm")
+	out, card := claudeUsageCards(t, "Current session: 10% used · resets "+reset+" (UTC)", nil)
+	if q := card(); q.Error != "" || len(q.Windows) == 0 {
+		t.Fatalf("first read: %+v", q)
+	}
+	// read three minutes ago, within the wait before the next read
+	at := time.Now().Add(-3 * time.Minute).Truncate(time.Second)
+	claudeUsage.Lock()
+	e := claudeUsage.m["a@example.com"]
+	e.at, e.tried = at, at
+	claudeUsage.m["a@example.com"] = e
+	claudeUsage.Unlock()
+	look := func() SubscriptionQuota {
+		t.Helper()
+		StaleAllowance("claude", "a@example.com")
+		q, ok := LoginUsage(context.Background(), "claude")["a@example.com"]
+		if !ok {
+			t.Fatal("no card for the signed-in account")
+		}
+		return q
+	}
+	if q := look(); q.ReadAt == nil || !q.ReadAt.Equal(at) || q.Windows[0].Used != 10 {
+		t.Fatalf("not due: %+v", q)
+	}
+	out.Store("Current session: 1% used · resets " + reset + " (UTC)\nCurrent week (all models): 1% used · resets " + reset + " (UTC)")
+	claudeWarmedNow("a@example.com")
+	if r := claudeReadAt("a@example.com"); r == nil || !r.Equal(at) {
+		t.Fatalf("warmed, the kept reading's time is %v, want %v", r, at)
+	}
+	q := look()
+	if q.ReadAt == nil || time.Since(*q.ReadAt) > time.Minute || len(q.Windows) < 2 || q.Windows[0].Used != 1 {
+		t.Fatalf("warmed, not read again: %+v", q)
 	}
 }

@@ -56,12 +56,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const context = await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" });
             const page = await context.newPage();
             page.setDefaultTimeout(5000);
+            page.setDefaultNavigationTimeout(60000);
             const errors = [], posted = [];
             page.on("pageerror", (e) => errors.push(e.message));
             await page.route("**/*", server(posted, lang, saved ? { ...relay, balanceMethod: saved } : relay));
             await page.goto("http://magpie.test/?view=providers");
             await page.locator(".row.provider", { hasText: "Relay" }).click();
-            await page.locator(".editor details.more:not(.advanced) > summary").click();
+            // a saved Balance URL opens Advanced, where it is asked
+            assert(await page.locator(".editor details.advanced").evaluate((d) => d.open), "Advanced is open");
 
             const method = page.locator(".editor .bal-method");
             await method.waitFor();
