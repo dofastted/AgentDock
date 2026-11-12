@@ -20,7 +20,9 @@
   "subtasks": [],
   "children": [
     "10-16-repair-wsl-agent-discovery",
-    "10-16-sync-magpie-subtree"
+    "10-16-sync-magpie-subtree",
+    "11-12-sync-magpie-2611",
+    "11-12-unified-env-config"
   ],
   "parent": null,
   "relatedFiles": [],
