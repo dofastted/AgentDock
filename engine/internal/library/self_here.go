@@ -36,10 +36,25 @@ func ownServer(s *Server) bool {
 
 // magpieBinary is whether cmd names a magpie program, by a path of any
 // system's: magpie, magpie.exe, magpie-windows-amd64.exe, the AppImage.
+// AgentDock ships the engine under its own name, so this program's name
+// is magpie's own too: its server is then healed to where the engine is
+// now (a build moved or deleted), and carried to another computer by
+// name rather than by this machine's path.
 func magpieBinary(cmd string) bool {
-	base := strings.ToLower(cmd[strings.LastIndexAny(cmd, `/\`)+1:])
-	base = strings.TrimSuffix(base, ".exe")
-	return base == magpieCommand || strings.HasPrefix(base, magpieCommand+"-")
+	base := binaryBase(cmd)
+	if base == magpieCommand || strings.HasPrefix(base, magpieCommand+"-") {
+		return true
+	}
+	self := ""
+	if e, err := selfExe(); err == nil {
+		self = binaryBase(e)
+	}
+	return base != "" && self != "" && base == self
+}
+
+// binaryBase is a program's name without its folder or .exe, lowercased.
+func binaryBase(cmd string) string {
+	return strings.TrimSuffix(strings.ToLower(cmd[strings.LastIndexAny(cmd, `/\`)+1:]), ".exe")
 }
 
 // runsHere is whether cmd is a program by full path on this computer.

@@ -475,6 +475,12 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-x { width: 24px; height: 24px; padding: 0; display: inline-grid; place-items: center; flex: none; }
 .lib-addpair { padding-left: 0; }
 .lib-addpair:hover { background: none; }
+/* AgentDock: a server's command in another environment (mcp_variants.go):
+   each variant a heading, its command line and its variables */
+.lib-variants { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; width: 100%; }
+.lib-variant { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.lib-varhead b { font-size: 12.5px; }
+.lib-varpick { flex: none; max-width: 60%; font-size: 12px; }
 .lib-editor .lib-picks { grid-column: 1 / -1; max-height: 320px; }
 .lib-editor .lib-keep { grid-column: 1 / -1; margin: 0 -6px; }
 .lib-confirm { grid-column: 1 / -1; margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--fg-2); }

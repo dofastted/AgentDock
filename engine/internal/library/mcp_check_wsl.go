@@ -40,7 +40,9 @@ func checkSides(s *Server) []string {
 			distros = append(distros, d)
 		}
 	}
-	if len(distros) == 0 || !wslrun.On || windowsPath.MatchString(s.Command) || settings.Shared().NoWSLAgents {
+	// AgentDock: what WSL runs is the server's wsl variant, if it has one
+	inWSL := s.variantFor(VariantWSL)
+	if len(distros) == 0 || !wslrun.On || windowsPath.MatchString(inWSL.Command) || settings.Shared().NoWSLAgents {
 		return []string{""}
 	}
 	slices.Sort(distros)

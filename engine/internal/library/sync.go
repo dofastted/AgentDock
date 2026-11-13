@@ -828,6 +828,10 @@ func SaveServer(old string, s Server) (*Result, error) {
 			if s.DisabledTools == nil {
 				s.DisabledTools = l.MCP[i].DisabledTools
 			}
+			// so do the environment variants (AgentDock, mcp_variants.go)
+			if s.Variants == nil && s.Transport == l.MCP[i].Transport {
+				s.Variants = l.MCP[i].Variants
+			}
 			// so do the accounts, which have calls of their own
 			if s.Accounts == nil && s.Account == "" {
 				s.Accounts, s.Account = l.MCP[i].Accounts, l.MCP[i].Account

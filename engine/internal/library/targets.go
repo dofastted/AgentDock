@@ -201,10 +201,17 @@ func codexDir() string { return appdir.CodexHomeIn(home()) }
 // targetOf is where a known agent keeps them, or nil for one magpie can't
 // give any of them to.
 func targetOf(a *agent.Agent) *Target {
+	var t *Target
 	if a.WSL != "" {
-		return wslTargetOf(a)
+		t = wslTargetOf(a)
+	} else {
+		t = hostTargetOf(a)
 	}
-	return hostTargetOf(a)
+	// AgentDock: the agent's own variant of a server (mcp_variants.go)
+	if t != nil && t.MCP != nil {
+		t.MCP.Agent = a.ID
+	}
+	return t
 }
 
 // hostTargetOf is targetOf for an agent on this machine, or a WSL agent

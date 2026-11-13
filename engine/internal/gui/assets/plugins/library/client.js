@@ -2531,7 +2531,7 @@ magpie.plugin("library", (ctx) => {
       // #1250: written there as it is, the agent would send the text
       // itself; written with the value, the token would be in its file
       if (envRefs(s) && a.noEnvRefs) return t("{agent} can't read {ref} from its settings — given this server, the token would be written there as plain text", { agent: a.name, ref: "${NAME}" });
-      return windowsBlocked(s)(a);
+      return windowsBlocked(s)(a) || linuxBlocked(s)(a);
     };
   }
   // envRefs says whether the server's headers (remote) or environment
@@ -2544,11 +2544,58 @@ magpie.plugin("library", (ctx) => {
   const windowsPath = /^[A-Za-z]:[\\/]|\\|\.(?:exe|cmd|bat|ps1)$/i;
   const magpieImageMCP = (s) => (s?.args || [])[0] === "mcp" && (s?.args || [])[1] === "image";
   const windowsMCPCmd = (s) => s && s.transport === "stdio" && !!s.command && windowsPath.test(s.command) && !magpieImageMCP(s);
-  const windowsBlocked = (s) => (a) => windowsMCPCmd(s) && isWSLAgent(a)
-    ? t("{agent} can't start a Windows program ({cmd}): give it a command WSL has", { agent: a.name, cmd: s.command })
-    : "";
+  // AgentDock: one server, a command for each environment (mcp_variants.go).
+  // variantKeysFor are the keys looked for, most specific first; asGiven is
+  // the server as that agent is given it.
+  const variantKeysFor = (a) => {
+    const id = a?.id || "";
+    const i = id.indexOf("@wsl:");
+    if (i < 0) return WIN_LINE ? [id, "windows"] : [id];
+    return [id, "wsl:" + id.slice(i + 5), "wsl"];
+  };
+  function asGiven(s, a) {
+    if (!s?.variants || !Object.keys(s.variants).length || remote(s)) return s;
+    const c = { ...s };
+    for (const k of variantKeysFor(a)) {
+      const v = k && s.variants[k];
+      if (!v) continue;
+      if (v.command) { c.command = v.command; c.args = v.args || []; }
+      else if (v.args) c.args = v.args;
+      if (v.env) c.env = v.env;
+      break;
+    }
+    return c;
+  }
+  // the key whose variant that agent is given, "" for the server's own
+  const variantHit = (s, a) => variantKeysFor(a).find((k) => k && s?.variants?.[k]) || "";
+  const windowsBlocked = (s) => (a) => {
+    if (!isWSLAgent(a)) return "";
+    const c = asGiven(s, a);
+    if (!windowsMCPCmd(c)) return "";
+    // a command named for this environment is the user's own: a Windows
+    // program the distro starts through interop by its path there
+    // (/mnt/d/…/x.exe) is left as it is (mcp_wsl.go side)
+    if (variantHit(s, a) && linuxPath.test(c.command)) return "";
+    return t("{agent} can't start a Windows program ({cmd}): give it a command WSL has", { agent: a.name, cmd: c.command });
+  };
+  // linuxPath / crossEnv in mcp_variants.go: a server an agent in WSL has,
+  // whose command is that distro's program, can't start on Windows
+  const linuxPath = /^(?:\/[^/]|~\/)/;
+  const crossEnv = (s) => !!(s?.variants && Object.keys(s.variants).length) || (s?.agents || []).some((id) => id.includes("@wsl:"));
+  const linuxBlocked = (s) => (a) => {
+    if (!WIN_LINE || !a || isWSLAgent(a) || s?.transport !== "stdio" || !crossEnv(s)) return "";
+    const c = asGiven(s, a);
+    return !magpieImageMCP(c) && linuxPath.test(c.command || "")
+      ? t("{agent} can't start a Linux program ({cmd}): give it a Windows command in this server's Windows variant", { agent: a.name, cmd: c.command })
+      : "";
+  };
+  // the environment a variant's key names, as the editor says it
+  const variantLabel = (k) => k === "windows" ? t("Windows")
+    : k === "wsl" ? t("WSL (any distro)")
+      : k.startsWith("wsl:") ? "WSL: " + k.slice(4)
+        : t("Only {agent}", { agent: k });
   // reaches(s) says whether an agent can be given the server
-  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE) && !(envRefs(s) && a.noEnvRefs) && !windowsBlocked(s)(a));
+  const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE) && !(envRefs(s) && a.noEnvRefs) && !windowsBlocked(s)(a) && !linuxBlocked(s)(a));
 
 
   function renderServers(body) {
@@ -3849,6 +3896,8 @@ magpie.plugin("library", (ctx) => {
     if (!s) d.agents = all.filter(reaches(d)).map((a) => a.id);
     if (!d.env) d.env = {};
     if (!d.headers) d.headers = {};
+    // AgentDock: what it runs in another environment (mcp_variants.go)
+    if (!d.variants) d.variants = {};
     d.local = !!d.local;
     d.note = d.note || "";
     const ed = el("div", "editor lib-editor");
@@ -3964,6 +4013,65 @@ magpie.plugin("library", (ctx) => {
     function drawAgents() {
       agentsBox.replaceChildren(agentChips(all, d.agents, (next) => { d.agents = next; drawAgents(); }, { names: true, blocked: sseBlocked(d), all: true }));
     }
+    // AgentDock: one entry, a command for each environment
+    // (mcp_variants.go): uvx.exe for this machine's agents and uvx for
+    // those in a distro, or a Linux program only the distro has. The most
+    // specific key wins; what a variant leaves out is the server's own.
+    function variantsBox() {
+      const box = el("div", "lib-variants");
+      const keyOf = (k) => {
+        const row = el("div", "lib-variant");
+        const v = d.variants[k];
+        const head = el("div", "lib-pair lib-varhead");
+        head.append(el("b", "", variantLabel(k)), el("span", "grow"));
+        const x = button("", "lib-x", () => { delete d.variants[k]; redraw(); drawAgents(); });
+        x.append(svg("M4.5 4.5l7 7M11.5 4.5l-7 7", 11, 1.6));
+        x.title = t("Remove");
+        head.append(x);
+        const line = lineBox([v.command, ...(v.args || [])].filter((y, i) => i > 0 || y).map(quote).join(" "),
+          [d.command, ...(d.args || [])].filter((y, i) => i > 0 || y).map(quote).join(" "), (val) => {
+            const w = words(val);
+            v.command = w[0] || "";
+            v.args = w.slice(1);
+            drawAgents();
+          });
+        row.append(head, line, pairs(v.env, "GITHUB_TOKEN", t("value"), (e) => {
+          v.env = Object.keys(e).length ? e : null;
+          drawAgents();
+        }));
+        return row;
+      };
+      // the keys not used yet: this machine, any distro, each distro the
+      // agents are in, then one agent alone (agents.yaml's override.<cli>)
+      const free = () => {
+        const used = new Set(Object.keys(d.variants));
+        const distros = [...new Set(all.filter(isWSLAgent).map((a) => a.id.split("@wsl:")[1]))].sort();
+        return [...(WIN_LINE ? ["windows"] : []), ...(distros.length ? ["wsl"] : []), ...distros.map((n) => "wsl:" + n), ...all.map((a) => a.id)]
+          .filter((k) => !used.has(k));
+      };
+      const redraw = () => {
+        box.replaceChildren(...Object.keys(d.variants).sort().map(keyOf));
+        const left = free();
+        if (!left.length) return;
+        const pick = el("select", "lib-varpick");
+        for (const k of left) {
+          const o = el("option", "", variantLabel(k));
+          o.value = k;
+          pick.append(o);
+        }
+        pick.setAttribute("aria-label", t("Environment"));
+        const add = button(t("＋ Add"), "lib-addpair", () => {
+          d.variants[pick.value] = { command: "", args: [] };
+          redraw();
+          box.querySelector(".lib-variant .lib-cmd")?.focus();
+        });
+        const line = el("div", "lib-pair");
+        line.append(pick, add);
+        box.append(line);
+      };
+      redraw();
+      return box;
+    }
     // the server as Copy config's Claude Code entry has it (fmtClaude)
     function jsonOf() {
       const e = d.transport === "stdio"
@@ -4024,6 +4132,9 @@ magpie.plugin("library", (ctx) => {
         });
         g.append(...field(t("Command"), line, t("The command and its arguments, as you'd type them")));
         g.append(...field(t("Environment"), pairs(d.env, "GITHUB_TOKEN", t("value"), (v) => { d.env = v; drawAgents(); }), refHint()));
+        // AgentDock: Windows and WSL run different programs; one entry
+        // carries both (mcp_variants.go)
+        g.append(...field(t("Per environment"), variantsBox(), t("A command for one environment, where the one above isn't the program there: an agent in WSL can't start a Windows program, and an agent on Windows can't start a Linux one. What a variant leaves out stays the server's own")));
       } else {
         const url = field2(d.url, "https://example.com/mcp", (v) => { d.url = v.trim(); signBox?.redraw(); });
         url.classList.add("mono");
@@ -4074,7 +4185,7 @@ magpie.plugin("library", (ctx) => {
     // a sign-in's to be of it
     const send = async () => {
       const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents.filter((id) => reaches(d)(agentOf(id))), startupTimeout: d.startupTimeout || 0, local: !!d.local, hub: d.hub || "", note: d.note || "" } };
-      if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env });
+      if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env, variants: d.variants || {} });
       else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && d.oauth?.clientId ? d.oauth : null });
       take(await api("library/servers/save", body));
       const was = s;
