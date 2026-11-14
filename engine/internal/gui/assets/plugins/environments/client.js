@@ -21,6 +21,8 @@ magpie.plugin("environments", (ctx) => {
     <section class="list env-list" id="envList" aria-live="polite"></section>
     <div class="row-head"><span class="label" data-t>Main agent</span><span class="note" data-t>the agents picked follow its Library setup</span></div>
     <section class="list env-sync" id="envBase"></section>
+    <div class="row-head"><span class="label" data-t>Clean start</span><span class="note" data-t>archive what the Library didn't give, take it out, restore any time</span></div>
+    <section class="list env-sync" id="envReset"></section>
     <div class="row-head"><span class="label" data-t>Copy an agent's setup</span><span class="note" data-t>onto the same agent in other environments</span></div>
     <section class="list env-sync" id="envSync"></section>
     <div class="row-head"><span class="label" data-t>WSL networking</span></div>
@@ -47,6 +49,8 @@ function environmentsPage(ctx) {
   // the main agent the others follow (library.Baseline): saved is the
   // engine's, the rest what the user is picking
   let base = { saved: null, agent: "", followers: [], plan: null, busy: false };
+  // a clean start (library/reset.go): the agents picked, the preview, the archives kept
+  let reset = { agents: null, instructions: false, plan: null, list: [], busy: false };
   let polling = 0;
 
   const agentName = (id) => (state.agents || []).find((a) => a.id === id)?.name || id;
@@ -67,6 +71,7 @@ function environmentsPage(ctx) {
       if (!base.plan) base = { ...base, agent: b.agent || base.agent, followers: b.followers || [] };
       drawBase();
     }, () => {});
+    api("environments/resets").then((r) => { reset.list = r.resets || []; drawReset(); }, () => {});
     draw();
     // a probe started in the background: read again once it is done
     clearTimeout(polling);
@@ -78,6 +83,7 @@ function environmentsPage(ctx) {
     drawNotices();
     drawList();
     drawBase();
+    drawReset();
     drawSync();
     drawNet();
     drawImport();
@@ -274,6 +280,84 @@ function environmentsPage(ctx) {
     }
     base.busy = false;
     drawBase();
+  }
+
+  // ---------- a clean start ----------
+
+  function drawReset() {
+    const box = $("#envReset");
+    if (!box || !s) return;
+    box.replaceChildren();
+    const all = allAgents();
+    if (!all.length) return;
+    const label = (a) => agentName(kind(a.id)) + " · " + envName(a.env);
+    // the main agent and its followers, when there are, else none picked
+    if (reset.agents === null) reset.agents = base.saved?.agent ? [base.saved.agent, ...(base.saved.followers || [])] : [];
+    const chips = el("div", "env-chips");
+    for (const a of all) {
+      const on = reset.agents.includes(a.id);
+      const c = el("button", "chip" + (on ? " on" : ""), label(a));
+      c.type = "button";
+      c.setAttribute("aria-pressed", String(on));
+      c.onclick = () => { reset.agents = on ? reset.agents.filter((x) => x !== a.id) : [...reset.agents, a.id]; reset.plan = null; drawReset(); };
+      chips.append(c);
+    }
+    box.append(ui.row(t("Agents"), t("Their own skills, MCP entries and subagent files are archived and taken out, and each environment's ~/.agents/skills too; the Library's stay, and are given again."), chips));
+    const instr = el("button", "chip" + (reset.instructions ? " on" : ""), t("Their own instructions text too"));
+    instr.type = "button";
+    instr.setAttribute("aria-pressed", String(reset.instructions));
+    instr.onclick = () => { reset.instructions = !reset.instructions; reset.plan = null; drawReset(); };
+    box.append(ui.row(t("Instructions"), t("Off: CLAUDE.md / AGENTS.md stay as they are. On: only the Library's shared part is left."), instr));
+    const acts = el("div", "env-acts");
+    const preview = ui.button(t("Preview changes"), () => runReset("preview"));
+    preview.disabled = !reset.agents.length || reset.busy;
+    const go = ui.button(t("Archive and clean"), () => runReset("apply"), "text primary");
+    go.disabled = !reset.plan || !reset.plan.items.length || reset.busy;
+    acts.append(preview, go);
+    box.append(acts);
+    if (reset.plan) {
+      const p = el("div", "env-plan");
+      const by = {};
+      for (const it of reset.plan.items) (by[it.agent] ||= []).push(it);
+      if (!reset.plan.items.length) p.append(el("div", "sub", t("Nothing to take out")));
+      for (const [ag, its] of Object.entries(by)) {
+        const card = el("div", "env-plan-target");
+        card.append(el("div", "name", ag.startsWith("shared:") ? "~/.agents/skills · " + ag.slice(7) : ag));
+        const ul = el("ul");
+        for (const it of its) ul.append(el("li", "", "− " + it.kind + (it.name ? " " + it.name : "") + (it.link ? " → " + it.link : "")));
+        card.append(ul);
+        p.append(card);
+      }
+      for (const pr of reset.plan.problems || []) p.append(el("div", "sub warn", pr.agent + ": " + pr.error));
+      box.append(p);
+    }
+    for (const r of reset.list.slice(0, 5)) {
+      const restore = ui.button(t("Restore"), () => runReset("restore", r.id), "text");
+      restore.disabled = reset.busy;
+      const sub = t("{n} items from {agents}", { n: r.items.length, agents: r.agents.join(", ") }) + (r.restored ? " · " + t("restored {at}", { at: new Date(r.restored).toLocaleString(intlLang()) }) : "");
+      box.append(ui.row(t("Archive {id}", { id: r.id }), sub, restore));
+    }
+  }
+
+  async function runReset(how, id) {
+    if (how === "apply" && !(await confirmAction(t("Archive and clean"), t("Everything listed is archived, then taken out of the agents' folders and configs. Restore puts it back. Go on?"), t("Archive and clean")))) return;
+    if (how === "restore" && !(await confirmAction(t("Restore"), t("What was archived goes back, and the Library is set back to that moment: what was set up since is undone. Go on?"), t("Restore")))) return;
+    reset.busy = true;
+    drawReset();
+    try {
+      if (how === "preview") reset.plan = await api("environments/reset/preview", { agents: reset.agents, instructions: reset.instructions });
+      else {
+        const r = await api(how === "apply" ? "environments/reset" : "environments/reset/restore", how === "apply" ? { agents: reset.agents, instructions: reset.instructions } : { id });
+        reset.plan = null;
+        status(r.error ? r.error : how === "apply" ? t("Archived and cleaned") : t("Restored"), r.error ? "err" : "");
+        const l = await api("environments/resets");
+        reset.list = l.resets || [];
+      }
+    } catch (e) {
+      status(e.message, "err");
+    }
+    reset.busy = false;
+    drawReset();
   }
 
   // every agent in any environment, by id, with its environment
