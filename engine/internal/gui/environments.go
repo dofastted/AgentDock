@@ -10,6 +10,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/environments"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -244,6 +245,42 @@ func environmentRoutes(mux *http.ServeMux) {
 			return
 		}
 		p, err := environments.Preview(in.Source, in.Targets)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	// the main agent the others follow (library.Baseline)
+	mux.HandleFunc("GET /api/environments/baseline", func(rw http.ResponseWriter, r *http.Request) {
+		b, err := library.BaselineOf()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, b)
+	})
+	mux.HandleFunc("POST /api/environments/baseline", func(rw http.ResponseWriter, r *http.Request) {
+		var in library.Baseline
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		res, err := library.SetBaseline(in.Agent, in.Followers)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		b, _ := library.BaselineOf()
+		writeJSON(rw, map[string]any{"baseline": b, "result": res})
+	})
+	mux.HandleFunc("POST /api/environments/baseline/preview", func(rw http.ResponseWriter, r *http.Request) {
+		var in library.Baseline
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		p, err := environments.BaselinePreview(in.Agent, in.Followers)
 		if err != nil {
 			fail(rw, err)
 			return

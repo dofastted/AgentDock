@@ -35,6 +35,9 @@ type Library struct {
 	// Subagents are agents of their own the agents ticked for each can
 	// hand a task to (subagents.go, #2283)
 	Subagents []*Subagent `json:"subagents,omitempty"`
+	// Baseline is the agent the user's others follow (AgentDock,
+	// baseline.go): each change gives the followers its ticks
+	Baseline *Baseline `json:"baseline,omitempty"`
 	// Plugins are the Claude Code plugins kept as one item each: its
 	// skills, servers, hooks and subagents are the items above marked
 	// with its name (plugin.go)
@@ -364,11 +367,19 @@ func changeLocked(f func(l *Library) error) (*Result, error) {
 	if err := f(l); err != nil {
 		return nil, err
 	}
+	l.followBaseline() // AgentDock: followers mirror the baseline (baseline.go)
 	l.settleAway()
 	l.heal() // a server f brought in, from another computer too
 	if err := l.save(); err != nil {
 		return nil, err
 	}
 	res := l.sync()
+	// AgentDock: a follower's own skill in the library's way gives way to it
+	if l.settleFollowers(res) {
+		if err := l.save(); err != nil {
+			return res, err
+		}
+		res = l.sync()
+	}
 	return res, l.save()
 }

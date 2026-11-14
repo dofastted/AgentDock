@@ -2298,35 +2298,43 @@ func UseLibrarySkill(name, agentID string) (*Result, error) {
 func UseLibrarySkills(names []string, agentID string) (*Result, error) {
 	return change(func(l *Library) error {
 		for _, name := range names {
-			s, t, err := ownSkill(l, name, agentID)
-			if err != nil {
+			if err := useLibrarySkill(l, name, agentID); err != nil {
 				return err
-			}
-			if len(t.Desktop) > 0 {
-				return fmt.Errorf("Claude Desktop keeps its own %s: it can't be put aside for the library's, only kept", name)
-			}
-			p := filepath.Join(t.Skills, name)
-			if _, err := os.Lstat(p); err == nil && !ours(p, name) && realDir(p) != realDir(skillDir(name)) {
-				if _, err := setAside(t.Agent.ID, p); err != nil {
-					return err
-				}
-			}
-			// its own by that name is the user's in ~/.agents/skills, which
-			// it reads besides its own folder: that one is set aside (every
-			// other reader of the folder had it as its own too)
-			if t.readsSharedDir() && realDir(t.Skills) != realDir(sharedSkillsDir()) {
-				if q, same := readSharedOwn().rival(name); q != "" && !same {
-					if _, err := setAside(t.Agent.ID, q); err != nil {
-						return err
-					}
-				}
-			}
-			if !slices.Contains(s.Agents, t.Agent.ID) && !slices.ContainsFunc(sharing(t), func(o string) bool { return slices.Contains(s.Agents, o) }) {
-				s.Agents = set(s.Agents, t.Agent.ID, true)
 			}
 		}
 		return nil
 	})
+}
+
+// useLibrarySkill is UseLibrarySkills for one skill, the library held.
+func useLibrarySkill(l *Library, name, agentID string) error {
+	s, t, err := ownSkill(l, name, agentID)
+	if err != nil {
+		return err
+	}
+	if len(t.Desktop) > 0 {
+		return fmt.Errorf("Claude Desktop keeps its own %s: it can't be put aside for the library's, only kept", name)
+	}
+	p := filepath.Join(t.Skills, name)
+	if _, err := os.Lstat(p); err == nil && !ours(p, name) && realDir(p) != realDir(skillDir(name)) {
+		if _, err := setAside(t.Agent.ID, p); err != nil {
+			return err
+		}
+	}
+	// its own by that name is the user's in ~/.agents/skills, which
+	// it reads besides its own folder: that one is set aside (every
+	// other reader of the folder had it as its own too)
+	if t.readsSharedDir() && realDir(t.Skills) != realDir(sharedSkillsDir()) {
+		if q, same := readSharedOwn().rival(name); q != "" && !same {
+			if _, err := setAside(t.Agent.ID, q); err != nil {
+				return err
+			}
+		}
+	}
+	if !slices.Contains(s.Agents, t.Agent.ID) && !slices.ContainsFunc(sharing(t), func(o string) bool { return slices.Contains(s.Agents, o) }) {
+		s.Agents = set(s.Agents, t.Agent.ID, true)
+	}
+	return nil
 }
 
 // KeepAgentSkill settles it the other way: the agent keeps its own, and

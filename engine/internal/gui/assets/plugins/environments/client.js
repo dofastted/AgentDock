@@ -19,6 +19,8 @@ magpie.plugin("environments", (ctx) => {
       <button class="text" id="envRefresh" type="button"><span data-t>Check again</span></button></div>
     <div id="envNotices"></div>
     <section class="list env-list" id="envList" aria-live="polite"></section>
+    <div class="row-head"><span class="label" data-t>Main agent</span><span class="note" data-t>the agents picked follow its Library setup</span></div>
+    <section class="list env-sync" id="envBase"></section>
     <div class="row-head"><span class="label" data-t>Copy an agent's setup</span><span class="note" data-t>onto the same agent in other environments</span></div>
     <section class="list env-sync" id="envSync"></section>
     <div class="row-head"><span class="label" data-t>WSL networking</span></div>
@@ -42,6 +44,9 @@ function environmentsPage(ctx) {
   let s = null; // /api/environments
   let sources = []; // a distro's own magpie
   let sync = { source: "", targets: [], plan: null, busy: false };
+  // the main agent the others follow (library.Baseline): saved is the
+  // engine's, the rest what the user is picking
+  let base = { saved: null, agent: "", followers: [], plan: null, busy: false };
   let polling = 0;
 
   const agentName = (id) => (state.agents || []).find((a) => a.id === id)?.name || id;
@@ -57,6 +62,11 @@ function environmentsPage(ctx) {
       return;
     }
     api("environments/import/magpie").then((r) => { sources = r.sources || []; drawImport(); }, () => {});
+    api("environments/baseline").then((b) => {
+      base.saved = b;
+      if (!base.plan) base = { ...base, agent: b.agent || base.agent, followers: b.followers || [] };
+      drawBase();
+    }, () => {});
     draw();
     // a probe started in the background: read again once it is done
     clearTimeout(polling);
@@ -67,6 +77,7 @@ function environmentsPage(ctx) {
     if (!s) return;
     drawNotices();
     drawList();
+    drawBase();
     drawSync();
     drawNet();
     drawImport();
@@ -186,6 +197,84 @@ function environmentsPage(ctx) {
   }
 
   // ---------- copy an agent's setup ----------
+
+  // ---------- the main agent ----------
+
+  function drawBase() {
+    const box = $("#envBase");
+    if (!box || !s) return;
+    box.replaceChildren();
+    const all = allAgents();
+    if (!all.length) return;
+    // WSL is the main place to work: its agents first, omp of them first
+    const order = (a) => (a.env.kind === "wsl" ? 0 : 2) + (kind(a.id) === "omp" ? 0 : 1);
+    const sorted = [...all].sort((a, b) => order(a) - order(b) || a.id.localeCompare(b.id));
+    if (!base.agent) base.agent = sorted[0].id;
+    const label = (a) => agentName(kind(a.id)) + " · " + envName(a.env);
+    const pick = ui.menu(sorted.map((a) => ({ v: a.id, name: label(a) })), base.agent, t("Main agent"), (v) => {
+      base = { ...base, agent: v, followers: base.followers.filter((f) => f !== v), plan: null };
+      drawBase();
+    });
+    const saved = base.saved?.agent;
+    const savedOf = saved ? all.find((a) => a.id === saved) : null;
+    const note = saved
+      ? t("Now: {agent}. Every change in the Library gives its followers what it has: shared instructions, servers, skills, hooks and subagents. A follower's own skill in the way is kept with the backups.", { agent: savedOf ? label(savedOf) : saved })
+      : t("None yet. Pick the agent you work in; the others you pick follow its Library setup from then on.");
+    box.append(ui.row(t("Main agent"), note, pick));
+    const chips = el("div", "env-chips");
+    const pickAll = el("button", "chip", t("All"));
+    pickAll.type = "button";
+    pickAll.onclick = () => { base.followers = sorted.filter((a) => a.id !== base.agent).map((a) => a.id); base.plan = null; drawBase(); };
+    chips.append(pickAll);
+    for (const a of sorted) {
+      if (a.id === base.agent) continue;
+      const on = base.followers.includes(a.id);
+      const c = el("button", "chip" + (on ? " on" : ""), label(a));
+      c.type = "button";
+      c.setAttribute("aria-pressed", String(on));
+      c.onclick = () => {
+        base.followers = on ? base.followers.filter((x) => x !== a.id) : [...base.followers, a.id];
+        base.plan = null;
+        drawBase();
+      };
+      chips.append(c);
+    }
+    box.append(ui.row(t("Followers"), "", chips));
+    const acts = el("div", "env-acts");
+    const preview = ui.button(t("Preview changes"), () => runBase("preview"));
+    preview.disabled = !base.followers.length || base.busy;
+    const apply = ui.button(t("Follow"), () => runBase("apply"), "text primary");
+    apply.disabled = !base.plan || base.busy;
+    acts.append(preview, apply);
+    if (saved) {
+      const off = ui.button(t("Stop following"), () => runBase("off"), "text");
+      off.disabled = base.busy;
+      acts.append(off);
+    }
+    box.append(acts);
+    if (base.plan) box.append(planView(base.plan));
+  }
+
+  async function runBase(how) {
+    if (how === "apply" && !(await confirmAction(t("Follow the main agent"), t("The followers get exactly what the main agent has in the Library, now and after every change; a follower's own skill in the way is kept with the backups. Go on?"), t("Follow")))) return;
+    base.busy = true;
+    drawBase();
+    try {
+      if (how === "preview") {
+        base.plan = await api("environments/baseline/preview", { agent: base.agent, followers: base.followers });
+      } else {
+        const r = await api("environments/baseline", how === "off" ? { agent: "" } : { agent: base.agent, followers: base.followers });
+        base.saved = r.baseline;
+        base.plan = null;
+        const n = (r.result?.problems || []).length;
+        status(how === "off" ? t("Agents no longer follow a main agent") : n ? t("Following, with {n} problems", { n }) : t("Following"), n ? "err" : "");
+      }
+    } catch (e) {
+      status(e.message, "err");
+    }
+    base.busy = false;
+    drawBase();
+  }
 
   // every agent in any environment, by id, with its environment
   function allAgents() {

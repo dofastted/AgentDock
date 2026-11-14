@@ -56,6 +56,8 @@ Conflict rule: keep upstream hunks and AgentDock hunks when they are not the sam
 | `internal/library/mcp_hub.go` | the MCP router runs this machine's variant of a server |
 | `internal/library/mcp_wsl.go` | `side` resolves the environment's variant first, and refuses a cross-environment Linux command for a Windows agent |
 | `internal/library/self_here.go` | the engine's own binary name counts as magpie's own, so `heal` can repoint a moved build |
+| `internal/library/library.go` | `Library.Baseline`; `changeLocked` mirrors the baseline onto its followers before saving and settles a follower's own skill in the library's way after the sync |
+| `internal/library/skills.go` | `useLibrarySkill` factored out of `UseLibrarySkills` for the baseline's followers |
 | `internal/library/skills.go` | environment-local shared skills, no import-on-browse |
 | `internal/library/subagents.go` | WSL subagents |
 | `internal/library/sync.go` | native files are not moved by library sync; a server save that omits `variants` keeps them, as it does the tools turned off; the written server is the agent's own variant |
@@ -86,6 +88,7 @@ No upstream counterpart at the current split.
 - `internal/gui/native.go` — per-root paging (`ReadNativeRoot`); unfinished, not smoke-tested (`7737ccc`)
 - `internal/library/bindings.go`
 - `internal/library/mcp_variants.go`, `internal/library/mcp_variants_test.go` — one MCP entry per server with a command for each environment (`windows`, `wsl`, `wsl:<distro>`, an agent id), and the Linux-on-Windows refusal
+- `internal/library/baseline.go`, `internal/library/baseline_test.go`, `internal/environments/baseline.go` — a main agent whose Library ticks its followers mirror on every change
 - `internal/library/hooks_wsl.go`, `internal/library/subagents_wsl.go`
 - `internal/library/native.go`, `native_copy.go`, `native_file.go`, `native_ownership.go`, `native_wsl.go` and their tests — in-place native inventory; `native.go` paging unfinished
 - `internal/library/wsl_env_targets_test.go`, `internal/library/wsl_hooks_test.go`
