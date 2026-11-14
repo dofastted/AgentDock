@@ -212,6 +212,16 @@ func targetOf(a *agent.Agent) *Target {
 	if t != nil && t.MCP != nil {
 		t.MCP.Agent = a.ID
 	}
+	// AgentDock: a WSL agent whose skills folder is a link the distro has
+	// (omp's profiles: skills -> ../../../agent/skills) is given the folder
+	// it leads to. Windows can't see through such a link, so every skill
+	// looked missing and was linked again with wsl.exe at every sync; and
+	// the agent sharing that folder is now known as its sharer.
+	if t != nil && a.WSL != "" && t.Skills != "" {
+		if r := realDir(t.Skills); r != filepath.Clean(t.Skills) && agent.WSLInDistro(a, r) {
+			t.Skills = r
+		}
+	}
 	return t
 }
 

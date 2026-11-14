@@ -3052,7 +3052,7 @@ func treeOf(root string) (tree, bool) {
 			}
 			return nil
 		}
-		if n := d.Name(); n == ".DS_Store" || n == marker || n == ".git" {
+		if n := d.Name(); n == ".DS_Store" || n == marker || n == ".git" || n == "__pycache__" {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

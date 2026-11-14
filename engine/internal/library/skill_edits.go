@@ -19,7 +19,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/agent"
 )
 
 // takeEdits takes into the library the newest edit made in an agent's copy
@@ -31,6 +34,32 @@ func (l *Library) takeEdits(targets []*Target, res *Result) {
 			l.blockedSkills = map[string]bool{}
 		}
 		l.blockedSkills[realDir(p)] = true
+	}
+	// AgentDock: the times of every copy in a distro's store, read with one
+	// wsl.exe per store rather than a walk through \\wsl.localhost per copy
+	type storeTimes struct{ changed, marked map[string]time.Time }
+	stores := map[string]*storeTimes{}
+	for _, t := range targets {
+		if t.Store == "" || t.Unreached != nil {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(t.Store))
+		if _, done := stores[key]; done {
+			continue
+		}
+		stores[key] = nil
+		if c, m, ok := agent.WSLTreeTimes(t.Store, marker); ok {
+			stores[key] = &storeTimes{c, m}
+		}
+	}
+	times := func(p string) (made, at time.Time, ok, known bool) {
+		st := stores[strings.ToLower(filepath.Dir(filepath.Clean(p)))]
+		if st == nil {
+			return time.Time{}, time.Time{}, false, false
+		}
+		name := filepath.Base(p)
+		made, ok = st.marked[name]
+		return made, st.changed[name], ok, true
 	}
 	for _, s := range l.Skills {
 		lib := realDir(skillDir(s.Name))
@@ -57,13 +86,17 @@ func (l *Library) takeEdits(targets []*Target, res *Result) {
 				continue
 			}
 			seen[realDir(p)] = true
-			made, ok := copiedAt(p)
-			if !ok {
-				continue
+			made, at, ok, known := times(p)
+			if !known {
+				if made, ok = copiedAt(p); ok {
+					var err error
+					if at, err = changedAt(p); err != nil {
+						failed(t.Agent.ID, s.Name, p, err)
+						continue
+					}
+				}
 			}
-			at, err := changedAt(p)
-			if err != nil {
-				failed(t.Agent.ID, s.Name, p, err)
+			if !ok {
 				continue
 			}
 			if !at.After(made) {
@@ -194,7 +227,8 @@ func changedAt(dir string) (time.Time, error) {
 }
 
 func skipInSkill(name string) bool {
-	return name == marker || name == ".git" || name == ".DS_Store"
+	// AgentDock: Python's bytecode cache is written by running a skill, not an edit of it
+	return name == marker || name == ".git" || name == ".DS_Store" || name == "__pycache__"
 }
 
 // keepLibrarySkill copies the library's skill to the backups before an
