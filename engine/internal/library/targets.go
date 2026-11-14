@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Target is where one agent keeps each of the three: an empty path is
@@ -1069,6 +1070,10 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 	for _, a := range apps() {
 		own[a.ID] = true
 	}
+	off := map[string]bool{}
+	for _, id := range settings.Load().AgentsHidden {
+		off[id] = true
+	}
 	for _, a := range agent.All() {
 		// the agents here, and a folder an agent shares with its vendor's
 		// other app when only that app is here: the Cursor editor reads
@@ -1085,6 +1090,12 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 		// Agents page calls the agent gone and offers none of its settings,
 		// since nothing reads them; the library gives nothing to it either
 		if !gone && a.CLIMissing() {
+			continue
+		}
+		// AgentDock: an agent the user folded away on the Agents page is off
+		// for the library: nothing is read from or written into it, so a
+		// change costs no work (no file looks, no wsl.exe) for agents not used
+		if off[a.ID] {
 			continue
 		}
 		if isAsleep(a) {
