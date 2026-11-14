@@ -2160,7 +2160,9 @@ func SkillAgents(name string, agents []string) (*Result, error) {
 		if s == nil {
 			return fmt.Errorf("no skill called %s", name)
 		}
+		was := slices.Clone(s.Agents)
 		s.Agents = slices.Sorted(slices.Values(agents))
+		l.liftToBaseline(s, was)
 		return nil
 	})
 }
@@ -2204,7 +2206,9 @@ func skillsAgents(names, agents []string, on bool) (*Result, error) {
 			if on {
 				kept = append(kept, agents...)
 			}
+			was := slices.Clone(s.Agents)
 			s.Agents = slices.Sorted(slices.Values(kept))
+			l.liftToBaseline(s, was)
 		}
 		return nil
 	})
@@ -2260,7 +2264,22 @@ func removeSkill(l *Library, name, stamp string) error {
 	case errors.Is(err, fs.ErrNotExist):
 		// its folder is gone already: only the entry goes
 	case err == nil && (fi.Mode()&fs.ModeSymlink != 0 || linked(p)): // a junction too, as the page says
-		if err := os.Remove(p); err != nil { // a folder of the user's: only the link goes
+		// AgentDock: Remove means the skill's data goes, not only the link,
+		// or the folder it linked to is found and brought in again. Its
+		// files are moved to the backup stamped so first (never deleted),
+		// then the link is taken away.
+		if to := realDir(p); to != filepath.Clean(p) {
+			if _, err := os.Stat(filepath.Join(to, "SKILL.md")); err == nil {
+				aside := filepath.Join(BackupDir(), stamp, "skills", name)
+				if err := os.MkdirAll(filepath.Dir(aside), 0o700); err != nil {
+					return err
+				}
+				if err := move(to, aside); err != nil {
+					return fmt.Errorf("couldn't move %s, which the skill links to, to the backups: %w", to, err)
+				}
+			}
+		}
+		if err := unlink(p); err != nil {
 			return err
 		}
 	default:

@@ -44,7 +44,10 @@ func SetSkillsWhere(where string) (*Result, error) {
 // keepsShared is whether the library puts its skill s in ~/.agents/skills:
 // the setting is on, the skill is on here and its folder is there.
 func (l *Library) keepsShared(s *Skill) bool {
-	if !l.SharedSkills || s == nil || s.OffHere {
+	// AgentDock: a skill unticked for every agent is off, so it leaves
+	// ~/.agents/skills too; otherwise "turn all off" left every agent
+	// that reads the shared folder with every skill.
+	if !l.SharedSkills || s == nil || s.OffHere || len(s.Agents) == 0 {
 		return false
 	}
 	_, err := os.Stat(filepath.Join(skillDir(s.Name), "SKILL.md"))

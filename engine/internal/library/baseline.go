@@ -75,6 +75,24 @@ func (l *Library) followBaseline() {
 	}
 }
 
+// liftToBaseline takes a tick the user changed on a follower, the
+// baseline's own left as it was, onto the baseline, so followBaseline
+// spreads it instead of putting the old one back: turning a skill off for
+// claude (a follower) turned it straight back on. was is the skill's
+// agents before the change.
+func (l *Library) liftToBaseline(s *Skill, was []string) {
+	b := l.Baseline
+	if b == nil || b.Agent == "" || slices.Contains(was, b.Agent) != slices.Contains(s.Agents, b.Agent) {
+		return
+	}
+	for _, f := range b.Followers {
+		if on := slices.Contains(s.Agents, f); on != slices.Contains(was, f) {
+			s.Agents = set(s.Agents, b.Agent, on)
+			return
+		}
+	}
+}
+
 // settleFollowers puts the library's skill in place of a follower's own
 // one that stood in its way in res, and says whether it did any (the
 // agents are then written again). Claude Desktop's own skills are its

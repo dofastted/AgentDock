@@ -71,7 +71,10 @@ func (l *Library) mirror(from string, targets []string) {
 		}
 		l.Instructions.Agents = set(l.Instructions.Agents, to, slices.Contains(l.Instructions.Agents, from))
 		for _, s := range l.MCP {
-			s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from))
+			// AgentDock: a server only a Linux program starts isn't given to
+			// a Windows follower it can't start for (it would be refused at
+			// every sync: "it runs a Linux program …")
+			s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from) && !linuxOnlyFor(s, to))
 		}
 		for _, s := range l.Skills {
 			s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from))

@@ -46,16 +46,20 @@ func TestRemoveSkills(t *testing.T) {
 			t.Errorf("%s is still there", d)
 		}
 	}
-	// the user's folders stay; the library's own is kept aside, in one backup
+	// AgentDock: every skill's data goes, linked folders too, all kept
+	// aside in one backup
 	for _, d := range []string{"pdf", "xlsx"} {
-		if _, err := os.Stat(filepath.Join(src, d, "SKILL.md")); err != nil {
-			t.Errorf("the user's %s went with it", d)
+		if _, err := os.Stat(filepath.Join(src, d)); !os.IsNotExist(err) {
+			t.Errorf("%s is still where it was linked from", d)
 		}
 	}
 	kept, _ := filepath.Glob(filepath.Join(BackupDir(), "*", "skills", "*"))
-	if len(kept) != 1 || filepath.Base(kept[0]) != "notes" {
+	if len(kept) != 3 {
 		t.Errorf("kept aside: %v", kept)
-	} else if _, err := os.Stat(filepath.Join(kept[0], "SKILL.md")); err != nil {
-		t.Error("notes' folder wasn't kept whole")
+	}
+	for _, k := range kept {
+		if _, err := os.Stat(filepath.Join(k, "SKILL.md")); err != nil {
+			t.Errorf("%s wasn't kept whole", filepath.Base(k))
+		}
 	}
 }

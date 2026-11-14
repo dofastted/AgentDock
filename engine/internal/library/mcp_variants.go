@@ -113,6 +113,17 @@ func errLinuxOnWindows(s *Server) error {
 	return fmt.Errorf("it runs a Linux program (%s), which an agent on Windows can't start: give it a Windows command in the server's windows variant", s.Command)
 }
 
+// linuxOnlyFor is whether s, as agent id would be given it, is a Linux
+// program an agent on this Windows machine can't start: the baseline's
+// tick is not copied onto such a follower (bindings.go mirror).
+func linuxOnlyFor(s *Server, id string) bool {
+	if runtime.GOOS != "windows" || strings.Contains(id, "@wsl:") || s.Remote() {
+		return false
+	}
+	cmd := s.variantFor(variantKeys(id, "", false)...)
+	return !isSelf(cmd) && linuxPath.MatchString(cmd.Command)
+}
+
 // crossEnv is whether s is one entry for several environments: it has a
 // variant, or an agent in WSL has it. Only such a server's command is
 // held to one environment; a command typed for this machine's agents

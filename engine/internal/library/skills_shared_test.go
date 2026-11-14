@@ -199,10 +199,10 @@ func TestSkillsWhereShared(t *testing.T) {
 		t.Error("on again, pdf isn't back")
 	}
 
-	// a skill unticked everywhere is still in the shared folder
+	// AgentDock: a skill unticked everywhere is off, and leaves the shared folder
 	ok(t)(SkillAgents("pdf", nil))
-	if !ours(pdf, "pdf") {
-		t.Error("unticked, pdf left ~/.agents/skills")
+	if _, err := os.Lstat(pdf); !os.IsNotExist(err) {
+		t.Errorf("unticked everywhere, pdf stays in ~/.agents/skills: %v", err)
 	}
 
 	// back to each agent's folder: magpie's links there go, nothing else
