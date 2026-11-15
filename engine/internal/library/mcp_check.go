@@ -641,6 +641,8 @@ func startServer(ctx context.Context, s *Server, distro, dir string) (tree *proc
 // checkStdioAt starts the command on this machine, or in WSL distro, and
 // asks it for its tools.
 func checkStdioAt(ctx context.Context, s *Server, distro string) ServerHealth {
+	// AgentDock: the command started is the one the agents there are given
+	s = s.variantFor(variantKeys("", distro, distro != "")...)
 	h := checkStdioIn(ctx, s, distro, "")
 	if distro == "" && h.Why == "exited" {
 		return inProject(ctx, s, h)

@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Target is where one agent keeps each of the three: an empty path is
@@ -201,10 +202,27 @@ func codexDir() string { return appdir.CodexHomeIn(home()) }
 // targetOf is where a known agent keeps them, or nil for one magpie can't
 // give any of them to.
 func targetOf(a *agent.Agent) *Target {
+	var t *Target
 	if a.WSL != "" {
-		return wslTargetOf(a)
+		t = wslTargetOf(a)
+	} else {
+		t = hostTargetOf(a)
 	}
-	return hostTargetOf(a)
+	// AgentDock: the agent's own variant of a server (mcp_variants.go)
+	if t != nil && t.MCP != nil {
+		t.MCP.Agent = a.ID
+	}
+	// AgentDock: a WSL agent whose skills folder is a link the distro has
+	// (omp's profiles: skills -> ../../../agent/skills) is given the folder
+	// it leads to. Windows can't see through such a link, so every skill
+	// looked missing and was linked again with wsl.exe at every sync; and
+	// the agent sharing that folder is now known as its sharer.
+	if t != nil && a.WSL != "" && t.Skills != "" {
+		if r := realDir(t.Skills); r != filepath.Clean(t.Skills) && agent.WSLInDistro(a, r) {
+			t.Skills = r
+		}
+	}
+	return t
 }
 
 // hostTargetOf is targetOf for an agent on this machine, or a WSL agent
@@ -1062,6 +1080,10 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 	for _, a := range apps() {
 		own[a.ID] = true
 	}
+	off := map[string]bool{}
+	for _, id := range settings.Load().AgentsHidden {
+		off[id] = true
+	}
 	for _, a := range agent.All() {
 		// the agents here, and a folder an agent shares with its vendor's
 		// other app when only that app is here: the Cursor editor reads
@@ -1078,6 +1100,12 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 		// Agents page calls the agent gone and offers none of its settings,
 		// since nothing reads them; the library gives nothing to it either
 		if !gone && a.CLIMissing() {
+			continue
+		}
+		// AgentDock: an agent the user folded away on the Agents page is off
+		// for the library: nothing is read from or written into it, so a
+		// change costs no work (no file looks, no wsl.exe) for agents not used
+		if off[a.ID] {
 			continue
 		}
 		if isAsleep(a) {

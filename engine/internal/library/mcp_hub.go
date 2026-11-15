@@ -221,7 +221,8 @@ func (l *Library) hubServers(agentID string) []*Server {
 			}
 		}
 		if on && inHub(s, id) {
-			out = append(out, s)
+			// AgentDock: the router runs it on this machine (mcp_variants.go)
+			out = append(out, s.variantFor(variantKeys("", "", false)...))
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })

@@ -58,24 +58,32 @@ func (l *Library) bindingsOf(id string) Bindings {
 // can't take is said in the result, as when the user ticks it.
 func MirrorBindings(from string, targets []string) (*Result, error) {
 	return change(func(l *Library) error {
-		for _, to := range targets {
-			if to == from {
-				continue
-			}
-			l.Instructions.Agents = set(l.Instructions.Agents, to, slices.Contains(l.Instructions.Agents, from))
-			for _, s := range l.MCP {
-				s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from))
-			}
-			for _, s := range l.Skills {
-				s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from))
-			}
-			for _, h := range l.Hooks {
-				h.Agents = orNone(set(h.Agents, to, slices.Contains(h.Agents, from)))
-			}
-			for _, s := range l.Subagents {
-				s.Agents = orNone(set(s.Agents, to, slices.Contains(s.Agents, from)))
-			}
-		}
+		l.mirror(from, targets)
 		return nil
 	})
+}
+
+// mirror ticks for each of targets exactly what from has ticked.
+func (l *Library) mirror(from string, targets []string) {
+	for _, to := range targets {
+		if to == from {
+			continue
+		}
+		l.Instructions.Agents = set(l.Instructions.Agents, to, slices.Contains(l.Instructions.Agents, from))
+		for _, s := range l.MCP {
+			// AgentDock: a server only a Linux program starts isn't given to
+			// a Windows follower it can't start for (it would be refused at
+			// every sync: "it runs a Linux program …")
+			s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from) && !linuxOnlyFor(s, to))
+		}
+		for _, s := range l.Skills {
+			s.Agents = set(s.Agents, to, slices.Contains(s.Agents, from))
+		}
+		for _, h := range l.Hooks {
+			h.Agents = orNone(set(h.Agents, to, slices.Contains(h.Agents, from)))
+		}
+		for _, s := range l.Subagents {
+			s.Agents = orNone(set(s.Agents, to, slices.Contains(s.Agents, from)))
+		}
+	}
 }

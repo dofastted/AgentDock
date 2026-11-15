@@ -32,7 +32,21 @@ func isSelf(s *Server) bool {
 // agent in WSL, by the binary's path there; an error says why the agent
 // can't start s.
 func (f *mcpFile) side(s *Server) (*Server, error) {
+	cmd, key := f.resolveWith(s)
+	if linuxOnWindows(f, s, cmd) {
+		return nil, errLinuxOnWindows(cmd)
+	}
+	s = cmd
 	if !f.WSL || s.Remote() || !windowsPath.MatchString(s.Command) {
+		return s, nil
+	}
+	// AgentDock: a command named for this environment is that
+	// environment's own. A Windows program the distro starts through WSL's
+	// interop, by its path there (/mnt/d/…/feedback.exe, as the user's
+	// agents.yaml had it), is the user's to name: magpie leaves it as it
+	// is, and the paths it is given are the distro's to get right. A
+	// Windows path (C:\…) is still no command the distro can start.
+	if key != "" && linuxPath.MatchString(s.Command) {
 		return s, nil
 	}
 	if !isSelf(s) || f.Distro == "" {

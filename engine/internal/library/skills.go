@@ -2160,7 +2160,9 @@ func SkillAgents(name string, agents []string) (*Result, error) {
 		if s == nil {
 			return fmt.Errorf("no skill called %s", name)
 		}
+		was := slices.Clone(s.Agents)
 		s.Agents = slices.Sorted(slices.Values(agents))
+		l.liftToBaseline(s, was)
 		return nil
 	})
 }
@@ -2204,7 +2206,9 @@ func skillsAgents(names, agents []string, on bool) (*Result, error) {
 			if on {
 				kept = append(kept, agents...)
 			}
+			was := slices.Clone(s.Agents)
 			s.Agents = slices.Sorted(slices.Values(kept))
+			l.liftToBaseline(s, was)
 		}
 		return nil
 	})
@@ -2260,7 +2264,22 @@ func removeSkill(l *Library, name, stamp string) error {
 	case errors.Is(err, fs.ErrNotExist):
 		// its folder is gone already: only the entry goes
 	case err == nil && (fi.Mode()&fs.ModeSymlink != 0 || linked(p)): // a junction too, as the page says
-		if err := os.Remove(p); err != nil { // a folder of the user's: only the link goes
+		// AgentDock: Remove means the skill's data goes, not only the link,
+		// or the folder it linked to is found and brought in again. Its
+		// files are moved to the backup stamped so first (never deleted),
+		// then the link is taken away.
+		if to := realDir(p); to != filepath.Clean(p) {
+			if _, err := os.Stat(filepath.Join(to, "SKILL.md")); err == nil {
+				aside := filepath.Join(BackupDir(), stamp, "skills", name)
+				if err := os.MkdirAll(filepath.Dir(aside), 0o700); err != nil {
+					return err
+				}
+				if err := move(to, aside); err != nil {
+					return fmt.Errorf("couldn't move %s, which the skill links to, to the backups: %w", to, err)
+				}
+			}
+		}
+		if err := unlink(p); err != nil {
 			return err
 		}
 	default:
@@ -2298,35 +2317,43 @@ func UseLibrarySkill(name, agentID string) (*Result, error) {
 func UseLibrarySkills(names []string, agentID string) (*Result, error) {
 	return change(func(l *Library) error {
 		for _, name := range names {
-			s, t, err := ownSkill(l, name, agentID)
-			if err != nil {
+			if err := useLibrarySkill(l, name, agentID); err != nil {
 				return err
-			}
-			if len(t.Desktop) > 0 {
-				return fmt.Errorf("Claude Desktop keeps its own %s: it can't be put aside for the library's, only kept", name)
-			}
-			p := filepath.Join(t.Skills, name)
-			if _, err := os.Lstat(p); err == nil && !ours(p, name) && realDir(p) != realDir(skillDir(name)) {
-				if _, err := setAside(t.Agent.ID, p); err != nil {
-					return err
-				}
-			}
-			// its own by that name is the user's in ~/.agents/skills, which
-			// it reads besides its own folder: that one is set aside (every
-			// other reader of the folder had it as its own too)
-			if t.readsSharedDir() && realDir(t.Skills) != realDir(sharedSkillsDir()) {
-				if q, same := readSharedOwn().rival(name); q != "" && !same {
-					if _, err := setAside(t.Agent.ID, q); err != nil {
-						return err
-					}
-				}
-			}
-			if !slices.Contains(s.Agents, t.Agent.ID) && !slices.ContainsFunc(sharing(t), func(o string) bool { return slices.Contains(s.Agents, o) }) {
-				s.Agents = set(s.Agents, t.Agent.ID, true)
 			}
 		}
 		return nil
 	})
+}
+
+// useLibrarySkill is UseLibrarySkills for one skill, the library held.
+func useLibrarySkill(l *Library, name, agentID string) error {
+	s, t, err := ownSkill(l, name, agentID)
+	if err != nil {
+		return err
+	}
+	if len(t.Desktop) > 0 {
+		return fmt.Errorf("Claude Desktop keeps its own %s: it can't be put aside for the library's, only kept", name)
+	}
+	p := filepath.Join(t.Skills, name)
+	if _, err := os.Lstat(p); err == nil && !ours(p, name) && realDir(p) != realDir(skillDir(name)) {
+		if _, err := setAside(t.Agent.ID, p); err != nil {
+			return err
+		}
+	}
+	// its own by that name is the user's in ~/.agents/skills, which
+	// it reads besides its own folder: that one is set aside (every
+	// other reader of the folder had it as its own too)
+	if t.readsSharedDir() && realDir(t.Skills) != realDir(sharedSkillsDir()) {
+		if q, same := readSharedOwn().rival(name); q != "" && !same {
+			if _, err := setAside(t.Agent.ID, q); err != nil {
+				return err
+			}
+		}
+	}
+	if !slices.Contains(s.Agents, t.Agent.ID) && !slices.ContainsFunc(sharing(t), func(o string) bool { return slices.Contains(s.Agents, o) }) {
+		s.Agents = set(s.Agents, t.Agent.ID, true)
+	}
+	return nil
 }
 
 // KeepAgentSkill settles it the other way: the agent keeps its own, and
@@ -3025,7 +3052,7 @@ func treeOf(root string) (tree, bool) {
 			}
 			return nil
 		}
-		if n := d.Name(); n == ".DS_Store" || n == marker || n == ".git" {
+		if n := d.Name(); n == ".DS_Store" || n == marker || n == ".git" || n == "__pycache__" {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

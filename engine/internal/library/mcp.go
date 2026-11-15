@@ -92,6 +92,10 @@ type Server struct {
 	// it, and a sync carries it; no agent is given it (TestNoteNeverGiven).
 	Note string `json:"note,omitempty"`
 
+	// Variants are what the server runs in another environment (AgentDock,
+	// mcp_variants.go): by agent id, wsl:<distro>, wsl or windows.
+	Variants map[string]ServerVariant `json:"variants,omitempty"`
+
 	// about is the hub entry's description, for an agent that shows a
 	// server by one before it has connected (Pi, hubServerFor)
 	about string
@@ -193,6 +197,9 @@ func (s *Server) check() error {
 		if strings.TrimSpace(k) == "" {
 			delete(s.Headers, k)
 		}
+	}
+	if err := s.checkVariants(); err != nil {
+		return err
 	}
 	return s.checkAccounts()
 }
@@ -313,6 +320,9 @@ type mcpFile struct {
 	// Home its $HOME as the distro spells it
 	WSL          bool
 	Distro, Home string
+	// Agent is the id of the agent the file is (AgentDock: which of a
+	// server's variants it is given, mcp_variants.go)
+	Agent string
 	// Literal: what reads the file reads no reference to a variable
 	// (pi-mcp-extension), whatever its format's syntax (refsOf)
 	Literal bool
@@ -343,16 +353,21 @@ func (f *mcpFile) key() string {
 
 // supports says why the agent can't reach a server, or nil when it can.
 func (f *mcpFile) supports(s *Server) error {
-	if f.Format == fmtDesktop && s.Remote() {
+	// AgentDock: the checks below are of the server as this agent is
+	// given it (its environment's variant); side is asked of the server
+	// itself, so that it still knows which key named the command
+	// (mcp_variants.go, mcp_wsl.go side)
+	given := f.resolve(s)
+	if f.Format == fmtDesktop && given.Remote() {
 		return errNoRemote
 	}
-	if s.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose || f.Format == fmtDsh || f.Format == fmtPiNative || f.Format == fmtGrok || f.Format == fmtCommandCode || f.Format == fmtZed || f.Format == fmtKiro || f.Format == fmtLiveAgent) {
+	if given.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose || f.Format == fmtDsh || f.Format == fmtPiNative || f.Format == fmtGrok || f.Format == fmtCommandCode || f.Format == fmtZed || f.Format == fmtKiro || f.Format == fmtLiveAgent) {
 		return errNoSSE
 	}
-	if f.Format == fmtDsh && s.Name != "" && !dshServerName.MatchString(s.Name) {
+	if f.Format == fmtDsh && given.Name != "" && !dshServerName.MatchString(given.Name) {
 		return errDshName
 	}
-	if err := f.refsProblem(s); err != nil {
+	if err := f.refsProblem(given); err != nil {
 		return err
 	}
 	_, err := f.side(s)
@@ -1804,30 +1819,43 @@ func foundServers(l *Library) []Found { return foundServersOf(l, Targets()) }
 // foundServersOf is foundServers among these agents.
 func foundServersOf(l *Library, targets []*Target) []Found {
 	byName := map[string]*Found{}
+	// AgentDock: the environment each found server's own command came
+	// from, for another environment's to be its variant (foldVariant).
+	// This machine's agents go first, so the entry's own command is the
+	// one its agents here are given.
+	baseEnv := map[string]string{}
 	var names []string
-	for _, t := range targets {
-		if t.MCP == nil {
-			continue
-		}
-		have, err := t.MCP.read()
-		if err != nil {
-			continue
-		}
-		mine := l.applied(t.Agent.ID).MCP
-		for name, s := range have {
-			if slices.Contains(mine, name) || l.server(name) != nil || !nameRe.MatchString(name) {
+	for _, inWSL := range []bool{false, true} {
+		for _, t := range targets {
+			if (t.Agent.WSL != "") != inWSL {
 				continue
 			}
-			f := byName[name]
-			switch {
-			case f == nil:
-				s.Agents = []string{t.Agent.ID}
-				byName[name] = &Found{Server: s, Own: appOwned(s, t.Agent)}
-				names = append(names, name)
-			case f.Server.same(s):
-				f.Server.Agents = append(f.Server.Agents, t.Agent.ID)
-			default:
-				f.Others = append(f.Others, t.Agent.ID)
+			if t.MCP == nil {
+				continue
+			}
+			have, err := t.MCP.read()
+			if err != nil {
+				continue
+			}
+			mine := l.applied(t.Agent.ID).MCP
+			for name, s := range have {
+				if slices.Contains(mine, name) || l.server(name) != nil || !nameRe.MatchString(name) {
+					continue
+				}
+				f := byName[name]
+				switch {
+				case f == nil:
+					s.Agents = []string{t.Agent.ID}
+					byName[name] = &Found{Server: s, Own: appOwned(s, t.Agent)}
+					baseEnv[name] = variantKeyOf(t.Agent)
+					names = append(names, name)
+				case f.Server.same(s):
+					f.Server.Agents = append(f.Server.Agents, t.Agent.ID)
+				case foldVariant(f, baseEnv[name], s, t.Agent):
+					f.Server.Agents = append(f.Server.Agents, t.Agent.ID)
+				default:
+					f.Others = append(f.Others, t.Agent.ID)
+				}
 			}
 		}
 	}

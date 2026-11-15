@@ -10,6 +10,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/environments"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -249,6 +250,118 @@ func environmentRoutes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(rw, p)
+	})
+	// the main agent the others follow (library.Baseline)
+	mux.HandleFunc("GET /api/environments/baseline", func(rw http.ResponseWriter, r *http.Request) {
+		b, err := library.BaselineOf()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, b)
+	})
+	mux.HandleFunc("POST /api/environments/baseline", func(rw http.ResponseWriter, r *http.Request) {
+		var in library.Baseline
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		res, err := library.SetBaseline(in.Agent, in.Followers)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		b, _ := library.BaselineOf()
+		writeJSON(rw, map[string]any{"baseline": b, "result": res})
+	})
+	mux.HandleFunc("POST /api/environments/baseline/preview", func(rw http.ResponseWriter, r *http.Request) {
+		var in library.Baseline
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		p, err := environments.BaselinePreview(in.Agent, in.Followers)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	// a clean start: archive what the agents have that the library didn't
+	// give them, take it out, put it back from an archive (library/reset.go)
+	type resetIn struct {
+		Agents       []string `json:"agents"`
+		Instructions bool     `json:"instructions"`
+		ID           string   `json:"id"`
+	}
+	readReset := func(rw http.ResponseWriter, r *http.Request) (resetIn, bool) {
+		var in resetIn
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return in, false
+		}
+		return in, true
+	}
+	mux.HandleFunc("GET /api/environments/resets", func(rw http.ResponseWriter, r *http.Request) {
+		rs, err := library.Resets()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, map[string]any{"resets": rs})
+	})
+	mux.HandleFunc("POST /api/environments/reset/preview", func(rw http.ResponseWriter, r *http.Request) {
+		in, ok := readReset(rw, r)
+		if !ok {
+			return
+		}
+		p, err := library.ResetPreview(in.Agents, in.Instructions)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	mux.HandleFunc("POST /api/environments/reset", func(rw http.ResponseWriter, r *http.Request) {
+		in, ok := readReset(rw, r)
+		if !ok {
+			return
+		}
+		rec, res, err := library.Reset(in.Agents, in.Instructions)
+		out := map[string]any{"reset": rec, "result": res}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		writeJSON(rw, out)
+	})
+	mux.HandleFunc("POST /api/environments/reset/restore", func(rw http.ResponseWriter, r *http.Request) {
+		in, ok := readReset(rw, r)
+		if !ok {
+			return
+		}
+		res, err := library.RestoreReset(in.ID)
+		out := map[string]any{"result": res}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		writeJSON(rw, out)
+	})
+	// a tidy-up across the environments (library/doctor.go), restored as a reset is
+	mux.HandleFunc("GET /api/environments/doctor", func(rw http.ResponseWriter, r *http.Request) {
+		p, err := library.DoctorPreview()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	mux.HandleFunc("POST /api/environments/doctor", func(rw http.ResponseWriter, r *http.Request) {
+		rec, res, err := library.Doctor()
+		out := map[string]any{"reset": rec, "result": res}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		writeJSON(rw, out)
 	})
 	mux.HandleFunc("POST /api/environments/sync/apply", func(rw http.ResponseWriter, r *http.Request) {
 		in, ok := readSync(rw, r)

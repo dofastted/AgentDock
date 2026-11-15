@@ -815,8 +815,12 @@ func TestSkillsFromFolder(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(h, ".claude/skills/pdf")); !os.IsNotExist(err) {
 		t.Error("claude still has it")
 	}
-	if _, err := os.Stat(filepath.Join(src, "pdf/SKILL.md")); err != nil {
-		t.Error("the user's folder went with it")
+	// AgentDock: Remove takes the skill's data out too, kept in the backups
+	if _, err := os.Stat(filepath.Join(src, "pdf")); !os.IsNotExist(err) {
+		t.Error("the folder the skill linked to is still there")
+	}
+	if kept, _ := filepath.Glob(filepath.Join(BackupDir(), "*", "skills", "pdf", "SKILL.md")); len(kept) != 1 {
+		t.Errorf("pdf wasn't kept in the backups: %v", kept)
 	}
 }
 
