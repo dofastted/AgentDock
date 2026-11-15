@@ -21,6 +21,8 @@ magpie.plugin("environments", (ctx) => {
     <section class="list env-list" id="envList" aria-live="polite"></section>
     <div class="row-head"><span class="label" data-t>Main agent</span><span class="note" data-t>the agents picked follow its Library setup</span></div>
     <section class="list env-sync" id="envBase"></section>
+    <div class="row-head"><span class="label" data-t>Tidy up</span><span class="note" data-t>skills kept in WSL, servers an agent can't start, links to nothing</span></div>
+    <section class="list env-sync" id="envDoctor"></section>
     <div class="row-head"><span class="label" data-t>Clean start</span><span class="note" data-t>archive what the Library didn't give, take it out, restore any time</span></div>
     <section class="list env-sync" id="envReset"></section>
     <div class="row-head"><span class="label" data-t>Copy an agent's setup</span><span class="note" data-t>onto the same agent in other environments</span></div>
@@ -51,6 +53,8 @@ function environmentsPage(ctx) {
   let base = { saved: null, agent: "", followers: [], plan: null, busy: false };
   // a clean start (library/reset.go): the agents picked, the preview, the archives kept
   let reset = { agents: null, instructions: false, plan: null, list: [], busy: false };
+  // a tidy-up across the environments (library/doctor.go)
+  let doctor = { plan: null, busy: false };
   let polling = 0;
 
   const agentName = (id) => (state.agents || []).find((a) => a.id === id)?.name || id;
@@ -83,6 +87,7 @@ function environmentsPage(ctx) {
     drawNotices();
     drawList();
     drawBase();
+    drawDoctor();
     drawReset();
     drawSync();
     drawNet();
@@ -284,6 +289,61 @@ function environmentsPage(ctx) {
 
   // ---------- a clean start ----------
 
+  function drawDoctor() {
+    const box = $("#envDoctor");
+    if (!box || !s) return;
+    box.replaceChildren();
+    const acts = el("div", "env-acts");
+    const look = ui.button(t("Check"), () => runDoctor("preview"));
+    look.disabled = doctor.busy;
+    const go = ui.button(t("Archive and fix"), () => runDoctor("apply"), "text primary");
+    go.disabled = !doctor.plan || !doctor.plan.items.length || doctor.busy;
+    acts.append(look, go);
+    box.append(ui.row(t("Check every environment"), t("Found items are archived first; Restore below puts them back."), acts));
+    if (!doctor.plan) return;
+    const p = el("div", "env-plan");
+    if (!doctor.plan.items.length) p.append(el("div", "sub", t("Nothing to tidy up")));
+    const by = {};
+    for (const it of doctor.plan.items) (by[it.kind] ||= []).push(it);
+    const names = { absorb: t("Skills kept in WSL: move into the Library"), "mcp-env": t("Servers an agent can't start there: untick"), "broken-link": t("Links to nothing: remove") };
+    for (const [k, its] of Object.entries(by)) {
+      const card = el("div", "env-plan-target");
+      card.append(el("div", "name", names[k] || k));
+      const ul = el("ul");
+      for (const it of its) {
+        const li = el("li", "", (it.agent === "library" ? "" : it.agent + " · ") + it.name + (it.link ? " → " + it.link : ""));
+        if (it.why) li.title = it.why;
+        ul.append(li);
+      }
+      card.append(ul);
+      p.append(card);
+    }
+    for (const pr of doctor.plan.problems || []) p.append(el("div", "sub warn", pr.agent + " " + pr.what + ": " + pr.error));
+    box.append(p);
+  }
+
+  async function runDoctor(how) {
+    if (how === "apply" && !(await confirmAction(t("Archive and fix"), t("Everything listed is archived, then fixed. Restore puts it back. Go on?"), t("Archive and fix")))) return;
+    doctor.busy = true;
+    drawDoctor();
+    try {
+      if (how === "preview") doctor.plan = await api("environments/doctor");
+      else {
+        const r = await api("environments/doctor", {});
+        doctor.plan = null;
+        const n = r.result?.problems?.length || 0;
+        status(r.error ? r.error : n ? t("Fixed, with {n} problems", { n }) : t("Fixed"), r.error ? "err" : "");
+        const l = await api("environments/resets");
+        reset.list = l.resets || [];
+        drawReset();
+      }
+    } catch (e) {
+      status(e.message, "err");
+    }
+    doctor.busy = false;
+    drawDoctor();
+  }
+
   function drawReset() {
     const box = $("#envReset");
     if (!box || !s) return;
@@ -334,7 +394,7 @@ function environmentsPage(ctx) {
     for (const r of reset.list.slice(0, 5)) {
       const restore = ui.button(t("Restore"), () => runReset("restore", r.id), "text");
       restore.disabled = reset.busy;
-      const sub = t("{n} items from {agents}", { n: r.items.length, agents: r.agents.join(", ") }) + (r.restored ? " · " + t("restored {at}", { at: new Date(r.restored).toLocaleString(intlLang()) }) : "");
+      const sub = (r.doctor ? t("Tidy-up, {n} items", { n: r.items.length }) : t("{n} items from {agents}", { n: r.items.length, agents: r.agents.join(", ") })) + (r.restored ? " · " + t("restored {at}", { at: new Date(r.restored).toLocaleString(intlLang()) }) : "");
       box.append(ui.row(t("Archive {id}", { id: r.id }), sub, restore));
     }
   }

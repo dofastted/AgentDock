@@ -41,6 +41,8 @@ type ResetItem struct {
 	Name  string `json:"name"`           // the skill, server or subagent; "" for instructions
 	Path  string `json:"path"`           // where it is, as magpie opens it
 	Link  string `json:"link,omitempty"` // where a link leads
+	// Why is, for a tidy-up's item (doctor.go), what is wrong with it
+	Why string `json:"why,omitempty"`
 }
 
 // ResetPlan is what a reset would take out; nothing is written.
@@ -63,6 +65,8 @@ type ResetRecord struct {
 	// Archives are the tar.gz of each environment's items, by env
 	Archives map[string]string `json:"archives"`
 	Restored string            `json:"restored,omitempty"`
+	// Doctor: a tidy-up (doctor.go) made it, not a clean start
+	Doctor bool `json:"doctor,omitempty"`
 }
 
 func resetsDir() string { return filepath.Join(BackupDir(), "resets") }
@@ -250,21 +254,7 @@ func resetLocked(ts []*Target, agents []string, instructions bool) (*ResetRecord
 			return nil, fmt.Errorf("archiving %s: %w", f, err)
 		}
 	}
-	// each environment's folders and files, in one tar.gz
-	for env, paths := range itemPaths(p.Items) {
-		var a string
-		if env == "windows" {
-			a = filepath.Join(dir, "windows.tgz")
-			err = tarWindows(a, paths)
-		} else {
-			a, err = tarWSL(strings.TrimPrefix(env, "wsl:"), id, paths, dir)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("archiving %s: %w", env, err)
-		}
-		rec.Archives[env] = a
-	}
-	if err := writeRecord(rec); err != nil {
+	if err := archiveItems(rec, dir); err != nil {
 		return nil, err
 	}
 	// only now, everything archived, take it out
@@ -308,6 +298,27 @@ func resetLocked(ts []*Target, agents []string, instructions bool) (*ResetRecord
 	return rec, errors.Join(errs...)
 }
 
+// archiveItems puts each environment's folders and files of rec's items
+// in one tar.gz (a distro's made by its own tar), then writes the record:
+// nothing is taken out before this has worked.
+func archiveItems(rec *ResetRecord, dir string) error {
+	for env, paths := range itemPaths(rec.Items) {
+		var a string
+		var err error
+		if env == "windows" {
+			a = filepath.Join(dir, "windows.tgz")
+			err = tarWindows(a, paths)
+		} else {
+			a, err = tarWSL(strings.TrimPrefix(env, "wsl:"), rec.ID, paths, dir)
+		}
+		if err != nil {
+			return fmt.Errorf("archiving %s: %w", env, err)
+		}
+		rec.Archives[env] = a
+	}
+	return writeRecord(rec)
+}
+
 // magpiePart is an instructions file with only magpie's part left.
 func magpiePart(file string) string {
 	i := strings.Index(file, blockBegin)
@@ -326,7 +337,7 @@ func magpiePart(file string) string {
 func itemPaths(items []ResetItem) map[string][]string {
 	out := map[string][]string{}
 	for _, it := range items {
-		if it.Kind == "mcp" || it.Kind == "instructions" || slices.Contains(out[it.Env], it.Path) {
+		if it.Kind == "mcp" || it.Kind == "instructions" || it.Kind == doctorMCPEnv || slices.Contains(out[it.Env], it.Path) {
 			continue
 		}
 		out[it.Env] = append(out[it.Env], it.Path)
@@ -611,5 +622,6 @@ func restoreLocked(r *ResetRecord, dir string) error {
 			errs = append(errs, err)
 		}
 	}
+	errs = append(errs, relinkAbsorbed(r)...)
 	return errors.Join(errs...)
 }

@@ -346,6 +346,23 @@ func environmentRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(rw, out)
 	})
+	// a tidy-up across the environments (library/doctor.go), restored as a reset is
+	mux.HandleFunc("GET /api/environments/doctor", func(rw http.ResponseWriter, r *http.Request) {
+		p, err := library.DoctorPreview()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	mux.HandleFunc("POST /api/environments/doctor", func(rw http.ResponseWriter, r *http.Request) {
+		rec, res, err := library.Doctor()
+		out := map[string]any{"reset": rec, "result": res}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		writeJSON(rw, out)
+	})
 	mux.HandleFunc("POST /api/environments/sync/apply", func(rw http.ResponseWriter, r *http.Request) {
 		in, ok := readSync(rw, r)
 		if !ok {

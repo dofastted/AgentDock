@@ -89,6 +89,7 @@ No upstream counterpart at the current split.
 - `internal/library/bindings.go`
 - `internal/library/mcp_variants.go`, `internal/library/mcp_variants_test.go` — one MCP entry per server with a command for each environment (`windows`, `wsl`, `wsl:<distro>`, an agent id), and the Linux-on-Windows refusal
 - `internal/library/baseline.go`, `internal/library/baseline_test.go`, `internal/environments/baseline.go` — a main agent whose Library ticks its followers mirror on every change
+- `internal/library/doctor.go`, `internal/library/doctor_test.go` — Environments › Tidy up: skills kept in a distro moved into the library, servers ticked for an agent that can't start them (`side` refuses) unticked, skills links to nothing removed (a distro's found by one `find -xtype l`); archived first as a reset (`archiveItems`, `ResetRecord.Doctor`), restored by `RestoreReset` (`relinkAbsorbed`). API `GET/POST /api/environments/doctor`
 - `internal/library/hooks_wsl.go`, `internal/library/subagents_wsl.go`
 - `internal/library/native.go`, `native_copy.go`, `native_file.go`, `native_ownership.go`, `native_wsl.go` and their tests — in-place native inventory; `native.go` paging unfinished
 - `internal/library/wsl_env_targets_test.go`, `internal/library/wsl_hooks_test.go`
